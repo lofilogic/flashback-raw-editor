@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+
+# build files
+build/
+dist/
+
+# macOS
+.DS_Store
+
+# Output files
+output/
+*.jpg
+*.tif
+
+# Cache
+*.cache
