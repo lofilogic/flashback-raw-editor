@@ -195,6 +195,8 @@ if _system == 'Darwin':
         icon='assets/icon.icns',
         bundle_identifier='com.julian.flashback',
         info_plist={
+            'CFBundleName': 'Flashback One35 v2',
+            'CFBundleDisplayName': 'Flashback One35 v2',
             'CFBundleShortVersionString': _app_version,
             'CFBundleVersion': _app_version,
             'NSHighResolutionCapable': 'True',

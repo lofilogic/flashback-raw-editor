@@ -138,7 +138,7 @@ def apply_chromatic_aberration(image, strength=CHROMATIC_ABERRATION_STRENGTH, st
 
     for i in range(steps):
         factor = i / max(1, steps - 1) if steps > 1 else 1.0
-        scale_z = 1.0 + (strength * factor)
+        scale_z = 1.0 + (strength * factor/4)
         M_z = cv2.getRotationMatrix2D(center, 0, scale_z)
         zoom_acc += cv2.warpAffine(ca_result, M_z, (w, h),
                                    flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
@@ -174,39 +174,47 @@ def reduce_color_noise_chroma(image, sigma=0.7):
     return np.stack([r_out, g_out, b_out], axis=2)
 
 
+def _halation_glow(img_f, gray, threshold, blur_radius, k=20.0):
+    """Compute one halation glow layer for a given threshold and radius."""
+    mask = 1.0 / (1.0 + np.exp(-k * (gray - threshold)))
+    mask = cv2.GaussianBlur(mask, (0, 0), sigmaX=2.0, sigmaY=2.0)
+    mask_3d = np.stack([mask, mask, mask], axis=2)
+    highlights = img_f * mask_3d
+    glow = np.zeros_like(highlights)
+    glow[:, :, 0] = cv2.GaussianBlur(highlights[:, :, 0] * 1.4, (0, 0), sigmaX=blur_radius)
+    glow[:, :, 1] = cv2.GaussianBlur(highlights[:, :, 1] * 0.6, (0, 0), sigmaX=blur_radius)
+    glow[:, :, 2] = cv2.GaussianBlur(highlights[:, :, 2] * 0.2, (0, 0), sigmaX=blur_radius)
+    return glow
+
+
 def apply_halation(img, threshold=HALATION_THRESHOLD, blur_radius=HALATION_BLUR_RADIUS, strength=HALATION_STRENGTH):
-    """Photorealistic halation using a sigmoid highlight mask and screen blend."""
+    """
+    Two-pass halation: regular highlights + extreme highlights with 3x radius.
+    The second pass targets only the very brightest areas (threshold + 0.15)
+    and spreads much wider, simulating the larger glow of intense light sources.
+    Both passes use the same parameters so debug sliders control both naturally.
+    """
     start_total = time.time()
 
     img_f = img.astype(np.float32)
     gray = np.max(img_f, axis=2)
-    k = 20.0
-    mask = 1.0 / (1.0 + np.exp(-k * (gray - threshold)))
 
-    start_blur = time.time()
-    mask = cv2.GaussianBlur(mask, (0, 0), sigmaX=2.0, sigmaY=2.0)
-    mask_blur_time = time.time() - start_blur
+    # Pass 1 — regular highlights
+    glow1 = _halation_glow(img_f, gray, threshold, blur_radius)
 
-    mask_3d = np.stack([mask, mask, mask], axis=2)
-    highlights = img_f * mask_3d
-    halation = np.zeros_like(highlights)
-    halation[:, :, 0] = highlights[:, :, 0] * 1.4
-    halation[:, :, 1] = highlights[:, :, 1] * 0.6
-    halation[:, :, 2] = highlights[:, :, 2] * 0.2
+    # Pass 2 — extreme highlights: higher threshold, 3x radius, 60% strength
+    threshold2 = min(threshold + 0.15, 0.98)
+    glow2 = _halation_glow(img_f, gray, threshold2, blur_radius * 3)
 
-    start_big_blur = time.time()
-    for c in range(3):
-        halation[:, :, c] = cv2.GaussianBlur(halation[:, :, c], (0, 0), sigmaX=blur_radius)
-    big_blur_time = time.time() - start_big_blur
+    glow_combined = (glow1 + glow2 * 0.6) * strength
 
-    glow_norm = halation * strength
     if HAS_NUMBA:
-        result = _screen_blend_numba(img_f, glow_norm)
+        result = _screen_blend_numba(img_f, glow_combined)
     else:
-        result = 1.0 - (1.0 - img_f) * (1.0 - glow_norm)
+        result = 1.0 - (1.0 - img_f) * (1.0 - glow_combined)
 
     total_time = time.time() - start_total
-    _timing_print(f"    [Halation] Mask blur: {mask_blur_time*1000:.2f}ms, Big blur: {big_blur_time*1000:.2f}ms, Total: {total_time*1000:.2f}ms")
+    _timing_print(f"    [Halation] Total: {total_time*1000:.2f}ms")
 
     return np.maximum(result, 0)
 

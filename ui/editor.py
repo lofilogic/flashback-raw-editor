@@ -31,7 +31,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QPixmap, QImage, QPainter, QColor, QPen, QCursor, QFont,
     QFontDatabase, QLinearGradient, QMovie, QPainterPath, QColorSpace,
-    QSurfaceFormat,
+    QSurfaceFormat, QAction, QKeySequence, QIcon, QPalette,
 )
 
 from core import resource_path
@@ -189,6 +189,12 @@ class FullscreenZenOverlay(QWidget):
             self.rotated.emit(90)
         elif event.key() == Qt.Key_Down:
             self.rotated.emit(-90)
+        elif event.key() == Qt.Key_C and (event.modifiers() & Qt.ControlModifier):
+            if self.main_window.image_files:
+                self.main_window.copy_settings()
+        elif event.key() == Qt.Key_V and (event.modifiers() & Qt.ControlModifier):
+            if self.main_window.image_files and self.main_window.settings_clipboard:
+                self.main_window.paste_settings()
 
     def close_zen(self):
         self.hide()
@@ -235,6 +241,7 @@ class FlashbackEditor(QMainWindow):
 
         self.thumbnails_loading = False
         self.thumbnail_worker = None
+        self.add_thumbnail_worker = None
         self._thumbnails_dirty = set()
 
         self.pending_render = False
@@ -414,12 +421,11 @@ class FlashbackEditor(QMainWindow):
         self.setCentralWidget(main_widget)
         self.setAcceptDrops(True)
 
-        # Drag overlay
-        self.drag_overlay = QFrame(main_widget)
-        self.drag_overlay.setStyleSheet("""
+        # Drag overlays (replace + add)
+        _drag_style_active = """
             QFrame {
-                background-color: rgba(255, 138, 53, 0.2);
-                border: 3px dashed #FF8A35;
+                background-color: rgba(255, 138, 53, 0.25);
+                border: 3px solid #FF8A35;
                 border-radius: 10px;
             }
             QLabel {
@@ -429,13 +435,39 @@ class FlashbackEditor(QMainWindow):
                 font-size: 18px;
                 font-weight: bold;
             }
-        """)
-        self.drag_overlay.setGeometry(50, 50, main_widget.width() - 100, main_widget.height() - 100)
+        """
+        _drag_style_dim = """
+            QFrame {
+                background-color: rgba(255, 138, 53, 0.07);
+                border: 2px dashed #888;
+                border-radius: 10px;
+            }
+            QLabel {
+                background: transparent;
+                border: none;
+                color: #888;
+                font-size: 18px;
+                font-weight: bold;
+            }
+        """
+        self._drag_style_active = _drag_style_active
+        self._drag_style_dim = _drag_style_dim
+
+        self.drag_overlay = QFrame(main_widget)
+        self.drag_overlay.setStyleSheet(_drag_style_active)
         drag_layout = QVBoxLayout(self.drag_overlay)
         drag_label = QLabel("Drop DNG files here")
         drag_label.setAlignment(Qt.AlignCenter)
         drag_layout.addWidget(drag_label)
         self.drag_overlay.hide()
+
+        self.drag_overlay_add = QFrame(main_widget)
+        self.drag_overlay_add.setStyleSheet(_drag_style_dim)
+        add_drag_layout = QVBoxLayout(self.drag_overlay_add)
+        add_drag_label = QLabel("Add images")
+        add_drag_label.setAlignment(Qt.AlignCenter)
+        add_drag_layout.addWidget(add_drag_label)
+        self.drag_overlay_add.hide()
 
         main_layout = QHBoxLayout(main_widget)
         main_layout.setContentsMargins(20, 10, 20, 10)
@@ -774,6 +806,162 @@ class FlashbackEditor(QMainWindow):
 
         self.settings_clipboard = None
 
+        self._build_menu_bar()
+
+    def _build_menu_bar(self):
+        """Build the native menu bar."""
+        from _version import __version__
+        mb = self.menuBar()
+
+        # ── Flashback / Help ──────────────────────────────────────────
+        # "About" with AboutRole moves to the app menu automatically on macOS.
+        # We put it in a Help menu so it appears somewhere on Windows/Linux too.
+        help_menu = mb.addMenu("Help")
+
+        act_about = QAction("About Flashback One35 v2", self)
+        act_about.setMenuRole(QAction.MenuRole.AboutRole)
+        act_about.triggered.connect(self.show_about)
+        help_menu.addAction(act_about)
+
+        # ApplicationSpecificRole keeps it in the macOS app menu under the correct
+        # app name, without renaming it to "Preferences" or changing the shortcut.
+        act_prefs = QAction("Advanced Settings", self)
+        act_prefs.setMenuRole(QAction.MenuRole.ApplicationSpecificRole)
+        act_prefs.setShortcut(QKeySequence("F12"))
+        act_prefs.triggered.connect(self._toggle_advanced_settings)
+        help_menu.addAction(act_prefs)
+
+        # ── File ──────────────────────────────────────────────────────
+        file_menu = mb.addMenu("File")
+
+        act_open = QAction("Open…", self)
+        act_open.setShortcut(QKeySequence.StandardKey.Open)  # Cmd+O / Ctrl+O
+        act_open.triggered.connect(self.open_files)
+        file_menu.addAction(act_open)
+
+        file_menu.addSeparator()
+
+        act_export_jpg = QAction("Export JPGs", self)
+        act_export_jpg.triggered.connect(self.export_as_jpeg)
+        file_menu.addAction(act_export_jpg)
+
+        act_export_tif = QAction("Export TIFs", self)
+        act_export_tif.triggered.connect(self.export_as_tiff)
+        file_menu.addAction(act_export_tif)
+
+        file_menu.addSeparator()
+
+        act_output_dir = QAction("Set Output Directory…", self)
+        act_output_dir.triggered.connect(self.select_output_dir)
+        file_menu.addAction(act_output_dir)
+
+        # ── Edit ──────────────────────────────────────────────────────
+        # Note: macOS automatically appends "Start Dictation" and "Emoji & Symbols"
+        # to any menu titled exactly "Edit". Naming it differently avoids that.
+        edit_menu = mb.addMenu("Adjustments")
+
+        act_copy = QAction("Copy Settings", self)
+        act_copy.setShortcut(QKeySequence.StandardKey.Copy)   # Cmd+C / Ctrl+C
+        act_copy.triggered.connect(self.copy_settings)
+        edit_menu.addAction(act_copy)
+
+        act_paste = QAction("Paste Settings", self)
+        act_paste.setShortcut(QKeySequence.StandardKey.Paste)  # Cmd+V / Ctrl+V
+        act_paste.triggered.connect(self.paste_settings)
+        edit_menu.addAction(act_paste)
+
+        act_select_all = QAction("Select All for Paste", self)
+        act_select_all.setShortcut(QKeySequence.StandardKey.SelectAll)  # Cmd+A / Ctrl+A
+        act_select_all.triggered.connect(self._menu_select_all_paste)
+        edit_menu.addAction(act_select_all)
+
+        act_deselect = QAction("Deselect All for Paste", self)
+        act_deselect.setShortcut(QKeySequence("Ctrl+D"))  # Cmd+D on macOS
+        act_deselect.triggered.connect(self._menu_deselect_all_paste)
+        edit_menu.addAction(act_deselect)
+
+        edit_menu.addSeparator()
+
+        act_reset = QAction("Reset Settings", self)
+        act_reset.triggered.connect(self.reset_all_sliders)
+        edit_menu.addAction(act_reset)
+
+        # ── View ──────────────────────────────────────────────────────
+        view_menu = mb.addMenu("View")
+
+        act_zen = QAction("Zen Mode", self)
+        act_zen.setIcon(self._char_icon("⛶"))
+        act_zen.setShortcut(QKeySequence("Ctrl+Return"))
+        act_zen.triggered.connect(self.enter_zen_mode)
+        view_menu.addAction(act_zen)
+
+    # ───────────────────────────────────────────────────────────────────
+    # MENU ACTIONS
+    # ───────────────────────────────────────────────────────────────────
+
+    def _char_icon(self, char, size=16):
+        """Render a Unicode character as a QIcon for use in menus."""
+        px = QPixmap(size, size)
+        px.fill(Qt.transparent)
+        painter = QPainter(px)
+        color = QApplication.palette().color(QPalette.ColorRole.WindowText)
+        painter.setPen(color)
+        font = painter.font()
+        font.setPixelSize(size)
+        painter.setFont(font)
+        painter.drawText(px.rect(), Qt.AlignCenter, char)
+        painter.end()
+        return QIcon(px)
+
+    def show_about(self):
+        from _version import __version__
+        QMessageBox.about(
+            self,
+            "About Flashback One35 v2",
+            f"<b>Flashback One35 v2</b><br>"
+            f"Version {__version__}<br><br>"
+            "A RAW editor for Flashback film cameras.<br><br>"
+            "© 2024 Flashback"
+        )
+
+    def _toggle_advanced_settings(self):
+        if self.debug_panel.isVisible():
+            self.debug_panel.hide()
+        else:
+            self.debug_panel.show()
+            self.debug_panel.raise_()
+
+    def _menu_select_all_paste(self):
+        if not self.image_files:
+            return
+        self.thumbnail_strip.select_all_for_paste()
+        count = len(self.thumbnail_strip.get_paste_selected_indices())
+        self.mode_label.setText(f"{count} selected for paste")
+        self.mode_label.setStyleSheet("color: #FF8A35; font-size: 12px;")
+        QTimer.singleShot(2000, lambda: self.mode_label.setText(""))
+
+    def _menu_deselect_all_paste(self):
+        self.thumbnail_strip.clear_paste_selection()
+        self.mode_label.setText("Paste selection cleared")
+        self.mode_label.setStyleSheet("color: #FF8A35; font-size: 12px;")
+        QTimer.singleShot(1500, lambda: self.mode_label.setText(""))
+
+    def export_as_jpeg(self):
+        self.export_tiff_mode = False
+        self.btn_export_mode.setText("Export: Final JPEG")
+        self.btn_export_mode.setStyleSheet("""
+            QPushButton { background-color: #3d3d3d; color: #d0d0d0; border: 1px solid #555; border-radius: 15px; font-size: 11px; }
+        """)
+        self.process_all_images()
+
+    def export_as_tiff(self):
+        self.export_tiff_mode = True
+        self.btn_export_mode.setText("Export: Intermediate TIFF")
+        self.btn_export_mode.setStyleSheet("""
+            QPushButton { background-color: #4a4a4a; color: #FF8A35; border: 1px solid #FF8A35; border-radius: 15px; font-size: 11px; }
+        """)
+        self.process_all_images()
+
     def center_window(self):
         frame_geo = self.frameGeometry()
         screen_geo = QApplication.primaryScreen().availableGeometry()
@@ -904,6 +1092,54 @@ class FlashbackEditor(QMainWindow):
                 self.loader_overlay.clear_and_hide()
         except Exception:
             pass
+
+    def add_image_files(self, new_files):
+        """Append new images to the current session without resetting existing ones."""
+        if not new_files:
+            return
+
+        existing_paths = {str(f) for f in self.image_files}
+        files_to_add = [f for f in new_files if str(f) not in existing_paths]
+        if not files_to_add:
+            return
+
+        offset = len(self.image_files)
+        self.image_files.extend(files_to_add)
+
+        self.btn_process_all.setEnabled(True)
+        self.update_process_button_text()
+
+        expected_thumb_width = 105
+        layout_spacing = 5
+        final_width = len(self.image_files) * (expected_thumb_width + layout_spacing)
+        self.thumbnail_strip.container.setMinimumWidth(final_width)
+
+        if hasattr(self, 'add_thumbnail_worker') and self.add_thumbnail_worker and self.add_thumbnail_worker.isRunning():
+            self.add_thumbnail_worker._is_running = False
+            self.add_thumbnail_worker.wait()
+
+        self.add_thumbnail_worker = ThumbnailWorker(
+            files_to_add,
+            self.processor.lut_preview,
+            self.processor.lut_full
+        )
+        self.add_thumbnail_worker.thumbnail_ready.connect(
+            lambda i, t, mid, off=offset: self._add_thumbnail_to_ui(i + off, t, mid)
+        )
+        self.add_thumbnail_worker.finished.connect(self._on_add_thumbnails_finished)
+        self.add_thumbnail_worker.setStackSize(32 * 1024 * 1024)
+        self.add_thumbnail_worker.start()
+
+        n = len(files_to_add)
+        self.mode_label.setText(f"Adding {n} image{'s' if n != 1 else ''}...")
+        self.mode_label.setStyleSheet("color: #FF8A35; font-size: 12px;")
+
+    def _on_add_thumbnails_finished(self):
+        print("✓ Add-images thumbnail generation complete!")
+        self.mode_label.setText("")
+        if hasattr(self, 'add_thumbnail_worker') and self.add_thumbnail_worker:
+            self.add_thumbnail_worker.deleteLater()
+            self.add_thumbnail_worker = None
 
     # ===================================================================
     # THUMBNAIL MANAGEMENT
@@ -1051,9 +1287,18 @@ class FlashbackEditor(QMainWindow):
     def display_image(self, img_array):
         if img_array is None:
             return
-        self.image_label.set_image(img_array)
         if hasattr(self, 'zen_overlay') and self.zen_overlay.isVisible():
-            self.zen_overlay.update_preview(self.image_label._original_pixmap)
+            # Build the pixmap once and hand it directly to the zen overlay.
+            # Skipping image_label._update_display() avoids a second SmoothTransformation
+            # scale on the hidden main window — that was doubling the per-frame cost.
+            img_8bit = (np.clip(img_array, 0, 1) * 255).astype(np.uint8)
+            h, w, c = img_8bit.shape
+            q_image = QImage(img_8bit.data, w, h, c * w, QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(q_image)
+            self.image_label._original_pixmap = pixmap  # keep in sync for when zen closes
+            self.zen_overlay.update_preview(pixmap)
+        else:
+            self.image_label.set_image(img_array)
 
     def update_sliders_from_processor(self):
         settings = self.processor.user_settings
@@ -1424,24 +1669,68 @@ class FlashbackEditor(QMainWindow):
         if hasattr(self, 'loader_overlay') and self.loader_overlay.isVisible():
             self.loader_overlay.setGeometry(self.rect())
         if hasattr(self, 'drag_overlay') and self.drag_overlay.isVisible():
-            self.drag_overlay.setGeometry(50, 50, self.centralWidget().width() - 100, self.centralWidget().height() - 100)
+            self._update_drag_overlay_geometry()
+
+    def _update_drag_overlay_geometry(self):
+        """Position the two drag overlays: upper = replace, lower = add (thumbnail strip)."""
+        cw = self.centralWidget()
+        if cw is None:
+            return
+        cw_w = cw.width()
+        cw_h = cw.height()
+        m = 8  # margin
+
+        if self.image_files and hasattr(self, 'drag_overlay_add'):
+            # Split at the thumbnail strip top edge
+            strip_top = self.thumbnail_strip.mapTo(cw, QPoint(0, 0)).y()
+            strip_h = self.thumbnail_strip.height()
+            self.drag_overlay.setGeometry(m, m, cw_w - 2 * m, max(40, strip_top - 2 * m))
+            self.drag_overlay_add.setGeometry(m, strip_top + m, cw_w - 2 * m, max(30, strip_h - 2 * m))
+        else:
+            # No images loaded — full-area replace overlay only
+            self.drag_overlay.setGeometry(m, m, cw_w - 2 * m, cw_h - 2 * m)
+
+    def _set_drag_hover(self, over_strip):
+        """Highlight the active drag zone and dim the inactive one."""
+        if not self.image_files:
+            return
+        if over_strip:
+            self.drag_overlay.setStyleSheet(self._drag_style_dim)
+            self.drag_overlay_add.setStyleSheet(self._drag_style_active)
+        else:
+            self.drag_overlay.setStyleSheet(self._drag_style_active)
+            self.drag_overlay_add.setStyleSheet(self._drag_style_dim)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
-            urls = event.mimeData().urls()
-            for url in urls:
-                if url.isLocalFile():
-                    file_path = url.toLocalFile()
-                    if file_path.lower().endswith(self.SUPPORTED_EXTENSIONS):
-                        self.drag_overlay.setGeometry(50, 50, self.centralWidget().width() - 100, self.centralWidget().height() - 100)
-                        self.drag_overlay.raise_()
-                        self.drag_overlay.show()
-                        event.acceptProposedAction()
-                        return
+            for url in event.mimeData().urls():
+                if url.isLocalFile() and url.toLocalFile().lower().endswith(self.SUPPORTED_EXTENSIONS):
+                    self._update_drag_overlay_geometry()
+                    self.drag_overlay.raise_()
+                    self.drag_overlay.show()
+                    if self.image_files:
+                        self.drag_overlay_add.raise_()
+                        self.drag_overlay_add.show()
+                    event.acceptProposedAction()
+                    return
         event.ignore()
+
+    def dragMoveEvent(self, event):
+        if not (self.drag_overlay.isVisible() and self.image_files):
+            return
+        cw = self.centralWidget()
+        strip_top = self.thumbnail_strip.mapTo(cw, QPoint(0, 0)).y()
+        pos_in_cw = cw.mapFrom(self, event.position().toPoint())
+        self._set_drag_hover(pos_in_cw.y() >= strip_top)
+        event.acceptProposedAction()
 
     def dropEvent(self, event):
         self.drag_overlay.hide()
+        self.drag_overlay_add.hide()
+        # Restore default styles
+        self.drag_overlay.setStyleSheet(self._drag_style_active)
+        self.drag_overlay_add.setStyleSheet(self._drag_style_dim)
+
         urls = event.mimeData().urls()
         image_files = []
         for url in urls:
@@ -1449,14 +1738,29 @@ class FlashbackEditor(QMainWindow):
                 file_path = url.toLocalFile()
                 if file_path.lower().endswith(self.SUPPORTED_EXTENSIONS):
                     image_files.append(Path(file_path))
-        if image_files:
+
+        if not image_files:
+            event.ignore()
+            return
+
+        # Determine drop zone: below thumbnail strip top → add; above → replace
+        cw = self.centralWidget()
+        strip_top = self.thumbnail_strip.mapTo(cw, QPoint(0, 0)).y()
+        pos_in_cw = cw.mapFrom(self, event.position().toPoint())
+        drop_on_strip = self.image_files and (pos_in_cw.y() >= strip_top)
+
+        if drop_on_strip:
+            self.add_image_files(image_files)
+        else:
             new_dir = str(image_files[0].parent)
             self.app_settings.setValue("last_open_dir", new_dir)
             self.load_image_files(image_files)
-            event.acceptProposedAction()
-        else:
-            event.ignore()
+
+        event.acceptProposedAction()
 
     def dragLeaveEvent(self, event):
         self.drag_overlay.hide()
+        self.drag_overlay_add.hide()
+        self.drag_overlay.setStyleSheet(self._drag_style_active)
+        self.drag_overlay_add.setStyleSheet(self._drag_style_dim)
         super().dragLeaveEvent(event)
