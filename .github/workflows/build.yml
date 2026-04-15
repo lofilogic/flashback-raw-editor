@@ -51,10 +51,13 @@ jobs:
         if: runner.os != 'Linux'
         env:
           PYTHONUTF8: "1"   # Windows CP1252 can't print ✓ — force UTF-8
+          FLASHBACK_VERSION: ${{ github.ref_name }}
         run: pyinstaller Flashback.spec
 
       - name: Build with PyInstaller (Linux — needs virtual display)
         if: runner.os == 'Linux'
+        env:
+          FLASHBACK_VERSION: ${{ github.ref_name }}
         run: xvfb-run pyinstaller Flashback.spec
 
       - name: Zip build output (macOS)

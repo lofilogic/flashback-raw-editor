@@ -1,5 +1,5 @@
 """
-Flashback One35 v2 — entry point.
+Flashback One35 — entry point.
 """
 import sys
 import platform
@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QSurfaceFormat
 
 from ui.editor import FlashbackEditor
+from _version import __version__
 
 
 def main():
@@ -24,6 +25,7 @@ def main():
     app.setStyle("Fusion")
 
     window = FlashbackEditor()
+    window.setWindowTitle(f"Flashback One35 v2 ({__version__})")
     window.show()
 
     sys.exit(app.exec())

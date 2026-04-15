@@ -6,6 +6,13 @@ from pathlib import Path
 
 block_cipher = None
 
+# Inject version from git tag (set by CI as FLASHBACK_VERSION=v0.1.0-beta7).
+# Strip leading 'v' so CFBundleShortVersionString gets '0.1.0-beta7'.
+_app_version = os.environ.get('FLASHBACK_VERSION', 'dev').lstrip('v')
+print(f"=== Building version: {_app_version} ===")
+with open('_version.py', 'w') as _vf:
+    _vf.write(f'__version__ = "{_app_version}"\n')
+
 # Pre-compile Numba cache automatically before bundling.
 import subprocess
 print("=== Pre-compiling Numba cache ===")
@@ -162,8 +169,8 @@ if _system == 'Darwin':
         icon='assets/icon.icns',
         bundle_identifier='com.julian.flashback',
         info_plist={
-            'CFBundleShortVersionString': '2.0.0',
-            'CFBundleVersion': '2.0.0',
+            'CFBundleShortVersionString': _app_version,
+            'CFBundleVersion': _app_version,
             'NSHighResolutionCapable': 'True',
             'LSBackgroundOnly': 'False',
             'LSUIElement': 'False',
