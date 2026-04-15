@@ -4,7 +4,7 @@ A dedicated RAW processor and editor built specifically for the [Flashback One35
 
 ![App Screenshot](docs/UI.png)
 
-The Flashback One35 v2 shoots 35mm-style DNG files with a unique sensor and lens character. This app processes those RAWs through a custom color pipeline tuned for the camera — bypassing generic RAW processors to deliver results that match the Flashback's analogue aesthetic.
+This app processes Flashback One35 v2 RAW files through a custom color pipeline and film emulation.
 
 ![Before / After](docs/before-after.gif)
 
@@ -39,10 +39,8 @@ Get the latest release for your platform from the [Releases](../../releases/late
 ## Features
 
 - **Custom color pipeline** — sensor-specific CCM, white balance, and LUT tuned for the One35 v2
-- **Film emulation** — halation, chromatic aberration, softness, and grain
-- **Real-time preview** — fast preview using Numba-accelerated processing
+- **Film effects** — halation, chromatic aberration, softness, and grain
 - **Batch export** — queue and process multiple images to JPEG in one go
-- **Adjustment copy/paste** — copy settings from one image and paste to a selection
 - **Zen mode** — hide controls for a clean full-screen view of your image
 - **Drag & drop** — drop DNG files or folders directly onto the app
 - **Camera detection** — auto-detects the One35 v2 when connected via USB
@@ -54,7 +52,7 @@ Get the latest release for your platform from the [Releases](../../releases/late
 ![UI Walkthrough](docs/UI.gif)
 
 ### Basic workflow
-1. Open a folder of DNGs via the folder icon, drag & drop, or connect your camera
+1. Open a folder of DNGs via the folder icon, drag & drop, or connect your camera (right after shooting, before developing inside the official Flashback app)
 2. Browse images in the thumbnail strip at the bottom
 3. Adjust **Exposure**, **White Balance**, and **Tint** with the sliders
 4. Set your export folder and click **Process** to export JPEGs
@@ -62,15 +60,15 @@ Get the latest release for your platform from the [Releases](../../releases/late
 ### Controls
 
 **Preview**
-- `Scroll` — zoom in/out
+- `Scroll / Left-click` — zoom
 - `Left-click + drag` — pan (when zoomed in)
-- `Double-click` — fit to screen
+- `Double-click` — fit to screen (when zoomed in)
 
 **Thumbnail strip**
-- `← →` — navigate images
-- `Right-click` — queue image for batch processing
-- `Shift + click` — select a range
-- `Cmd/Ctrl + click` — select individual images
+- `← / → arrow keys` — navigate images
+- `Right-click` — queue / unqueue images (for batch processing)
+- `Shift + Left-click` — select (to paste settings)
+- `Cmd/Ctrl + click` — select individual images (to paste settings)
 
 **Adjustments**
 - `Double-click` any slider — reset to default
@@ -78,7 +76,17 @@ Get the latest release for your platform from the [Releases](../../releases/late
 - `Cmd/Ctrl + V` — paste settings to selected images
 
 **Zen mode**
-- Click the zen mode button to hide all controls and show only the image — useful for evaluating your shots without distraction. Click again to return to the editor.
+- Click the zen mode button to hide all controls and show only the image
+
+- `⛶ button` — Enter Zen mode
+- `Escape` — exit Zen mode
+
+- `← / → arrow keys` — navigate images
+- `↑ / ↓ arrow keys` — rotate images
+
+`Left-click + drag up/down` — Exposure
+`Left-click + drag left/right` — White Balance
+`Right-click + drag left/right` — Tint
 
 ---
 
