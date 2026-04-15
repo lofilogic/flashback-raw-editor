@@ -16,9 +16,9 @@ Get the latest release for your platform from the [Releases](../../releases/late
 
 | Platform | Status |
 |----------|--------|
-| [macOS (Apple Silicon)](https://github.com/lofilogic/flashback-raw-editor/releases/download/v0.1.0-beta9/Flashback-macOS.zip) | ✓ Tested |
-| [Windows](https://github.com/lofilogic/flashback-raw-editor/releases/download/v0.1.0-beta9/Flashback-Windows.zip) | ✓ Tested |
-| [Linux x86_64](https://github.com/lofilogic/flashback-raw-editor/releases/download/v0.1.0-beta9/Flashback-Linux.zip) | ⚠ Untested — binary provided, feedback welcome |
+| [macOS (Apple Silicon)](https://github.com/lofilogic/flashback-raw-editor/releases/download/v0.17.0-beta1/Flashback-macOS.zip) | ✓ Tested |
+| [Windows](https://github.com/lofilogic/flashback-raw-editor/releases/download/v0.17.0-beta1/Flashback-Windows.zip) | ✓ Tested |
+| [Linux x86_64](https://github.com/lofilogic/flashback-raw-editor/releases/download/v0.17.0-beta1/Flashback-Linux.zip) | ⚠ Untested — binary provided, feedback welcome |
 
 ### macOS
 1. Download `Flashback-macOS.zip` and unzip it
