@@ -62,7 +62,7 @@ jobs:
 
       - name: Zip build output (macOS)
         if: runner.os == 'macOS'
-        run: cd dist && zip -r ../Flashback-macOS.zip "Flashback One35.app"
+        run: ditto -c -k --sequesterRsrc --keepParent "dist/Flashback One35.app" Flashback-macOS.zip
 
       - name: Zip build output (Windows)
         if: runner.os == 'Windows'
