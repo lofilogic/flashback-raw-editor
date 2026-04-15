@@ -57,9 +57,17 @@ jobs:
         if: runner.os == 'Linux'
         run: xvfb-run pyinstaller Flashback.spec
 
-      - name: Zip .app bundle (macOS only)
+      - name: Zip build output (macOS)
         if: runner.os == 'macOS'
         run: cd dist && zip -r ../Flashback-macOS.zip "Flashback One35.app"
+
+      - name: Zip build output (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path "dist\Flashback One35" -DestinationPath Flashback-Windows.zip
+
+      - name: Zip build output (Linux)
+        if: runner.os == 'Linux'
+        run: cd dist && zip -r ../Flashback-Linux.zip "Flashback One35"
 
       - name: Upload artifact (macOS)
         if: runner.os == 'macOS'
@@ -69,12 +77,20 @@ jobs:
           path: Flashback-macOS.zip
           retention-days: 14
 
-      - name: Upload artifact (Windows & Linux)
-        if: runner.os != 'macOS'
+      - name: Upload artifact (Windows)
+        if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: dist/
+          name: Flashback-Windows
+          path: Flashback-Windows.zip
+          retention-days: 14
+
+      - name: Upload artifact (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Flashback-Linux
+          path: Flashback-Linux.zip
           retention-days: 14
 
   # Runs the app on your local Mac for interactive testing — trigger manually
@@ -110,7 +126,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          files: artifacts/**/*.zip
           generate_release_notes: true
           draft: false
           # Tags containing -beta or -rc are automatically marked as pre-release
