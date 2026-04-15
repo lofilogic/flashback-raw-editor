@@ -93,21 +93,6 @@ jobs:
           path: Flashback-Linux.zip
           retention-days: 14
 
-  # Runs the app on your local Mac for interactive testing — trigger manually
-  test-local:
-    runs-on: self-hosted
-    if: github.event_name == 'workflow_dispatch'
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Launch app for manual testing
-        run: |
-          cd $GITHUB_WORKSPACE
-          source venv/bin/activate
-          python main.py
-
   # Runs after all 3 platform builds succeed — only on version tags
   release:
     needs: build
