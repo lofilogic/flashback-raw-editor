@@ -45,8 +45,8 @@ GRAIN_BLUR_SIGMA = 0.7
 SHARPEN_STRENGTH = 0.5
 SHARPEN_RADIUS = 1.0
 CNR_SIGMA = 0.7
-HIGHLIGHT_DESAT_THRESHOLD_L = 68.0   # Lab L* at which desaturation begins (0-100)
-HIGHLIGHT_DESAT_ROLLOFF_L   = 8.0   # width of ramp in L* units
+HIGHLIGHT_DESAT_THRESHOLD_L = 60.0   # Lab L* at which desaturation begins (0-100)
+HIGHLIGHT_DESAT_ROLLOFF_L   = 10.0   # width of ramp in L* units
 HIGHLIGHT_DESAT_SIGMA       = 10.0    # spatial Gaussian blur on the mask
 DITHER_STRENGTH = 0.005
 

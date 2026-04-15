@@ -302,13 +302,13 @@ class FlashbackProcessor:
                 if is_not_dng:
                     # Fuji RAW Development (Standard D65)
                     rgb_linear = raw.postprocess(
-                        demosaic_algorithm=rawpy.DemosaicAlgorithm.AHD,
+                        demosaic_algorithm=demosaic_fb,
                         use_camera_wb=False,
                         use_auto_wb=False,
                         user_wb=raw.daylight_whitebalance,
                         half_size=True,
                         no_auto_bright=True,
-                        bright=1.0,
+                        bright=1,
                         highlight_mode=highlight_mode,
                         gamma=(1, 1),
                         output_bps=16,
@@ -328,48 +328,29 @@ class FlashbackProcessor:
 
                 else:
                     # --- FLASHBACK ONE35 V2 PIPELINE ---
-                    postprocess_kwargs = dict(
+                    rgb_linear = raw.postprocess(
                         demosaic_algorithm=demosaic_fb,
-                        user_wb=BASE_WB_SETTINGS2,
+                        user_wb=BASE_WB_SETTINGS,
                         user_black=SENSOR_BLACK,
                         half_size=True,
                         no_auto_bright=True,
-                        bright=1,
+                        bright=0.5,
+                        highlight_mode=highlight_mode,
                         gamma=(1, 1),
                         output_bps=16,
                         output_color=rawpy.ColorSpace.raw,
-                    )
-
-                    # Mode 1: natural luma rolloff
-                    rgb_luma = raw.postprocess(
-                        **postprocess_kwargs, highlight_mode=1
-                    ).astype(np.float32) / 65535.0
-
-                    # Mode 5: neutral highlight color (blend toward white pre-demosaic)
-                    rgb_chroma = raw.postprocess(
-                        **postprocess_kwargs, highlight_mode=5
                     ).astype(np.float32) / 65535.0
 
                     profile['raw_develop'] = (time.time() - start) * 1000
-                    _timing_print(f"    RAW shape: {rgb_luma.shape}")
+                    _timing_print(f"    RAW shape: {rgb_linear.shape}")
 
-                    # Step 2: Apply CCM to both
+                    # Step 2: Apply CCM
                     start = time.time()
                     print("Applying color matrix...")
-                    img_luma  = (rgb_luma.reshape(-1, 3)   @ FLASHBACK_CCM2.T).reshape(rgb_luma.shape)
-                    img_chroma = (rgb_chroma.reshape(-1, 3) @ FLASHBACK_CCM2.T).reshape(rgb_chroma.shape)
+                    img_srgb_lin = (rgb_linear.reshape(-1, 3) @ FLASHBACK_CCM.T).reshape(rgb_linear.shape)
                     profile['color_matrix'] = (time.time() - start) * 1000
 
-                    # Step 2b: Combine — luma from mode 1, chroma from mode 5
-                    # Scale mode-5 output so its luminance matches mode 1 per pixel.
-                    _LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
-                    Y_luma   = np.sum(img_luma   * _LUMA, axis=-1, keepdims=True)
-                    Y_chroma = np.sum(img_chroma * _LUMA, axis=-1, keepdims=True)
-                    # Clamp to 1.0: only scale chroma down, never boost it.
-                    scale = np.minimum(Y_luma / np.maximum(Y_chroma, 1e-6), 1.0)
-                    img_srgb_lin = img_chroma * scale
-
-                    # Step 2c: Soft Lab desaturation in highlights
+                    # Step 2b: Soft Lab desaturation in highlights
                     if DebugConfig.enable_highlight_desat:
                         img_srgb_lin = self._desaturate_highlights_lab(
                             img_srgb_lin,
@@ -377,7 +358,7 @@ class FlashbackProcessor:
                             rolloff_L=DebugConfig.highlight_desat_rolloff_L,
                             sigma=DebugConfig.highlight_desat_sigma,
                         )
-                    _timing_print(f"    After CCM+combine: [{img_srgb_lin.min():.4f}, {img_srgb_lin.max():.4f}]")
+                    _timing_print(f"    After CCM: [{img_srgb_lin.min():.4f}, {img_srgb_lin.max():.4f}]")
 
             # Step 3: Convert to Rec.2020
             start = time.time()

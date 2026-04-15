@@ -239,7 +239,7 @@ class FlashbackEditor(QMainWindow):
 
         self.pending_render = False
 
-        lut_path = resource_path("assets/luts/look-B.cube")
+        lut_path = resource_path("assets/luts/look.cube")
         if not os.path.exists(lut_path):
             lut_path = None
         self.processor = FlashbackProcessor(lut_path)
