@@ -526,7 +526,7 @@ class FlashbackProcessor:
         is_fast_mode = getattr(self, 'preview_mode', 'hq') == 'fast'
 
         if is_fast_mode:
-            img = cv2.resize(img, (orig_w // 2, orig_h // 2), interpolation=cv2.INTER_LINEAR)
+            img = cv2.resize(img, (orig_w // 3, orig_h // 3), interpolation=cv2.INTER_LINEAR)
 
         # Decode ACEScct to linear Rec.2020
         start = time.time()
@@ -733,7 +733,7 @@ class FlashbackProcessor:
     def set_settings(self, settings):
         """Load settings (for copy/paste)."""
         self.user_settings.update(settings)
-        self.preview_mode = "fast"
+        self.preview_mode = "hq"
         return self.render_preview()
 
 

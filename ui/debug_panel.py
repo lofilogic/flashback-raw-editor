@@ -1,5 +1,5 @@
 """
-Floating debug panel for tuning effects in real-time.
+Advanced Settings panel for tuning effects in real-time.
 Toggle visibility with F12.
 """
 from PySide6.QtWidgets import (
@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QFrame, QFormLayout, QDoubleSpinBox, QSpinBox, QCheckBox,
     QGroupBox,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSettings
 
 from core.config import (
     DebugConfig,
@@ -20,13 +20,13 @@ from core.config import (
 
 
 class DebugPanel(QWidget):
-    """Floating debug panel for tuning effects in real-time."""
+    """Advanced Settings panel for tuning effects in real-time."""
 
     def __init__(self, processor, parent=None):
         super().__init__(parent, Qt.Tool)  # Tool window stays on top
         self.processor = processor
         self.parent_editor = parent
-        self.setWindowTitle("Flashback Debug Panel (F12 to toggle)")
+        self.setWindowTitle("Advanced Settings (F12 to toggle)")
         self.setMinimumWidth(380)
         self.setMaximumWidth(450)
 
@@ -40,6 +40,12 @@ class DebugPanel(QWidget):
         self.btn_reset.setStyleSheet("QPushButton { background-color: #3d3d3d; color: #d0d0d0; border: none; padding: 6px 12px; border-radius: 4px; } QPushButton:hover { background-color: #4a4a4a; }")
         self.btn_reset.clicked.connect(self.reset_all)
         header.addWidget(self.btn_reset)
+
+        self.btn_save_defaults = QPushButton("Save as Defaults")
+        self.btn_save_defaults.setToolTip("Save current settings as startup defaults")
+        self.btn_save_defaults.setStyleSheet("QPushButton { background-color: #3d3d3d; color: #d0d0d0; border: none; padding: 6px 12px; border-radius: 4px; } QPushButton:hover { background-color: #4a4a4a; }")
+        self.btn_save_defaults.clicked.connect(self.save_defaults)
+        header.addWidget(self.btn_save_defaults)
 
         self.btn_reload = QPushButton("Reload Image")
         self.btn_reload.setToolTip("Reload to apply baked effects (Halation, CA, CNR)")
@@ -213,10 +219,12 @@ class DebugPanel(QWidget):
         scroll.setWidget(container)
         layout.addWidget(scroll)
 
-        self.status_label = QLabel("Ready - F12 to toggle visibility")
+        self.status_label = QLabel("Ready - press F12 to close")
         self.status_label.setStyleSheet("color: #626262; font-size: 11px; padding-top: 8px;")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
+
+        self.load_defaults()
 
     # ===================================================================
     # HELPERS
@@ -292,6 +300,99 @@ class DebugPanel(QWidget):
         if self.parent_editor:
             self.parent_editor.reload_current_image()
             self.status_label.setText("Image reloaded with new baked settings.")
+
+    def save_defaults(self):
+        """Persist current DebugConfig values as startup defaults via QSettings."""
+        self.update_config()
+        s = QSettings("Flashback", "Editor")
+        s.beginGroup("debug_defaults")
+        s.setValue("enable_halation",          DebugConfig.enable_halation)
+        s.setValue("enable_ca",                DebugConfig.enable_chromatic_aberration)
+        s.setValue("enable_softness",          DebugConfig.enable_softness)
+        s.setValue("enable_grain",             DebugConfig.enable_grain)
+        s.setValue("enable_sharpen",           DebugConfig.enable_sharpen)
+        s.setValue("enable_cnr",               DebugConfig.enable_cnr)
+        s.setValue("enable_lut",               DebugConfig.enable_lut)
+        s.setValue("enable_dither",            DebugConfig.enable_pre_lut_dither)
+        s.setValue("enable_highlight_desat",   DebugConfig.enable_highlight_desat)
+        s.setValue("halation_threshold",       DebugConfig.halation_threshold)
+        s.setValue("halation_blur_radius",     DebugConfig.halation_blur_radius)
+        s.setValue("halation_strength",        DebugConfig.halation_strength)
+        s.setValue("ca_strength",              DebugConfig.ca_strength)
+        s.setValue("ca_steps",                 DebugConfig.ca_steps)
+        s.setValue("softness_sigma",           DebugConfig.softness_sigma)
+        s.setValue("grain_strength",           DebugConfig.grain_strength)
+        s.setValue("sharpen_strength",         DebugConfig.sharpen_strength)
+        s.setValue("sharpen_radius",           DebugConfig.sharpen_radius)
+        s.setValue("cnr_sigma",                DebugConfig.cnr_sigma)
+        s.setValue("hd_threshold_L",           DebugConfig.highlight_desat_threshold_L)
+        s.setValue("hd_rolloff_L",             DebugConfig.highlight_desat_rolloff_L)
+        s.setValue("hd_sigma",                 DebugConfig.highlight_desat_sigma)
+        s.setValue("dither_strength",          DebugConfig.pre_lut_dither_strength)
+        s.endGroup()
+        self.status_label.setText("Defaults saved — will apply on next launch.")
+
+    def load_defaults(self):
+        """Load saved defaults from QSettings into DebugConfig and update UI."""
+        s = QSettings("Flashback", "Editor")
+        s.beginGroup("debug_defaults")
+        if not s.childKeys():
+            s.endGroup()
+            return  # Nothing saved yet — keep module defaults
+
+        def b(key, fallback): return s.value(key, fallback, type=bool)
+        def f(key, fallback): return s.value(key, fallback, type=float)
+        def i(key, fallback): return s.value(key, fallback, type=int)
+
+        DebugConfig.enable_halation              = b("enable_halation",        DebugConfig.enable_halation)
+        DebugConfig.enable_chromatic_aberration  = b("enable_ca",              DebugConfig.enable_chromatic_aberration)
+        DebugConfig.enable_softness              = b("enable_softness",        DebugConfig.enable_softness)
+        DebugConfig.enable_grain                 = b("enable_grain",           DebugConfig.enable_grain)
+        DebugConfig.enable_sharpen               = b("enable_sharpen",         DebugConfig.enable_sharpen)
+        DebugConfig.enable_cnr                   = b("enable_cnr",             DebugConfig.enable_cnr)
+        DebugConfig.enable_lut                   = b("enable_lut",             DebugConfig.enable_lut)
+        DebugConfig.enable_pre_lut_dither        = b("enable_dither",          DebugConfig.enable_pre_lut_dither)
+        DebugConfig.enable_highlight_desat       = b("enable_highlight_desat", DebugConfig.enable_highlight_desat)
+        DebugConfig.halation_threshold           = f("halation_threshold",     DebugConfig.halation_threshold)
+        DebugConfig.halation_blur_radius         = f("halation_blur_radius",   DebugConfig.halation_blur_radius)
+        DebugConfig.halation_strength            = f("halation_strength",      DebugConfig.halation_strength)
+        DebugConfig.ca_strength                  = f("ca_strength",            DebugConfig.ca_strength)
+        DebugConfig.ca_steps                     = i("ca_steps",               DebugConfig.ca_steps)
+        DebugConfig.softness_sigma               = f("softness_sigma",         DebugConfig.softness_sigma)
+        DebugConfig.grain_strength               = f("grain_strength",         DebugConfig.grain_strength)
+        DebugConfig.sharpen_strength             = f("sharpen_strength",       DebugConfig.sharpen_strength)
+        DebugConfig.sharpen_radius               = f("sharpen_radius",         DebugConfig.sharpen_radius)
+        DebugConfig.cnr_sigma                    = f("cnr_sigma",              DebugConfig.cnr_sigma)
+        DebugConfig.highlight_desat_threshold_L  = f("hd_threshold_L",        DebugConfig.highlight_desat_threshold_L)
+        DebugConfig.highlight_desat_rolloff_L    = f("hd_rolloff_L",           DebugConfig.highlight_desat_rolloff_L)
+        DebugConfig.highlight_desat_sigma        = f("hd_sigma",               DebugConfig.highlight_desat_sigma)
+        DebugConfig.pre_lut_dither_strength      = f("dither_strength",        DebugConfig.pre_lut_dither_strength)
+        s.endGroup()
+
+        # Sync UI spinboxes/checkboxes to the loaded values
+        self.chk_halation.setChecked(DebugConfig.enable_halation)
+        self.chk_ca.setChecked(DebugConfig.enable_chromatic_aberration)
+        self.chk_softness.setChecked(DebugConfig.enable_softness)
+        self.chk_grain.setChecked(DebugConfig.enable_grain)
+        self.chk_sharpen.setChecked(DebugConfig.enable_sharpen)
+        self.chk_cnr.setChecked(DebugConfig.enable_cnr)
+        self.chk_lut.setChecked(DebugConfig.enable_lut)
+        self.chk_dither.setChecked(DebugConfig.enable_pre_lut_dither)
+        self.chk_highlight_desat.setChecked(DebugConfig.enable_highlight_desat)
+        self.spin_halation_thresh.setValue(DebugConfig.halation_threshold)
+        self.spin_halation_blur.setValue(DebugConfig.halation_blur_radius)
+        self.spin_halation_str.setValue(DebugConfig.halation_strength)
+        self.spin_ca_str.setValue(DebugConfig.ca_strength)
+        self.spin_ca_steps.setValue(DebugConfig.ca_steps)
+        self.spin_softness.setValue(DebugConfig.softness_sigma)
+        self.spin_grain.setValue(DebugConfig.grain_strength)
+        self.spin_sharpen_str.setValue(DebugConfig.sharpen_strength)
+        self.spin_sharpen_rad.setValue(DebugConfig.sharpen_radius)
+        self.spin_cnr.setValue(DebugConfig.cnr_sigma)
+        self.spin_hd_thresh.setValue(DebugConfig.highlight_desat_threshold_L)
+        self.spin_hd_rolloff.setValue(DebugConfig.highlight_desat_rolloff_L)
+        self.spin_hd_sigma.setValue(DebugConfig.highlight_desat_sigma)
+        self.spin_dither.setValue(DebugConfig.pre_lut_dither_strength)
 
     def reset_all(self):
         """Reset all parameters to defaults."""
