@@ -17,6 +17,11 @@ elif system == 'Windows':
 else:
     cache_dir = os.path.expanduser('~/.cache/FlashbackOne35')
 
+# Must use the versioned subdirectory — matches what Flashback.spec expects to bundle
+import llvmlite
+version_key = f"numba_{llvmlite.__version__}_0"
+cache_dir = os.path.join(cache_dir, version_key)
+
 os.makedirs(cache_dir, exist_ok=True)
 os.environ['NUMBA_CACHE_DIR'] = cache_dir
 
