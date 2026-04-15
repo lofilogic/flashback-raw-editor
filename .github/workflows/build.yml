@@ -8,6 +8,7 @@ on:
 
 jobs:
   build:
+    if: github.event_name == 'push'   # only run on tag pushes, not manual triggers
     strategy:
       fail-fast: false   # if one platform fails, keep building the others
       matrix:
