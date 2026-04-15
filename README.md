@@ -1,6 +1,6 @@
 # Flashback One35 v2 Editor
 
-A dedicated RAW processor and editor built specifically for the [Flashback One35 v2](https://www.flashbackcamera.com) camera.
+A dedicated RAW processor and editor built specifically for the [Flashback One35 v2](https:///joinflashback.co) camera.
 
 ![App Screenshot](docs/UI.png)
 
