@@ -16,9 +16,9 @@ Get the latest release for your platform from the [Releases](../../releases/late
 
 | Platform | Status |
 |----------|--------|
-| macOS (Apple Silicon) | ✓ Tested |
-| Windows | ✓ Tested |
-| Linux x86_64 | ⚠ Untested — binary provided, feedback welcome |
+| [macOS (Apple Silicon)](https://github.com/lofilogic/flashback-raw-editor/releases/download/v0.1.0-beta9/Flashback-macOS.zip) | ✓ Tested |
+| [Windows](https://github.com/lofilogic/flashback-raw-editor/releases/download/v0.1.0-beta9/Flashback-Windows.zip) | ✓ Tested |
+| [Linux x86_64](https://github.com/lofilogic/flashback-raw-editor/releases/download/v0.1.0-beta9/Flashback-Linux.zip) | ⚠ Untested — binary provided, feedback welcome |
 
 ### macOS
 1. Download `Flashback-macOS.zip` and unzip it
@@ -39,7 +39,7 @@ Get the latest release for your platform from the [Releases](../../releases/late
 ## Features
 
 - **Custom color pipeline** — sensor-specific CCM, white balance, and LUT tuned for the One35 v2
-- **Film effects** — halation, chromatic aberration, softness, and grain
+- **Film emulation effects** — halation, chromatic aberration, softness, and grain
 - **Batch export** — queue and process multiple images to JPEG in one go
 - **Zen mode** — hide controls for a clean full-screen view of your image
 - **Drag & drop** — drop DNG files or folders directly onto the app
@@ -56,6 +56,7 @@ Get the latest release for your platform from the [Releases](../../releases/late
 2. Browse images in the thumbnail strip at the bottom
 3. Adjust **Exposure**, **White Balance**, and **Tint** with the sliders
 4. Set your export folder and click **Process** to export JPEGs
+5. Alternatively export 16-bit tif-intermediates to quickly reprocess later
 
 ### Controls
 
