@@ -23,7 +23,14 @@ Get the latest release for your platform from the [Releases](../../releases/late
 ### macOS
 1. Download `Flashback-macOS.zip` and unzip it
 2. Move `Flashback One35 v2.app` to your Applications folder
-3. On first launch, right-click → Open (macOS Gatekeeper requires this for unsigned apps)
+3. On first launch, macOS will block the app because it isn't signed by an Apple-registered developer. Here's how to open it:
+
+- Double-click **Flashback One35 v2.app** — macOS will show a warning and refuse to open it
+- Go to **System Settings → Privacy & Security**
+- Scroll down to the Security section — you'll see a message saying *"Flashback One35 v2 was blocked"*
+- Click **Open Anyway**
+- Confirm in the dialog that appears the next time you open
+You only need to do this once. After that the app opens normally.
 
 ### Windows
 1. Download `Flashback-Windows.zip` and unzip it
