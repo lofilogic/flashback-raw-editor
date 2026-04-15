@@ -880,6 +880,7 @@ class FlashbackEditor(QMainWindow):
         if hasattr(self, '_on_thumbnails_finished'):
             self.thumbnail_worker.finished.connect(self._on_thumbnails_finished)
 
+        self.thumbnail_worker.setStackSize(32 * 1024 * 1024)  # 32MB — Numba JIT needs deep stack
         self.thumbnail_worker.start()
 
     def _on_thumbnail_error(self, index, error_message):
