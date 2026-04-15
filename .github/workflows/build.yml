@@ -49,6 +49,8 @@ jobs:
 
       - name: Build with PyInstaller (macOS & Windows)
         if: runner.os != 'Linux'
+        env:
+          PYTHONUTF8: "1"   # Windows CP1252 can't print ✓ — force UTF-8
         run: pyinstaller Flashback.spec
 
       - name: Build with PyInstaller (Linux — needs virtual display)
