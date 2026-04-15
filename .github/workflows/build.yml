@@ -3,13 +3,13 @@ name: Build
 on:
   push:
     tags:
-      - 'v*'         # runs on version tags like v1.0.0
+      - 'v*'         # runs on version tags like v1.0.0 or v1.0.0-beta1
   workflow_dispatch:   # allows manual trigger from GitHub UI
 
 jobs:
   build:
     strategy:
-      fail-fast: false
+      fail-fast: false   # if one platform fails, keep building the others
       matrix:
         include:
           - os: macos-14        # Apple Silicon (M1/M2 runner)
@@ -30,19 +30,70 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements-build.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
       - name: Install system dependencies (Linux only)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libraw-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libraw-dev xvfb libglib2.0-0 libgl1
 
       - name: Install Python dependencies
         run: pip install -r requirements-build.txt
 
-      - name: Build with PyInstaller
+      - name: Build with PyInstaller (macOS & Windows)
+        if: runner.os != 'Linux'
         run: pyinstaller Flashback.spec
 
-      - name: Upload build artifact
+      - name: Build with PyInstaller (Linux — needs virtual display)
+        if: runner.os == 'Linux'
+        run: xvfb-run pyinstaller Flashback.spec
+
+      - name: Zip .app bundle (macOS only)
+        if: runner.os == 'macOS'
+        run: cd dist && zip -r ../Flashback-macOS.zip "Flashback One35.app"
+
+      - name: Upload artifact (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Flashback-macOS
+          path: Flashback-macOS.zip
+          retention-days: 14
+
+      - name: Upload artifact (Windows & Linux)
+        if: runner.os != 'macOS'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: dist/
           retention-days: 14
+
+  # Runs after all 3 platform builds succeed — only on version tags
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    permissions:
+      contents: write   # needed to create releases and upload files
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
+          draft: false
+          # Tags containing -beta or -rc are automatically marked as pre-release
+          prerelease: ${{ contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
