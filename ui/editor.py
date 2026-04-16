@@ -657,8 +657,8 @@ class FlashbackEditor(QMainWindow):
         wb_row.addWidget(self.btn_wb_minus)
 
         self.slider_wb = QSlider(Qt.Horizontal)
-        self.slider_wb.setMinimum(-2000)
-        self.slider_wb.setMaximum(2000)
+        self.slider_wb.setMinimum(-3000)
+        self.slider_wb.setMaximum(3000)
         self.slider_wb.setValue(0)
         self.slider_wb.valueChanged.connect(self.on_wb_slider_moved)
         self.slider_wb.sliderReleased.connect(self.on_wb_released)
@@ -1303,9 +1303,15 @@ class FlashbackEditor(QMainWindow):
         if file_path in self.image_settings:
             settings = self.image_settings[file_path]
             self.processor.set_settings(settings)
+            self.chk_wb_link.blockSignals(True)
+            self.chk_wb_link.setChecked(settings.get('auto_tint', False))
+            self.chk_wb_link.blockSignals(False)
             self.update_sliders_from_processor()
         else:
             self.processor.user_settings = {'exposure_ev': 0.0, 'wb_temp': 0, 'tint': 0.0}
+            self.chk_wb_link.blockSignals(True)
+            self.chk_wb_link.setChecked(False)
+            self.chk_wb_link.blockSignals(False)
             self.update_sliders_from_processor()
 
         self.processor.preview_mode = 'hq'
@@ -1392,15 +1398,7 @@ class FlashbackEditor(QMainWindow):
             self.update_mode_label()
 
     def _on_wb_link_toggled(self, checked):
-        if checked:
-            self.slider_wb.setMinimum(-3000)
-            self.slider_wb.setMaximum(3000)
-        else:
-            clamped = max(-2000, min(2000, self.slider_wb.value()))
-            self.slider_wb.setMinimum(-2000)
-            self.slider_wb.setMaximum(2000)
-            if self.slider_wb.value() != clamped:
-                self.slider_wb.setValue(clamped)
+        self.save_current_settings()
 
     def _coupled_tint(self, wb_offset):
         """Coupled tint value for a given WB offset from neutral (5600K).
@@ -1513,7 +1511,9 @@ class FlashbackEditor(QMainWindow):
     def save_current_settings(self):
         if self.image_files:
             file_path = str(self.image_files[self.current_index])
-            self.image_settings[file_path] = self.processor.get_settings()
+            settings = self.processor.get_settings()
+            settings['auto_tint'] = self.chk_wb_link.isChecked()
+            self.image_settings[file_path] = settings
 
     # ===================================================================
     # COPY / PASTE SETTINGS
@@ -1531,6 +1531,7 @@ class FlashbackEditor(QMainWindow):
 
     def copy_settings(self):
         self.settings_clipboard = self.processor.get_settings()
+        self.settings_clipboard['auto_tint'] = self.chk_wb_link.isChecked()
         self.mode_label.setText("Settings copied")
         self.mode_label.setStyleSheet("color: #FF8A35; font-size: 12px;")
         QTimer.singleShot(2000, lambda: self.mode_label.setText(""))
@@ -1569,6 +1570,9 @@ class FlashbackEditor(QMainWindow):
 
             if self.current_index in paste_selected:
                 img_array = self.processor.set_settings(self.settings_clipboard)
+                self.chk_wb_link.blockSignals(True)
+                self.chk_wb_link.setChecked(self.settings_clipboard.get('auto_tint', False))
+                self.chk_wb_link.blockSignals(False)
                 self.update_sliders_from_processor()
                 self.display_image(img_array)
                 self.update_thumbnail_for_settings(self.current_index, self.settings_clipboard)
@@ -1584,6 +1588,9 @@ class FlashbackEditor(QMainWindow):
 
         else:
             img_array = self.processor.set_settings(self.settings_clipboard)
+            self.chk_wb_link.blockSignals(True)
+            self.chk_wb_link.setChecked(self.settings_clipboard.get('auto_tint', False))
+            self.chk_wb_link.blockSignals(False)
             self.update_sliders_from_processor()
             self.display_image(img_array)
             self.save_current_settings()
