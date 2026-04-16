@@ -14,32 +14,42 @@ This app processes Flashback One35 v2 RAW files through a custom color pipeline 
 
 Get the latest release for your platform from the [Releases](../../releases/latest) page.
 
-| Platform | Status |
-|----------|--------|
-| [macOS (Apple Silicon)](https://github.com/lofilogic/flashback-raw-editor/releases/download/v0.17.0-beta1/Flashback-macOS.zip) | ✓ Tested |
-| [Windows](https://github.com/lofilogic/flashback-raw-editor/releases/download/v0.17.0-beta1/Flashback-Windows.zip) | ✓ Tested |
-| [Linux x86_64](https://github.com/lofilogic/flashback-raw-editor/releases/download/v0.17.0-beta1/Flashback-Linux.zip) | ⚠ Untested — binary provided, feedback welcome |
+| Platform | Download | Status |
+|----------|----------|--------|
+| macOS (Apple Silicon) | [`Flashback-macOS.dmg`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v0.1.0-rc1/Flashback-macOS.dmg) | ✓ Tested |
+| Windows | [`Flashback-Windows-Setup.exe`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v0.1.0-rc1/Flashback-Windows-Setup.exe) | ✓ Tested |
+| Linux x86_64 | [`Flashback-Linux.AppImage`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v0.1.0-rc1/Flashback-Linux.AppImage) | ⚠ Untested — feedback welcome |
 
 ### macOS
-1. Download `Flashback-macOS.zip` and unzip it
-2. Move `Flashback One35 v2.app` to your Applications folder
-3. On first launch, macOS will block the app because it isn't signed by an Apple-registered developer. Here's how to open it:
+1. Open `Flashback-macOS.dmg`
+2. Drag **Flashback One35** into your Applications folder
+3. On first launch, macOS will block the app because it isn't signed. To open it:
+   - Double-click the app — macOS will show a warning and refuse to open it
+   - Go to **System Settings → Privacy & Security**
+   - Scroll down — you'll see *"Flashback One35 v2 was blocked"*
+   - Click **Open Anyway** and confirm
 
-- Double-click **Flashback One35 v2.app** — macOS will show a warning and refuse to open it
-- Go to **System Settings → Privacy & Security**
-- Scroll down to the Security section — you'll see a message saying *"Flashback One35 v2 was blocked"*
-- Click **Open Anyway**
-- Confirm in the dialog that appears the next time you open
-You only need to do this once. After that the app opens normally.
+   You only need to do this once.
 
 ### Windows
-1. Download `Flashback-Windows.zip` and unzip it
-2. Run `Flashback One35.exe` from the extracted folder
+1. Run `Flashback-Windows-Setup.exe`
+2. If SmartScreen shows "Windows protected your PC" (the app is not yet code-signed):
+   - Click **More info**
+   - Click **Run anyway**
+3. Follow the installer — it will create a Start Menu entry and optional desktop shortcut
 
 ### Linux
-1. Download `Flashback-Linux.zip` and unzip it
-2. Make the binary executable: `chmod +x "Flashback One35"`
-3. Run it: `./"Flashback One35"`
+1. Download `Flashback-Linux.AppImage`
+2. Make it executable and run:
+   ```
+   chmod +x Flashback-Linux.AppImage
+   ./Flashback-Linux.AppImage
+   ```
+3. If you get a FUSE error, either install it (`sudo apt install libfuse2`) or extract and run directly:
+   ```
+   ./Flashback-Linux.AppImage --appimage-extract
+   ./squashfs-root/AppRun
+   ```
 
 ---
 
@@ -82,6 +92,7 @@ You only need to do this once. After that the app opens normally.
 - `Double-click` any slider — reset to default
 - `Cmd/Ctrl + C` — copy settings from current image
 - `Cmd/Ctrl + V` — paste settings to selected images
+- `auto-tint` - Keeps an aesthetic appearance by automatically compensating tint
 
 **Zen mode**
 - Click the zen mode button to hide all controls and show only the image
