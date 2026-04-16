@@ -42,7 +42,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libraw-dev xvfb libglib2.0-0 libgl1
+          sudo apt-get install -y libraw-dev xvfb libglib2.0-0 libgl1 libfuse2
 
       - name: Install Python dependencies
         run: pip install -r requirements-build.txt
@@ -50,7 +50,7 @@ jobs:
       - name: Build with PyInstaller (macOS & Windows)
         if: runner.os != 'Linux'
         env:
-          PYTHONUTF8: "1"   # Windows CP1252 can't print ✓ — force UTF-8
+          PYTHONUTF8: "1"   # Windows CP1252 can't print special chars — force UTF-8
           FLASHBACK_VERSION: ${{ github.ref_name }}
         run: pyinstaller Flashback.spec
 
@@ -60,40 +60,85 @@ jobs:
           FLASHBACK_VERSION: ${{ github.ref_name }}
         run: xvfb-run pyinstaller Flashback.spec
 
-      - name: Zip build output (macOS)
+      # ── macOS: DMG ──────────────────────────────────────────────
+      - name: Create DMG (macOS)
         if: runner.os == 'macOS'
-        run: ditto -c -k --sequesterRsrc --keepParent "dist/Flashback One35.app" Flashback-macOS.zip
-
-      - name: Zip build output (Windows)
-        if: runner.os == 'Windows'
-        run: Compress-Archive -Path "dist\Flashback One35" -DestinationPath Flashback-Windows.zip
-
-      - name: Zip build output (Linux)
-        if: runner.os == 'Linux'
-        run: cd dist && zip -r ../Flashback-Linux.zip "Flashback One35"
+        run: |
+          brew install create-dmg
+          create-dmg \
+            --volname "Flashback One35 v2" \
+            --volicon "assets/icons/icon.icns" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "Flashback One35.app" 150 185 \
+            --app-drop-link 450 185 \
+            --no-internet-enable \
+            "Flashback-macOS.dmg" \
+            "dist/Flashback One35.app"
 
       - name: Upload artifact (macOS)
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
           name: Flashback-macOS
-          path: Flashback-macOS.zip
+          path: Flashback-macOS.dmg
           retention-days: 14
+
+      # ── Windows: Inno Setup installer ───────────────────────────
+      - name: Install Inno Setup (Windows)
+        if: runner.os == 'Windows'
+        run: choco install innosetup -y --no-progress
+
+      - name: Create installer (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion="$version" packaging\flashback.iss
 
       - name: Upload artifact (Windows)
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
           name: Flashback-Windows
-          path: Flashback-Windows.zip
+          path: packaging/Output/Flashback-Windows-Setup.exe
           retention-days: 14
+
+      # ── Linux: AppImage ─────────────────────────────────────────
+      - name: Create AppImage (Linux)
+        if: runner.os == 'Linux'
+        env:
+          FLASHBACK_VERSION: ${{ github.ref_name }}
+        run: |
+          # Build the AppDir from PyInstaller output
+          APPDIR="Flashback_One35.AppDir"
+          mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/icons/hicolor/256x256/apps"
+
+          # Move PyInstaller output into AppDir
+          cp -r "dist/Flashback One35"/* "$APPDIR/usr/bin/"
+
+          # Desktop file and icon
+          cp packaging/flashback.desktop "$APPDIR/flashback.desktop"
+          cp assets/icons/icon.png "$APPDIR/flashback.png"
+          cp assets/icons/icon.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/flashback.png"
+
+          # AppRun launcher
+          printf '#!/bin/bash\nSELF="$(readlink -f "$0")"\nHERE="${SELF%%/*}"\nexec "${HERE}/usr/bin/Flashback One35" "$@"\n' > "$APPDIR/AppRun"
+          chmod +x "$APPDIR/AppRun"
+
+          # Download appimagetool
+          curl -sL "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage" -o appimagetool
+          chmod +x appimagetool
+
+          # Build the AppImage
+          ARCH=x86_64 ./appimagetool "$APPDIR" "Flashback-Linux.AppImage"
 
       - name: Upload artifact (Linux)
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
           name: Flashback-Linux
-          path: Flashback-Linux.zip
+          path: Flashback-Linux.AppImage
           retention-days: 14
 
   # Runs after all 3 platform builds succeed — only on version tags
@@ -114,7 +159,10 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*.zip
+          files: |
+            artifacts/**/*.dmg
+            artifacts/**/*.exe
+            artifacts/**/*.AppImage
           generate_release_notes: true
           draft: false
           # Tags containing -beta or -rc are automatically marked as pre-release

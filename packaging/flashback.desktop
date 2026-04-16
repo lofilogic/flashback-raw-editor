@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Flashback One35 v2
+Comment=Film emulation photo editor
+Exec=Flashback One35
+Icon=flashback
+Categories=Graphics;Photography;ImageProcessing;
+Terminal=false
+StartupWMClass=flashback

@@ -16,8 +16,11 @@ with open('_version.py', 'w') as _vf:
 # Pre-compile Numba cache automatically before bundling.
 import subprocess
 print("=== Pre-compiling Numba cache ===")
-subprocess.run([sys.executable, 'precompile_numba.py'], check=True)
-print("=== Numba cache ready ===\n")
+try:
+    subprocess.run([sys.executable, 'precompile_numba.py'], check=True)
+    print("=== Numba cache ready ===\n")
+except subprocess.CalledProcessError as e:
+    print(f"WARNING: Numba precompile failed ({e}). App will JIT-compile on first launch.\n")
 
 # Bundle the pre-compiled Numba cache so new users don't hit the JIT freeze.
 _version_key = f"numba_{llvmlite.__version__}_0"
@@ -30,18 +33,17 @@ elif _system == 'Windows':
 else:
     _cache_base = os.path.expanduser('~/.cache/FlashbackOne35')
 _cache_src = os.path.join(_cache_base, _version_key)
-if not os.path.isdir(_cache_src):
-    raise RuntimeError(
-        f"Numba cache not found at {_cache_src}.\n"
-        f"Run precompile_numba.py before building."
-    )
+_have_cache = os.path.isdir(_cache_src)
+if not _have_cache:
+    print(f"WARNING: Numba cache not found at {_cache_src}. App will JIT-compile on first launch.")
 
 # Collect data files
 added_files = [
     # (source_path, destination_folder_in_app)
     ('assets', 'assets'),
-    (_cache_src, f'_numba_cache/{_version_key}'),
 ]
+if _have_cache:
+    added_files.append((_cache_src, f'_numba_cache/{_version_key}'))
 
 a = Analysis(
     ['main.py'],
@@ -153,10 +155,10 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 _icon = None
 if _system == 'Darwin':
-    _icon = 'assets/icon.icns'
+    _icon = 'assets/icons/icon.icns'
 elif _system == 'Windows':
-    if os.path.exists('assets/icon.ico'):
-        _icon = 'assets/icon.ico'
+    if os.path.exists('assets/icons/icon.ico'):
+        _icon = 'assets/icons/icon.ico'
 
 exe = EXE(
     pyz,
@@ -192,7 +194,7 @@ if _system == 'Darwin':
     app = BUNDLE(
         coll,  # Bundle the COLLECT, not exe directly
         name='Flashback One35.app',
-        icon='assets/icon.icns',
+        icon='assets/icons/icon.icns',
         bundle_identifier='com.julian.flashback',
         info_plist={
             'CFBundleName': 'Flashback One35 v2',
