@@ -5,7 +5,7 @@ import sys
 import platform
 
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QSurfaceFormat
+from PySide6.QtGui import QSurfaceFormat, QPalette, QColor
 
 from ui.editor import FlashbackEditor
 from _version import __version__
@@ -32,8 +32,27 @@ def main():
     app.setApplicationName("Flashback One35 v2")
     app.setOrganizationName("Flashback")
 
-    # Fusion style provides a consistent dark theme across platforms
+    # Fusion style with an explicit dark palette — ensures consistent appearance
+    # regardless of the OS light/dark mode setting (important for Windows VMs).
     app.setStyle("Fusion")
+    dark = QPalette()
+    dark.setColor(QPalette.ColorRole.Window,          QColor(49,  49,  49))
+    dark.setColor(QPalette.ColorRole.WindowText,      QColor(208, 208, 208))
+    dark.setColor(QPalette.ColorRole.Base,            QColor(35,  35,  35))
+    dark.setColor(QPalette.ColorRole.AlternateBase,   QColor(53,  53,  53))
+    dark.setColor(QPalette.ColorRole.ToolTipBase,     QColor(49,  49,  49))
+    dark.setColor(QPalette.ColorRole.ToolTipText,     QColor(208, 208, 208))
+    dark.setColor(QPalette.ColorRole.Text,            QColor(208, 208, 208))
+    dark.setColor(QPalette.ColorRole.Button,          QColor(61,  61,  61))
+    dark.setColor(QPalette.ColorRole.ButtonText,      QColor(208, 208, 208))
+    dark.setColor(QPalette.ColorRole.BrightText,      QColor(255, 255, 255))
+    dark.setColor(QPalette.ColorRole.Link,            QColor(255, 138, 53))
+    dark.setColor(QPalette.ColorRole.Highlight,       QColor(255, 138, 53))
+    dark.setColor(QPalette.ColorRole.HighlightedText, QColor(30,  30,  30))
+    dark.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, QColor(80, 80, 80))
+    dark.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text,       QColor(80, 80, 80))
+    dark.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(80, 80, 80))
+    app.setPalette(dark)
 
     window = FlashbackEditor()
     window.setWindowTitle(f"Flashback One35 v2 ({__version__})")

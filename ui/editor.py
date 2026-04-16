@@ -7,6 +7,7 @@ FullscreenZenOverlay — frameless fullscreen view with gesture-based adjustment
 """
 import sys
 import os
+import shutil
 import time
 import traceback
 import platform
@@ -22,7 +23,7 @@ import colour
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QSlider, QPushButton, QFileDialog, QMessageBox, QProgressBar,
-    QScrollArea, QFrame, QSizePolicy,
+    QScrollArea, QFrame, QSizePolicy, QCheckBox,
 )
 from PySide6.QtCore import (
     Qt, QTimer, QSize, Signal, QPoint, QThread, QEvent,
@@ -244,6 +245,8 @@ class FlashbackEditor(QMainWindow):
         self.add_thumbnail_worker = None
         self._thumbnails_dirty = set()
 
+        self._tint_manual_offset = 0.0  # user's manual tint correction on top of WB coupling
+
         self.pending_render = False
 
         lut_path = resource_path("assets/luts/look.cube")
@@ -380,6 +383,13 @@ class FlashbackEditor(QMainWindow):
         self.slider_wb.blockSignals(False)
         self.label_wb.setText("5600K")
         self.processor.user_settings['wb_temp'] = 0.0
+        if self.chk_wb_link.isChecked():
+            self._tint_manual_offset = 0.0
+            self.slider_tint.blockSignals(True)
+            self.slider_tint.setValue(0)
+            self.slider_tint.blockSignals(False)
+            self.label_tint.setText("+0.0")
+            self.processor.user_settings['tint'] = 0.0
         self.processor.preview_mode = 'hq'
         img_array = self.processor.render_preview()
         if img_array is not None:
@@ -389,6 +399,7 @@ class FlashbackEditor(QMainWindow):
             self.update_mode_label()
 
     def reset_tint_slider(self):
+        self._tint_manual_offset = 0.0
         self.slider_tint.blockSignals(True)
         self.slider_tint.setValue(0)
         self.slider_tint.blockSignals(False)
@@ -411,6 +422,9 @@ class FlashbackEditor(QMainWindow):
         self.resize(1100, 600)
         QTimer.singleShot(0, self.center_window)
 
+        roboto_path = resource_path("assets/fonts/Roboto.ttf")
+        if os.path.exists(roboto_path):
+            QFontDatabase.addApplicationFont(roboto_path)
         font_family = "Roboto" if QFontDatabase.hasFamily("Roboto") else "Arial"
         font = QFont(font_family)
         font.setPointSize(10)
@@ -536,6 +550,7 @@ class FlashbackEditor(QMainWindow):
         self.btn_rotate_cw.clicked.connect(self.rotate_clockwise)
         rotate_layout.addWidget(self.btn_rotate_cw)
 
+        image_layout.addSpacing(6)
         image_layout.addLayout(rotate_layout)
         top_layout.addWidget(image_container, 2)
         top_layout.addStretch(1)
@@ -548,6 +563,7 @@ class FlashbackEditor(QMainWindow):
 
         right_container = QWidget()
         right_container.setFixedWidth(280)
+        self.right_container = right_container
         right_layout = QVBoxLayout(right_container)
         right_layout.setContentsMargins(20, 0, 0, 0)
         right_layout.setSpacing(5)
@@ -624,7 +640,7 @@ class FlashbackEditor(QMainWindow):
         right_layout.addSpacing(15)
 
         # White Balance
-        wb_value = QLabel("5600 K")
+        wb_value = QLabel("5600K")
         wb_value.setStyleSheet("color: #626262; font-size: 14px;")
         wb_value.setAlignment(Qt.AlignCenter)
         right_layout.addWidget(wb_value)
@@ -659,15 +675,43 @@ class FlashbackEditor(QMainWindow):
         self.btn_wb_plus.clicked.connect(lambda: self.adjust_wb(50))
         wb_row.addWidget(self.btn_wb_plus)
         right_layout.addLayout(wb_row)
-        right_layout.addSpacing(15)
+        right_layout.addSpacing(10)
 
-        # Tint
-        tint_value = QLabel("+ 0.0")
+        # Tint label + Auto tint checkbox in one row
+        tint_header = QHBoxLayout()
+        tint_header.setContentsMargins(0, 0, 0, 0)
+        tint_header.setSpacing(0)
+
+        self.chk_wb_link = QCheckBox("Auto tint")
+        self.chk_wb_link.setChecked(False)
+        self.chk_wb_link.setStyleSheet("""
+            QCheckBox { color: #505050; font-size: 11px; spacing: 4px; }
+            QCheckBox::indicator { width: 11px; height: 11px; border-radius: 2px;
+                border: 1px solid #555; background: #3d3d3d; }
+            QCheckBox::indicator:checked { background: #FF8A35; border-color: #FF8A35; }
+            QCheckBox::indicator:hover { border-color: #888; }
+        """)
+        self.chk_wb_link.setToolTip(
+            "Auto tint: WB moves tint proportionally.\n"
+            "Manual tint nudges are preserved on top."
+        )
+        self.chk_wb_link.toggled.connect(self._on_wb_link_toggled)
+
+        # Invisible spacer on the left matching checkbox width to keep label centered
+        left_spacer = QWidget()
+        left_spacer.setFixedWidth(self.chk_wb_link.sizeHint().width())
+        tint_header.addWidget(left_spacer)
+
+        tint_value = QLabel("+0.0")
         tint_value.setStyleSheet("color: #626262; font-size: 14px;")
         tint_value.setAlignment(Qt.AlignCenter)
-        right_layout.addWidget(tint_value)
         self.label_tint = tint_value
-        right_layout.addSpacing(5)
+        tint_header.addWidget(tint_value, 1, Qt.AlignVCenter)
+
+        tint_header.addWidget(self.chk_wb_link, 0, Qt.AlignVCenter)
+
+        right_layout.addLayout(tint_header)
+        right_layout.addSpacing(10)
 
         tint_row = QHBoxLayout()
         tint_row.setSpacing(8)
@@ -823,14 +867,6 @@ class FlashbackEditor(QMainWindow):
         act_about.triggered.connect(self.show_about)
         help_menu.addAction(act_about)
 
-        # ApplicationSpecificRole keeps it in the macOS app menu under the correct
-        # app name, without renaming it to "Preferences" or changing the shortcut.
-        act_prefs = QAction("Advanced Settings", self)
-        act_prefs.setMenuRole(QAction.MenuRole.ApplicationSpecificRole)
-        act_prefs.setShortcut(QKeySequence("F12"))
-        act_prefs.triggered.connect(self._toggle_advanced_settings)
-        help_menu.addAction(act_prefs)
-
         # ── File ──────────────────────────────────────────────────────
         file_menu = mb.addMenu("File")
 
@@ -854,6 +890,15 @@ class FlashbackEditor(QMainWindow):
         act_output_dir = QAction("Set Output Directory…", self)
         act_output_dir.triggered.connect(self.select_output_dir)
         file_menu.addAction(act_output_dir)
+
+        file_menu.addSeparator()
+
+        # ApplicationSpecificRole → macOS app menu; stays in File on Windows/Linux
+        act_prefs = QAction("Advanced Settings", self)
+        act_prefs.setMenuRole(QAction.MenuRole.ApplicationSpecificRole)
+        act_prefs.setShortcut(QKeySequence("F12"))
+        act_prefs.triggered.connect(self._toggle_advanced_settings)
+        file_menu.addAction(act_prefs)
 
         # ── Edit ──────────────────────────────────────────────────────
         # Note: macOS automatically appends "Start Dictation" and "Emoji & Symbols"
@@ -921,7 +966,7 @@ class FlashbackEditor(QMainWindow):
             f"<b>Flashback One35 v2</b><br>"
             f"Version {__version__}<br><br>"
             "A RAW editor for Flashback film cameras.<br><br>"
-            "© 2024 Flashback"
+            "© 2026 Flashback"
         )
 
     def _toggle_advanced_settings(self):
@@ -1320,6 +1365,10 @@ class FlashbackEditor(QMainWindow):
         self.slider_wb.blockSignals(False)
         self.slider_tint.blockSignals(False)
 
+        # Keep the manual tint offset coherent with the newly loaded settings
+        if self.chk_wb_link.isChecked():
+            self._tint_manual_offset = settings['tint'] - self._coupled_tint(settings['wb_temp'])
+
     # ===================================================================
     # SLIDER HANDLERS
     # ===================================================================
@@ -1342,11 +1391,49 @@ class FlashbackEditor(QMainWindow):
             self.update_current_thumbnail(img_array)
             self.update_mode_label()
 
+    def _on_wb_link_toggled(self, checked):
+        if checked:
+            self.slider_wb.setMinimum(-3000)
+            self.slider_wb.setMaximum(3000)
+        else:
+            clamped = max(-2000, min(2000, self.slider_wb.value()))
+            self.slider_wb.setMinimum(-2000)
+            self.slider_wb.setMaximum(2000)
+            if self.slider_wb.value() != clamped:
+                self.slider_wb.setValue(clamped)
+
+    def _coupled_tint(self, wb_offset):
+        """Coupled tint value for a given WB offset from neutral (5600K).
+        Linear ±6: 0 → 0,  -2000 → +6,  +2000 → -6.
+        Returns tint in actual units (same as processor.user_settings['tint']).
+        """
+        return wb_offset / 2000.0 * -6.0
+
+    def _apply_wb_tint_link(self, wb_value):
+        """When the link is active: compute coupled tint + manual offset, update
+        the tint slider/label without triggering on_tint_slider_moved, and update
+        the processor setting.  Returns the new tint value."""
+        coupled = self._coupled_tint(wb_value)
+        new_tint = max(-10.0, min(10.0, coupled + self._tint_manual_offset))
+        self.processor.user_settings['tint'] = new_tint
+        self.slider_tint.blockSignals(True)
+        self.slider_tint.setValue(int(round(new_tint * 2)))
+        self.label_tint.setText(f"{new_tint:+.1f}")
+        self.slider_tint.blockSignals(False)
+        return new_tint
+
     def on_wb_slider_moved(self, value):
         self.processor.preview_mode = 'fast'
         temp_absolute = 5600 + value
         self.label_wb.setText(f"{temp_absolute}K")
-        img_array = self.processor.update_setting('wb_temp', value)
+
+        if self.chk_wb_link.isChecked():
+            self._apply_wb_tint_link(value)
+            self.processor.user_settings['wb_temp'] = value
+            img_array = self.processor.render_preview()
+        else:
+            img_array = self.processor.update_setting('wb_temp', value)
+
         self.display_image(img_array)
         self.update_current_thumbnail(img_array)
         self.save_current_settings()
@@ -1364,6 +1451,9 @@ class FlashbackEditor(QMainWindow):
         self.processor.preview_mode = 'fast'
         tint = value / 2.0
         self.label_tint.setText(f"{tint:+.1f}")
+        # Record how far the user has nudged tint away from the coupled position
+        if self.chk_wb_link.isChecked():
+            self._tint_manual_offset = tint - self._coupled_tint(self.slider_wb.value())
         img_array = self.processor.update_setting('tint', tint)
         self.display_image(img_array)
         self.update_current_thumbnail(img_array)
@@ -1409,6 +1499,7 @@ class FlashbackEditor(QMainWindow):
         self.slider_wb.blockSignals(False)
         self.slider_tint.blockSignals(False)
 
+        self._tint_manual_offset = 0.0
         self.processor.user_settings = {'exposure_ev': 0.0, 'wb_temp': 0, 'tint': 0.0}
         img_array = self.processor.render_preview()
         self.display_image(img_array)
@@ -1545,6 +1636,22 @@ class FlashbackEditor(QMainWindow):
         if reply == QMessageBox.No:
             return
 
+        # Estimate ~50 MB per TIFF, ~5 MB per JPEG, warn if disk space is low
+        mb_per_image = 50 if self.export_tiff_mode else 5
+        required_mb = len(indices_to_process) * mb_per_image
+        try:
+            free_mb = shutil.disk_usage(self.output_dir).free // (1024 * 1024)
+            if free_mb < required_mb:
+                reply = QMessageBox.warning(
+                    self, "Low Disk Space",
+                    f"Export may need ~{required_mb} MB but only {free_mb} MB free.\nContinue anyway?",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                if reply == QMessageBox.No:
+                    return
+        except OSError:
+            pass
+
         self.progress_bar.setMaximum(len(indices_to_process))
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(True)
@@ -1663,6 +1770,9 @@ class FlashbackEditor(QMainWindow):
             event.accept()
         else:
             super().keyPressEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
