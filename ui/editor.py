@@ -663,12 +663,7 @@ class FlashbackEditor(QMainWindow):
             ),
         )
         l = QHBoxLayout(bar)
-        # On mac leave room under the transparent title-bar traffic lights.
-        left_pad = 12
-        if sys.platform == "darwin":
-            from ui.native_chrome import MAC_TRAFFIC_LIGHT_WIDTH
-            left_pad = MAC_TRAFFIC_LIGHT_WIDTH
-        l.setContentsMargins(left_pad, 0, 12, 0)
+        l.setContentsMargins(12, 0, 12, 0)
         l.setSpacing(6)
 
         def icon_btn(tooltip, svg_name=None, text=None, size=28):

@@ -48,7 +48,8 @@ def _apply_mac(qwindow, theme_name: str) -> None:
     )
     ns_window.setTitlebarAppearsTransparent_(True)
     ns_window.setTitleVisibility_(NSWindowTitleHidden)
-    ns_window.setMovableByWindowBackground_(True)
+    # NOTE: do NOT enable movableByWindowBackground — it makes every drag
+    # anywhere in the window move the window, which breaks slider scrubbing.
 
     # Hide the 1px separator line that macOS draws below the titlebar on Big Sur+.
     try:
