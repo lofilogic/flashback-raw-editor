@@ -118,7 +118,7 @@ def apply_chromatic_aberration(image, strength=CHROMATIC_ABERRATION_STRENGTH, st
         r_acc += cv2.warpAffine(image[:, :, 0], M_r, (w, h),
                                 flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
 
-        scale_g = 1.0 - (strength/4 * factor)
+        scale_g = 1.0 - (strength/8 * factor)
         M_g = cv2.getRotationMatrix2D(center, 0, scale_g)
         g_acc += cv2.warpAffine(image[:, :, 1], M_g, (w, h),
                                 flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
@@ -138,7 +138,7 @@ def apply_chromatic_aberration(image, strength=CHROMATIC_ABERRATION_STRENGTH, st
 
     for i in range(steps):
         factor = i / max(1, steps - 1) if steps > 1 else 1.0
-        scale_z = 1.0 + (strength * factor/4)
+        scale_z = 1.0 + (strength * factor)
         M_z = cv2.getRotationMatrix2D(center, 0, scale_z)
         zoom_acc += cv2.warpAffine(ca_result, M_z, (w, h),
                                    flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
@@ -181,9 +181,9 @@ def _halation_glow(img_f, gray, threshold, blur_radius, k=20.0):
     mask_3d = np.stack([mask, mask, mask], axis=2)
     highlights = img_f * mask_3d
     glow = np.zeros_like(highlights)
-    glow[:, :, 0] = cv2.GaussianBlur(highlights[:, :, 0] * 1.4, (0, 0), sigmaX=blur_radius)
+    glow[:, :, 0] = cv2.GaussianBlur(highlights[:, :, 0] * 1.0, (0, 0), sigmaX=blur_radius)
     glow[:, :, 1] = cv2.GaussianBlur(highlights[:, :, 1] * 0.6, (0, 0), sigmaX=blur_radius)
-    glow[:, :, 2] = cv2.GaussianBlur(highlights[:, :, 2] * 0.2, (0, 0), sigmaX=blur_radius)
+    glow[:, :, 2] = cv2.GaussianBlur(highlights[:, :, 2] * 0.0, (0, 0), sigmaX=blur_radius)
     return glow
 
 
