@@ -29,6 +29,7 @@ class DebugPanel(QWidget):
         self.setWindowTitle("Advanced Settings (F12 to toggle)")
         self.setMinimumWidth(380)
         self.setMaximumWidth(450)
+        self.resize(450, 900)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)

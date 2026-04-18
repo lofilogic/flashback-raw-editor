@@ -20,3 +20,4 @@ scipy==1.13.1
 shiboken6==6.10.2
 typing_extensions==4.15.0
 zipp==3.23.0
+pyobjc-framework-Cocoa==11.0; sys_platform == "darwin"

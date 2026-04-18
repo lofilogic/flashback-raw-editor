@@ -44,6 +44,13 @@ from .widgets import (
     FadeOverlayWidget, LoaderOverlay, ZoomableImageWidget,
 )
 from .debug_panel import DebugPanel
+from .scrub_slider import ScrubSlider
+from . import theme
+from .theme import (
+    C, UI_FONT, MONO_FONT,
+    icon_btn_qss, section_title_qss, section_reset_link_qss,
+    process_btn_qss, format_pill_qss, svg_icon,
+)
 
 
 # =============================================================================
@@ -240,6 +247,16 @@ class FlashbackEditor(QMainWindow):
         self.app_settings = QSettings("Flashback", "Editor")
         self.pending_file_path = None
 
+        # Theme: load persisted choice (default: light) and register listener
+        # so every setStyleSheet()/icon registered below can be re-applied.
+        saved_theme = self.app_settings.value("theme", "light")
+        if saved_theme in ("light", "dark"):
+            theme.set_theme(saved_theme)
+        self._themed_styles: list = []   # (widget, style_builder) pairs
+        self._themed_icons: list = []    # (button, rel_path, color_token, size) tuples
+        self._themed_repaint: list = []  # widgets whose paintEvent uses palette
+        theme.register_theme_listener(self._apply_theme)
+
         self.thumbnails_loading = False
         self.thumbnail_worker = None
         self.add_thumbnail_worker = None
@@ -381,14 +398,14 @@ class FlashbackEditor(QMainWindow):
         self.slider_wb.blockSignals(True)
         self.slider_wb.setValue(0)
         self.slider_wb.blockSignals(False)
-        self.label_wb.setText("5600K")
+        self.label_wb.setText("5600 K")
         self.processor.user_settings['wb_temp'] = 0.0
         if self.chk_wb_link.isChecked():
             self._tint_manual_offset = 0.0
             self.slider_tint.blockSignals(True)
             self.slider_tint.setValue(0)
             self.slider_tint.blockSignals(False)
-            self.label_tint.setText("+0.0")
+            self.label_tint.setText("+0")
             self.processor.user_settings['tint'] = 0.0
         self.processor.preview_mode = 'hq'
         img_array = self.processor.render_preview()
@@ -403,7 +420,7 @@ class FlashbackEditor(QMainWindow):
         self.slider_tint.blockSignals(True)
         self.slider_tint.setValue(0)
         self.slider_tint.blockSignals(False)
-        self.label_tint.setText("+0.0")
+        self.label_tint.setText("+0")
         self.processor.user_settings['tint'] = 0.0
         self.processor.preview_mode = 'hq'
         img_array = self.processor.render_preview()
@@ -414,443 +431,677 @@ class FlashbackEditor(QMainWindow):
             self.update_mode_label()
 
     # ===================================================================
+    # THEME HELPERS
+    # ===================================================================
+
+    def _themed(self, widget, style_builder):
+        """Apply `style_builder()` now and remember it for theme swaps."""
+        widget.setStyleSheet(style_builder())
+        self._themed_styles.append((widget, style_builder))
+        return widget
+
+    def _themed_icon(self, button, rel_path, color_token="text_label", size=14):
+        """Set an SVG icon on a button and remember it for re-tinting."""
+        button.setIcon(svg_icon(rel_path, color_token, size))
+        button.setIconSize(QSize(size, size))
+        self._themed_icons.append((button, rel_path, color_token, size))
+        return button
+
+    def _apply_theme(self):
+        """Re-run every registered stylesheet and icon with the current palette."""
+        for widget, builder in self._themed_styles:
+            try:
+                widget.setStyleSheet(builder())
+            except Exception:
+                pass
+        for button, rel_path, color_token, size in self._themed_icons:
+            try:
+                button.setIcon(svg_icon(rel_path, color_token, size))
+            except Exception:
+                pass
+        # Regenerate drag-overlay strings (they hold cached accent/text colours)
+        if hasattr(self, "_rebuild_drag_styles"):
+            self._rebuild_drag_styles()
+        # Dynamic styles (format pills, mode label, process-button-done, etc.)
+        # aren't registered — they're reapplied by their owners on the next
+        # state change. Trigger that here so the palette swap is immediate.
+        if hasattr(self, "btn_export_jpeg") and hasattr(self, "export_tiff_mode"):
+            try:
+                self.set_export_mode(self.export_tiff_mode)
+            except Exception:
+                pass
+        if hasattr(self, "mode_label"):
+            try:
+                self.update_mode_label()
+            except Exception:
+                pass
+        # Force a repaint on widgets that read the palette inside paintEvent
+        for w in self._themed_repaint:
+            try:
+                w.update()
+            except Exception:
+                pass
+        # Apple/Windows native chrome needs to follow the theme too
+        if getattr(self, "_native_chrome_applied", False):
+            try:
+                from ui import native_chrome
+                native_chrome.apply(self, theme.current_theme())
+            except Exception:
+                pass
+
+    def toggle_theme(self):
+        new_name = theme.toggle_theme()   # listeners fire → _apply_theme()
+        self.app_settings.setValue("theme", new_name)
+        self._refresh_theme_toggle_icon()
+
+    def _refresh_theme_toggle_icon(self):
+        btn = getattr(self, "btn_theme_toggle", None)
+        if btn is None:
+            return
+        # Unicode glyphs sidestep the need for bundled sun/moon SVGs.
+        btn.setText("☀" if theme.current_theme() == "dark" else "☾")
+
+    def _rebuild_drag_styles(self):
+        """Rebuild the cached drag-overlay stylesheets with current palette values."""
+        accent = C['accent']
+        text_dim = C['text_dim']
+        self._drag_style_active = (
+            f"QFrame {{ background: rgba(0,0,0,0.55); border: 2px dashed {accent}; border-radius: 8px; }}"
+            f"QLabel {{ color: {accent}; font-size: 16px; font-weight: 600; background: transparent; border: none; }}"
+        )
+        self._drag_style_dim = (
+            f"QFrame {{ background: rgba(0,0,0,0.35); border: 2px dashed {text_dim}; border-radius: 8px; }}"
+            f"QLabel {{ color: {text_dim}; font-size: 14px; font-weight: 500; background: transparent; border: none; }}"
+        )
+        # If they're currently visible, refresh whichever one is shown.
+        if hasattr(self, "drag_overlay"):
+            self.drag_overlay.setStyleSheet(self._drag_style_active)
+        if hasattr(self, "drag_overlay_add"):
+            self.drag_overlay_add.setStyleSheet(self._drag_style_dim)
+
+    # ===================================================================
     # UI CONSTRUCTION
     # ===================================================================
 
     def init_ui(self):
         self.setWindowTitle("Flashback One35 v2 Editor")
-        self.resize(1100, 600)
+        self.resize(1200, 760)
         QTimer.singleShot(0, self.center_window)
 
-        roboto_path = resource_path("assets/fonts/Roboto.ttf")
-        if os.path.exists(roboto_path):
-            QFontDatabase.addApplicationFont(roboto_path)
-        font_family = "Roboto" if QFontDatabase.hasFamily("Roboto") else "Arial"
-        font = QFont(font_family)
-        font.setPointSize(10)
-        self.setFont(font)
+        theme.load_app_fonts()
+        app_font = theme.ui_font(10, QFont.Normal)
+        self.setFont(app_font)
 
         main_widget = QWidget()
-        main_widget.setStyleSheet("background-color: #313131;")
+        main_widget.setObjectName("MainWidget")
+        main_widget.setAttribute(Qt.WA_StyledBackground, True)
+        self._themed(
+            main_widget,
+            lambda: f"QWidget#MainWidget {{ background-color: {C['bg_window']}; }}",
+        )
         self.setCentralWidget(main_widget)
         self.setAcceptDrops(True)
 
-        # Drag overlays (replace + add)
-        _drag_style_active = """
-            QFrame {
-                background-color: rgba(255, 138, 53, 0.25);
-                border: 3px solid #FF8A35;
-                border-radius: 10px;
-            }
-            QLabel {
-                background: transparent;
-                border: none;
-                color: #FF8A35;
-                font-size: 18px;
-                font-weight: bold;
-            }
-        """
-        _drag_style_dim = """
-            QFrame {
-                background-color: rgba(255, 138, 53, 0.07);
-                border: 2px dashed #888;
-                border-radius: 10px;
-            }
-            QLabel {
-                background: transparent;
-                border: none;
-                color: #888;
-                font-size: 18px;
-                font-weight: bold;
-            }
-        """
-        self._drag_style_active = _drag_style_active
-        self._drag_style_dim = _drag_style_dim
-
+        # Drag overlays — strings are rebuilt on each theme change so their
+        # accent/text colours stay in sync.
         self.drag_overlay = QFrame(main_widget)
-        self.drag_overlay.setStyleSheet(_drag_style_active)
         drag_layout = QVBoxLayout(self.drag_overlay)
-        drag_label = QLabel("Drop DNG files here")
-        drag_label.setAlignment(Qt.AlignCenter)
-        drag_layout.addWidget(drag_label)
+        self._drag_label = QLabel("Drop DNG files here")
+        self._drag_label.setAlignment(Qt.AlignCenter)
+        drag_layout.addWidget(self._drag_label)
         self.drag_overlay.hide()
 
         self.drag_overlay_add = QFrame(main_widget)
-        self.drag_overlay_add.setStyleSheet(_drag_style_dim)
         add_drag_layout = QVBoxLayout(self.drag_overlay_add)
-        add_drag_label = QLabel("Add images")
-        add_drag_label.setAlignment(Qt.AlignCenter)
-        add_drag_layout.addWidget(add_drag_label)
+        self._add_drag_label = QLabel("Add images")
+        self._add_drag_label.setAlignment(Qt.AlignCenter)
+        add_drag_layout.addWidget(self._add_drag_label)
         self.drag_overlay_add.hide()
+        self._rebuild_drag_styles()
 
-        main_layout = QHBoxLayout(main_widget)
-        main_layout.setContentsMargins(20, 10, 20, 10)
-        main_layout.setSpacing(20)
+        # === Root vertical layout: [toolbar | body | filmstrip | statusbar]
+        root = QVBoxLayout(main_widget)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        main_vlayout = QVBoxLayout()
-        main_vlayout.setContentsMargins(0, 0, 0, 0)
-        main_vlayout.setSpacing(5)
-        main_layout.addLayout(main_vlayout, 1)
+        # ─────────────── SUB-TOOLBAR ───────────────
+        root.addWidget(self._build_sub_toolbar())
 
-        # === TOP SECTION: Image + Controls ===
-        top_section = QWidget()
-        top_layout = QHBoxLayout(top_section)
-        top_layout.setContentsMargins(0, 0, 0, 0)
-        top_layout.setSpacing(0)
-        top_layout.addStretch(1)
+        # ─────────────── BODY: image + right rail ───────────────
+        body = QWidget()
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
 
-        # Image display
-        image_container = QWidget()
-        image_layout = QVBoxLayout(image_container)
-        image_layout.setContentsMargins(0, 0, 0, 0)
-        image_layout.setSpacing(0)
+        # Image column
+        image_col = QWidget()
+        image_col.setObjectName("ImageCol")
+        image_col.setAttribute(Qt.WA_StyledBackground, True)
+        self._themed(
+            image_col,
+            lambda: f"QWidget#ImageCol {{ background: {C['bg_window']}; }}",
+        )
+        image_col_layout = QVBoxLayout(image_col)
+        image_col_layout.setContentsMargins(20, 16, 20, 12)
+        image_col_layout.setSpacing(10)
 
         self.image_label = ZoomableImageWidget()
-        self.image_label.setMinimumSize(800, 600)
-        self.image_label.setStyleSheet("""
-            QScrollArea {
-                border: none;
-                background-color: #313131;
-                border-radius: 12px;
-            }
-        """)
-        image_layout.addWidget(self.image_label, 1)
+        self.image_label.setMinimumSize(640, 480)
+        image_col_layout.addWidget(self.image_label, 1)
 
-        self.zen_btn = QPushButton("⛶")
-        self.zen_btn.setFixedSize(30, 30)
-        self.zen_btn.setToolTip("Zen Mode (Fullscreen)")
-        self.zen_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3d3d3d; border-radius: 4px; color: #d0d0d0; font-size: 16px;
-            }
-            QPushButton:hover { background-color: #4d4d4d; }
-        """)
-        self.zen_btn.clicked.connect(self.enter_zen_mode)
+        image_col_layout.addWidget(self._build_image_meta_row())
+        body_layout.addWidget(image_col, 1)
 
-        rotate_layout = QHBoxLayout()
-        rotate_layout.setAlignment(Qt.AlignCenter)
-        rotate_layout.setSpacing(15)
-        rotate_layout.addWidget(self.zen_btn)
+        # Right rail
+        body_layout.addWidget(self._build_right_rail())
+        root.addWidget(body, 1)
 
-        self.btn_rotate_ccw = QPushButton("↺")
-        self.btn_rotate_ccw.setFixedSize(36, 36)
-        self.btn_rotate_ccw.setStyleSheet("""
-            QPushButton { background-color: #3d3d3d; color: #626262; border: none; border-radius: 8px; font-size: 16px; }
-            QPushButton:hover { background-color: #4a4a4a; }
-        """)
-        self.btn_rotate_ccw.clicked.connect(self.rotate_counterclockwise)
-        rotate_layout.addWidget(self.btn_rotate_ccw)
+        # ─────────────── FILMSTRIP ───────────────
+        filmstrip = QWidget()
+        filmstrip.setObjectName("Filmstrip")
+        filmstrip.setAttribute(Qt.WA_StyledBackground, True)
+        self._themed(
+            filmstrip,
+            lambda: (
+                f"QWidget#Filmstrip {{"
+                f"  background: {C['bg_strip']};"
+                f"  border-top: 1px solid {C['border_soft']};"
+                f"}}"
+            ),
+        )
+        filmstrip.setFixedHeight(96)
+        fl = QHBoxLayout(filmstrip)
+        fl.setContentsMargins(12, 12, 12, 12)
+        fl.setSpacing(0)
 
-        self.btn_rotate_cw = QPushButton("↻")
-        self.btn_rotate_cw.setFixedSize(36, 36)
-        self.btn_rotate_cw.setStyleSheet("""
-            QPushButton { background-color: #3d3d3d; color: #626262; border: none; border-radius: 8px; font-size: 16px; }
-            QPushButton:hover { background-color: #4a4a4a; }
-        """)
-        self.btn_rotate_cw.clicked.connect(self.rotate_clockwise)
-        rotate_layout.addWidget(self.btn_rotate_cw)
+        self.thumbnail_strip = ThumbnailStrip()
+        self.thumbnail_strip.thumbnail_clicked.connect(self.on_thumbnail_click)
+        self.thumbnail_strip.thumbnail_right_clicked.connect(self.on_thumbnail_right_click)
+        self.thumbnail_strip.thumbnail_paste_selected.connect(self.on_thumbnail_paste_selected)
+        fl.addWidget(self.thumbnail_strip)
 
-        image_layout.addSpacing(6)
-        image_layout.addLayout(rotate_layout)
-        top_layout.addWidget(image_container, 2)
-        top_layout.addStretch(1)
+        self.fade_overlay = FadeOverlayWidget(self.thumbnail_strip)
+        root.addWidget(filmstrip)
 
-        # Controls panel
-        right_wrapper = QWidget()
-        right_wrapper_layout = QVBoxLayout(right_wrapper)
-        right_wrapper_layout.setContentsMargins(0, 0, 0, 0)
-        right_wrapper_layout.addStretch()
+        # ─────────────── STATUS BAR ───────────────
+        root.addWidget(self._build_status_bar())
 
-        right_container = QWidget()
-        right_container.setFixedWidth(280)
-        self.right_container = right_container
-        right_layout = QVBoxLayout(right_container)
-        right_layout.setContentsMargins(20, 0, 0, 0)
-        right_layout.setSpacing(5)
-        right_layout.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+        self.loader_overlay = LoaderOverlay(self.centralWidget())
+        self.settings_clipboard = None
 
-        # Folder / Camera icons
-        icons_layout = QHBoxLayout()
-        icons_layout.setAlignment(Qt.AlignCenter)
-        icons_layout.setSpacing(15)
+        # Keyboard: ↑ rotates clockwise, ↓ rotates counter-clockwise
+        rotate_cw_sc = QAction(self)
+        rotate_cw_sc.setShortcut(QKeySequence(Qt.Key_Up))
+        rotate_cw_sc.triggered.connect(self.rotate_clockwise)
+        self.addAction(rotate_cw_sc)
+        rotate_ccw_sc = QAction(self)
+        rotate_ccw_sc.setShortcut(QKeySequence(Qt.Key_Down))
+        rotate_ccw_sc.triggered.connect(self.rotate_counterclockwise)
+        self.addAction(rotate_ccw_sc)
 
-        self.btn_open = QPushButton()
-        self.btn_open.setFixedSize(44, 44)
-        self.btn_open.setIcon(QPixmap(resource_path("assets/icons/folder.png")))
-        self.btn_open.setIconSize(QSize(24, 24))
-        self.btn_open.setStyleSheet("""
-            QPushButton { background-color: #3d3d3d; border: none; border-radius: 10px; }
-            QPushButton:hover { background-color: #4a4a4a; }
-        """)
+        # ⌘R resets all sliders
+        reset_sc = QAction(self)
+        reset_sc.setShortcut(QKeySequence("Ctrl+R"))
+        reset_sc.triggered.connect(self.reset_all_sliders)
+        self.addAction(reset_sc)
+
+        self._build_menu_bar()
+
+    # ── sub-toolbar ─────────────────────────────────────────────────────
+    def _build_sub_toolbar(self) -> QWidget:
+        bar = QWidget()
+        bar.setObjectName("SubToolbar")
+        bar.setAttribute(Qt.WA_StyledBackground, True)
+        bar.setFixedHeight(44)
+        self._themed(
+            bar,
+            lambda: (
+                f"QWidget#SubToolbar {{"
+                f"  background: {C['bg_toolbar']};"
+                f"  border-bottom: 1px solid {C['border_soft']};"
+                f"}}"
+            ),
+        )
+        l = QHBoxLayout(bar)
+        # On mac leave room under the transparent title-bar traffic lights.
+        left_pad = 12
+        if sys.platform == "darwin":
+            from ui.native_chrome import MAC_TRAFFIC_LIGHT_WIDTH
+            left_pad = MAC_TRAFFIC_LIGHT_WIDTH
+        l.setContentsMargins(left_pad, 0, 12, 0)
+        l.setSpacing(6)
+
+        def icon_btn(tooltip, svg_name=None, text=None, size=28):
+            b = QPushButton()
+            b.setFixedSize(size, size)
+            b.setToolTip(tooltip)
+            b.setCursor(Qt.PointingHandCursor)
+            self._themed(b, lambda s=size: icon_btn_qss(s, 4))
+            if svg_name:
+                self._themed_icon(b, svg_name, "text_label", 14)
+            elif text:
+                b.setText(text)
+                f = theme.ui_font(13, QFont.Medium)
+                b.setFont(f)
+            return b
+
+        self.btn_open = icon_btn("Open folder (⌘O)", "assets/icons/folder.svg")
         self.btn_open.clicked.connect(self.open_files)
-        icons_layout.addWidget(self.btn_open)
+        l.addWidget(self.btn_open)
 
-        self.btn_detect_camera = QPushButton()
-        self.btn_detect_camera.setFixedSize(44, 44)
-        self.btn_detect_camera.setIcon(QPixmap(resource_path("assets/icons/camera.png")))
-        self.btn_detect_camera.setIconSize(QSize(24, 24))
-        self.btn_detect_camera.setStyleSheet("""
-            QPushButton { background-color: #3d3d3d; border: none; border-radius: 10px; }
-            QPushButton:hover { background-color: #4a4a4a; }
-        """)
+        self.btn_detect_camera = icon_btn("Import from camera", "assets/icons/camera.svg")
         self.btn_detect_camera.clicked.connect(self.detect_camera)
-        icons_layout.addWidget(self.btn_detect_camera)
+        l.addWidget(self.btn_detect_camera)
 
-        right_layout.addLayout(icons_layout)
-        right_layout.addSpacing(35)
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.VLine)
+        self._themed(
+            sep1,
+            lambda: f"color: {C['border_input']}; background: {C['border_input']};",
+        )
+        sep1.setFixedSize(1, 16)
+        l.addSpacing(4)
+        l.addWidget(sep1)
+        l.addSpacing(4)
 
-        # === SLIDERS ===
+        self.zen_btn = icon_btn("Zen mode (fullscreen)", text="⛶")
+        self.zen_btn.clicked.connect(self.enter_zen_mode)
+        l.addWidget(self.zen_btn)
+
+        l.addStretch(1)
+
+        # Theme toggle (light ↔ dark). Glyph flips to indicate *destination* theme.
+        self.btn_theme_toggle = icon_btn("Toggle light / dark theme", text="☾")
+        self.btn_theme_toggle.clicked.connect(self.toggle_theme)
+        l.addWidget(self.btn_theme_toggle)
+        self._refresh_theme_toggle_icon()
+
+        return bar
+
+    # ── image meta row (under the image) ────────────────────────────────
+    def _build_image_meta_row(self) -> QWidget:
+        row = QWidget()
+        row.setFixedHeight(28)
+        rl = QHBoxLayout(row)
+        rl.setContentsMargins(2, 0, 2, 0)
+        rl.setSpacing(8)
+
+        self.label_filename = QLabel("")
+        self.label_filename.setFont(theme.ui_font(11, QFont.Medium))
+        self._themed(self.label_filename, lambda: f"color: {C['text_secondary']};")
+        rl.addWidget(self.label_filename)
+
+        rl.addStretch(1)
+
+        def small_btn(arrow, tooltip, slot):
+            b = QPushButton(arrow)
+            b.setFixedSize(24, 24)
+            b.setFont(theme.ui_font(13, QFont.Medium))
+            b.setToolTip(tooltip)
+            b.setCursor(Qt.PointingHandCursor)
+            self._themed(b, lambda: icon_btn_qss(24, 3))
+            b.clicked.connect(slot)
+            return b
+
+        # rotate buttons — pulled down from the toolbar to shorten travel
+        self.btn_rotate_ccw = small_btn("↺", "Rotate left (↓)", self.rotate_counterclockwise)
+        self.btn_rotate_cw = small_btn("↻", "Rotate right (↑)", self.rotate_clockwise)
+        rl.addWidget(self.btn_rotate_ccw)
+        rl.addWidget(self.btn_rotate_cw)
+
+        rl.addSpacing(12)
+
+        # counter
+        self.label_counter = QLabel("0 / 0")
+        self.label_counter.setFont(theme.mono_font(10, QFont.Medium))
+        self._themed(self.label_counter, lambda: f"color: {C['text_dim']};")
+        rl.addWidget(self.label_counter)
+
+        rl.addSpacing(8)
+
+        self.btn_prev_image = small_btn("‹", "Previous (←)", self.prev_image)
+        self.btn_next_image = small_btn("›", "Next (→)", self.next_image)
+        rl.addWidget(self.btn_prev_image)
+        rl.addWidget(self.btn_next_image)
+        return row
+
+    # ── right rail ──────────────────────────────────────────────────────
+    def _build_right_rail(self) -> QWidget:
+        rail = QWidget()
+        rail.setObjectName("RightRail")
+        rail.setAttribute(Qt.WA_StyledBackground, True)
+        rail.setFixedWidth(300)
+        self._themed(
+            rail,
+            lambda: (
+                f"QWidget#RightRail {{"
+                f"  background: {C['bg_rail']};"
+                f"  border-left: 1px solid {C['border_soft']};"
+                f"}}"
+            ),
+        )
+        v = QVBoxLayout(rail)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        v.addWidget(self._build_tone_section())
+        v.addWidget(self._divider())
+        v.addWidget(self._build_color_section())
+        v.addStretch(1)
+        v.addWidget(self._divider())
+        v.addWidget(self._build_export_footer())
+        return rail
+
+    def _divider(self) -> QFrame:
+        d = QFrame()
+        d.setFixedHeight(1)
+        self._themed(d, lambda: f"background: {C['border_soft']};")
+        return d
+
+    def _section_header(self, title: str, aside: QWidget = None) -> QWidget:
+        w = QWidget()
+        hl = QHBoxLayout(w)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setSpacing(8)
+        lbl = QLabel(title)
+        self._themed(lbl, lambda: section_title_qss())
+        hl.addWidget(lbl)
+        hl.addStretch(1)
+        if aside is not None:
+            hl.addWidget(aside)
+        return w
+
+    def _slider_row(self, label_text: str, value_label: QLabel, slider: ScrubSlider) -> QWidget:
+        """Label row + slider as a single column."""
+        box = QWidget()
+        bl = QVBoxLayout(box)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.setSpacing(6)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(8)
+        l = QLabel(label_text)
+        l.setFont(theme.ui_font(11, QFont.Medium))
+        self._themed(
+            l,
+            lambda: f"color: {C['text_label']}; letter-spacing: 0.4px;",
+        )
+        header.addWidget(l)
+        header.addStretch(1)
+        value_label.setFont(theme.mono_font(12, QFont.Medium))
+        self._themed(
+            value_label,
+            lambda: f"color: {C['text_secondary']}; padding: 2px 4px;",
+        )
+        header.addWidget(value_label)
+
+        header_w = QWidget()
+        header_w.setLayout(header)
+        bl.addWidget(header_w)
+        bl.addWidget(slider)
+        return box
+
+    def _build_tone_section(self) -> QWidget:
+        sec = QWidget()
+        v = QVBoxLayout(sec)
+        v.setContentsMargins(14, 14, 14, 14)
+        v.setSpacing(10)
+
+        # Floating "Reset" link (no TONE headline per design)
+        reset_link = QPushButton("Reset")
+        self._themed(reset_link, lambda: section_reset_link_qss())
+        reset_link.setCursor(Qt.PointingHandCursor)
+        reset_link.clicked.connect(self.reset_all_sliders)
+        self.btn_reset_all = reset_link
+        reset_row = QHBoxLayout()
+        reset_row.setContentsMargins(0, 0, 0, 0)
+        reset_row.addStretch(1)
+        reset_row.addWidget(reset_link)
+        reset_w = QWidget()
+        reset_w.setLayout(reset_row)
+        v.addWidget(reset_w)
 
         # Exposure
-        exp_value = QLabel("0.0 EV")
-        exp_value.setStyleSheet("color: #626262; font-size: 14px;")
-        exp_value.setAlignment(Qt.AlignCenter)
-        right_layout.addWidget(exp_value)
-        self.label_exposure = exp_value
-        right_layout.addSpacing(5)
-
-        exp_row = QHBoxLayout()
-        exp_row.setSpacing(8)
-
-        self.btn_exp_minus = QPushButton("◀")
-        self.btn_exp_minus.setFixedSize(24, 24)
-        self.btn_exp_minus.setStyleSheet("QPushButton { background-color: transparent; color: #555; border: none; font-size: 12px; padding: 0; } QPushButton:hover { color: #777; }")
-        self.btn_exp_minus.clicked.connect(lambda: self.adjust_exposure(-0.1))
-        exp_row.addWidget(self.btn_exp_minus)
-
-        self.slider_exposure = QSlider(Qt.Horizontal)
+        self.label_exposure = QLabel("0.0 EV")
+        self.label_exposure.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.slider_exposure = ScrubSlider(dual=True)
         self.slider_exposure.setMinimum(-20)
         self.slider_exposure.setMaximum(20)
         self.slider_exposure.setValue(0)
         self.slider_exposure.valueChanged.connect(self.on_exposure_slider_moved)
         self.slider_exposure.sliderReleased.connect(self.on_exposure_released)
         self.slider_exposure.installEventFilter(self)
-        self.slider_exposure.setStyleSheet("""
-            QSlider::groove:horizontal { height: 8px; background: #4a4a4a; border-radius: 4px; }
-            QSlider::handle:horizontal { background: #242424; border: none; width: 16px; height: 16px; margin: -4px 0; border-radius: 8px; }
-        """)
-        exp_row.addWidget(self.slider_exposure, 1)
+        v.addWidget(self._slider_row("EXPOSURE", self.label_exposure, self.slider_exposure))
+        return sec
 
-        self.btn_exp_plus = QPushButton("▶")
-        self.btn_exp_plus.setFixedSize(24, 24)
-        self.btn_exp_plus.setStyleSheet("QPushButton { background-color: transparent; color: #aaa; border: none; font-size: 12px; padding: 0; } QPushButton:hover { color: #ccc; }")
-        self.btn_exp_plus.clicked.connect(lambda: self.adjust_exposure(0.1))
-        exp_row.addWidget(self.btn_exp_plus)
-        right_layout.addLayout(exp_row)
-        right_layout.addSpacing(15)
+    def _build_color_section(self) -> QWidget:
+        sec = QWidget()
+        v = QVBoxLayout(sec)
+        v.setContentsMargins(14, 14, 14, 14)
+        v.setSpacing(10)
 
-        # White Balance
-        wb_value = QLabel("5600K")
-        wb_value.setStyleSheet("color: #626262; font-size: 14px;")
-        wb_value.setAlignment(Qt.AlignCenter)
-        right_layout.addWidget(wb_value)
-        self.label_wb = wb_value
-        right_layout.addSpacing(5)
-
-        wb_row = QHBoxLayout()
-        wb_row.setSpacing(8)
-
-        self.btn_wb_minus = QPushButton("◀")
-        self.btn_wb_minus.setFixedSize(24, 24)
-        self.btn_wb_minus.setStyleSheet("QPushButton { background-color: transparent; color: #7aa8d9; border: none; font-size: 12px; padding: 0; } QPushButton:hover { color: #9ac4e8; }")
-        self.btn_wb_minus.clicked.connect(lambda: self.adjust_wb(-50))
-        wb_row.addWidget(self.btn_wb_minus)
-
-        self.slider_wb = QSlider(Qt.Horizontal)
+        # Temperature (WB)
+        self.label_wb = QLabel("5600 K")
+        self.label_wb.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.slider_wb = ScrubSlider(dual=True)
         self.slider_wb.setMinimum(-3000)
         self.slider_wb.setMaximum(3000)
         self.slider_wb.setValue(0)
         self.slider_wb.valueChanged.connect(self.on_wb_slider_moved)
         self.slider_wb.sliderReleased.connect(self.on_wb_released)
         self.slider_wb.installEventFilter(self)
-        self.slider_wb.setStyleSheet("""
-            QSlider::groove:horizontal { height: 8px; background: #4a4a4a; border-radius: 4px; }
-            QSlider::handle:horizontal { background: #242424; border: none; width: 16px; height: 16px; margin: -4px 0; border-radius: 8px; }
-        """)
-        wb_row.addWidget(self.slider_wb, 1)
+        v.addWidget(self._slider_row("TEMPERATURE", self.label_wb, self.slider_wb))
 
-        self.btn_wb_plus = QPushButton("▶")
-        self.btn_wb_plus.setFixedSize(24, 24)
-        self.btn_wb_plus.setStyleSheet("QPushButton { background-color: transparent; color: #e8b896; border: none; font-size: 12px; padding: 0; } QPushButton:hover { color: #f5c9a8; }")
-        self.btn_wb_plus.clicked.connect(lambda: self.adjust_wb(50))
-        wb_row.addWidget(self.btn_wb_plus)
-        right_layout.addLayout(wb_row)
-        right_layout.addSpacing(10)
+        # Tint — with AUTO toggle pill in the header
+        self.label_tint = QLabel("+0")
+        self.label_tint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
-        # Tint label + Auto tint checkbox in one row
-        tint_header = QHBoxLayout()
-        tint_header.setContentsMargins(0, 0, 0, 0)
-        tint_header.setSpacing(0)
-
-        self.chk_wb_link = QCheckBox("Auto tint")
-        self.chk_wb_link.setChecked(False)
-        self.chk_wb_link.setStyleSheet("""
-            QCheckBox { color: #505050; font-size: 11px; spacing: 4px; }
-            QCheckBox::indicator { width: 11px; height: 11px; border-radius: 2px;
-                border: 1px solid #555; background: #3d3d3d; }
-            QCheckBox::indicator:checked { background: #FF8A35; border-color: #FF8A35; }
-            QCheckBox::indicator:hover { border-color: #888; }
-        """)
-        self.chk_wb_link.setToolTip(
+        auto_pill = QPushButton("AUTO")
+        auto_pill.setCheckable(True)
+        auto_pill.setCursor(Qt.PointingHandCursor)
+        auto_pill.setFont(theme.ui_font(9, QFont.DemiBold))
+        auto_pill.setFixedHeight(18)
+        self._themed(auto_pill, lambda: (
+            f"QPushButton {{"
+            f"  background: {C['bg_input']};"
+            f"  border: 1px solid {C['border_input']};"
+            f"  border-radius: 9px;"
+            f"  color: {C['text_dim']};"
+            f"  letter-spacing: 0.8px;"
+            f"  padding: 0 8px;"
+            f"}}"
+            f"QPushButton:hover {{ color: {C['text_primary']}; }}"
+            f"QPushButton:checked {{"
+            f"  background: {C['accent']};"
+            f"  border-color: {C['accent']};"
+            f"  color: #1a1410;"
+            f"}}"
+        ))
+        auto_pill.setToolTip(
             "Auto tint: WB moves tint proportionally.\n"
             "Manual tint nudges are preserved on top."
         )
-        self.chk_wb_link.toggled.connect(self._on_wb_link_toggled)
+        auto_pill.toggled.connect(self._on_wb_link_toggled)
+        self.chk_wb_link = auto_pill
 
-        # Invisible spacer on the left matching checkbox width to keep label centered
-        left_spacer = QWidget()
-        left_spacer.setFixedWidth(self.chk_wb_link.sizeHint().width())
-        tint_header.addWidget(left_spacer)
+        tint_header = QHBoxLayout()
+        tint_header.setContentsMargins(0, 0, 0, 0)
+        tint_header.setSpacing(8)
+        tl = QLabel("TINT")
+        tl.setFont(theme.ui_font(11, QFont.Medium))
+        self._themed(tl, lambda: f"color: {C['text_label']}; letter-spacing: 0.4px;")
+        tint_header.addWidget(tl)
+        tint_header.addWidget(auto_pill)
+        tint_header.addStretch(1)
+        self.label_tint.setFont(theme.mono_font(12, QFont.Medium))
+        self._themed(self.label_tint, lambda: f"color: {C['text_secondary']}; padding: 2px 4px;")
+        tint_header.addWidget(self.label_tint)
 
-        tint_value = QLabel("+0.0")
-        tint_value.setStyleSheet("color: #626262; font-size: 14px;")
-        tint_value.setAlignment(Qt.AlignCenter)
-        self.label_tint = tint_value
-        tint_header.addWidget(tint_value, 1, Qt.AlignVCenter)
+        tint_box = QWidget()
+        tbl = QVBoxLayout(tint_box)
+        tbl.setContentsMargins(0, 0, 0, 0)
+        tbl.setSpacing(6)
+        hw = QWidget(); hw.setLayout(tint_header)
+        tbl.addWidget(hw)
 
-        tint_header.addWidget(self.chk_wb_link, 0, Qt.AlignVCenter)
-
-        right_layout.addLayout(tint_header)
-        right_layout.addSpacing(10)
-
-        tint_row = QHBoxLayout()
-        tint_row.setSpacing(8)
-
-        self.btn_tint_minus = QPushButton("◀")
-        self.btn_tint_minus.setFixedSize(24, 24)
-        self.btn_tint_minus.setStyleSheet("QPushButton { background-color: transparent; color: #8fbf8f; border: none; font-size: 12px; padding: 0; } QPushButton:hover { color: #a5d4a5; }")
-        self.btn_tint_minus.clicked.connect(lambda: self.adjust_tint(-1))
-        tint_row.addWidget(self.btn_tint_minus)
-
-        self.slider_tint = QSlider(Qt.Horizontal)
-        self.slider_tint.setMinimum(-20)
-        self.slider_tint.setMaximum(20)
+        self.slider_tint = ScrubSlider(dual=True)
+        self.slider_tint.setMinimum(-50)
+        self.slider_tint.setMaximum(50)
         self.slider_tint.setValue(0)
         self.slider_tint.valueChanged.connect(self.on_tint_slider_moved)
         self.slider_tint.sliderReleased.connect(self.on_tint_released)
         self.slider_tint.installEventFilter(self)
-        self.slider_tint.setStyleSheet("""
-            QSlider::groove:horizontal { height: 8px; background: #4a4a4a; border-radius: 4px; }
-            QSlider::handle:horizontal { background: #242424; border: none; width: 16px; height: 16px; margin: -4px 0; border-radius: 8px; }
-        """)
-        tint_row.addWidget(self.slider_tint, 1)
+        tbl.addWidget(self.slider_tint)
+        v.addWidget(tint_box)
+        return sec
 
-        self.btn_tint_plus = QPushButton("▶")
-        self.btn_tint_plus.setFixedSize(24, 24)
-        self.btn_tint_plus.setStyleSheet("QPushButton { background-color: transparent; color: #d49fc9; border: none; font-size: 12px; padding: 0; } QPushButton:hover { color: #e8b5de; }")
-        self.btn_tint_plus.clicked.connect(lambda: self.adjust_tint(1))
-        tint_row.addWidget(self.btn_tint_plus)
-        right_layout.addLayout(tint_row)
-        right_layout.addSpacing(30)
+    def _build_export_footer(self) -> QWidget:
+        sec = QWidget()
+        sec.setObjectName("ExportFooter")
+        sec.setAttribute(Qt.WA_StyledBackground, True)
+        self._themed(
+            sec,
+            lambda: f"QWidget#ExportFooter {{ background: rgba(0, 0, 0, 0.08); }}",
+        )
+        v = QVBoxLayout(sec)
+        v.setContentsMargins(14, 14, 14, 14)
+        v.setSpacing(8)
 
-        # Reset button
-        reset_layout = QHBoxLayout()
-        reset_layout.setAlignment(Qt.AlignCenter)
-        self.btn_reset_all = QPushButton("↻")
-        self.btn_reset_all.setFixedSize(36, 36)
-        self.btn_reset_all.setStyleSheet("""
-            QPushButton { background-color: #3d3d3d; color: #626262; border: none; border-radius: 8px; font-size: 18px; }
-            QPushButton:hover { background-color: #4a4a4a; }
-        """)
-        self.btn_reset_all.clicked.connect(self.reset_all_sliders)
-        reset_layout.addWidget(self.btn_reset_all)
-        right_layout.addLayout(reset_layout)
-        right_layout.addSpacing(40)
+        v.addWidget(self._section_header("EXPORT"))
 
-        # Export Mode Toggle
-        self.btn_export_mode = QPushButton("Export: Final JPEG")
-        self.btn_export_mode.setFixedHeight(30)
-        self.btn_export_mode.setStyleSheet("""
-            QPushButton { background-color: #3d3d3d; color: #d0d0d0; border: 1px solid #555; border-radius: 15px; font-size: 11px; }
-            QPushButton:hover { background-color: #4a4a4a; }
-        """)
-        self.btn_export_mode.setToolTip("Toggle between final film look (JPEG) and intermediate log (TIFF for Resolve)")
-        self.btn_export_mode.clicked.connect(self.toggle_export_mode)
-        right_layout.addWidget(self.btn_export_mode)
-        right_layout.addSpacing(20)
+        # Format pills (JPEG / TIFF)
+        pills_row = QHBoxLayout()
+        pills_row.setSpacing(6)
+        self.btn_export_jpeg = QPushButton("JPEG")
+        self.btn_export_tiff = QPushButton("TIFF")
+        for b in (self.btn_export_jpeg, self.btn_export_tiff):
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setFixedHeight(28)
+        self.btn_export_jpeg.setToolTip("Final film look (JPEG)")
+        self.btn_export_tiff.setToolTip("Intermediate ACEScct log (TIFF for Resolve)")
+        self.btn_export_jpeg.clicked.connect(lambda: self.set_export_mode(False))
+        self.btn_export_tiff.clicked.connect(lambda: self.set_export_mode(True))
+        pills_row.addWidget(self.btn_export_jpeg, 1)
+        pills_row.addWidget(self.btn_export_tiff, 1)
+        v.addLayout(pills_row)
 
-        # Output path row
-        output_row = QHBoxLayout()
-        output_row.setSpacing(8)
+        # Output path row — single flat shape (no nested button outline)
+        out_row = QWidget()
+        self._themed(out_row, lambda: (
+            f"QWidget {{"
+            f"  background: {C['bg_input']};"
+            f"  border: 1px solid {C['border_input']};"
+            f"  border-radius: 3px;"
+            f"}}"
+            f"QLabel, QPushButton {{ background: transparent; border: none; }}"
+        ))
+        out_row.setFixedHeight(28)
+        out_row.setCursor(Qt.PointingHandCursor)
+        ol = QHBoxLayout(out_row)
+        ol.setContentsMargins(8, 0, 8, 0)
+        ol.setSpacing(6)
+
+        folder_ico = QLabel()
+        folder_ico.setPixmap(svg_icon("assets/icons/folder.svg", "text_label", 12).pixmap(12, 12))
+        ol.addWidget(folder_ico)
+
         self.label_output = QLabel(self.output_dir)
-        self.label_output.setStyleSheet("color: #626262; font-size: 12px;")
+        self.label_output.setFont(theme.mono_font(10, QFont.Medium))
+        self._themed(
+            self.label_output,
+            lambda: f"color: {C['text_label']}; background: transparent;",
+        )
         self.label_output.setWordWrap(False)
-        output_row.addWidget(self.label_output, 1)
+        self.label_output.setTextFormat(Qt.PlainText)
+        ol.addWidget(self.label_output, 1)
 
         self.btn_select_output = QPushButton("⋯")
-        self.btn_select_output.setFixedSize(28, 28)
-        self.btn_select_output.setStyleSheet("""
-            QPushButton { background-color: #3d3d3d; color: #626262; border: none; border-radius: 6px; font-size: 14px; font-weight: bold; }
-            QPushButton:hover { background-color: #4a4a4a; }
-        """)
+        self.btn_select_output.setFixedSize(14, 20)
+        self.btn_select_output.setCursor(Qt.PointingHandCursor)
+        self._themed(self.btn_select_output, lambda: (
+            f"QPushButton {{ background: transparent; border: none; color: {C['text_dim']}; padding: 0; }}"
+            f"QPushButton:hover {{ color: {C['text_primary']}; }}"
+        ))
         self.btn_select_output.clicked.connect(self.select_output_dir)
-        output_row.addWidget(self.btn_select_output)
-        right_layout.addLayout(output_row)
-        right_layout.addSpacing(15)
+        ol.addWidget(self.btn_select_output)
+        v.addWidget(out_row)
 
-        # Process button
-        process_layout = QHBoxLayout()
-        process_layout.setAlignment(Qt.AlignCenter)
-        self.btn_process_all = QPushButton("Process 0 / 0")
-        self.btn_process_all.setEnabled(False)
-        self.btn_process_all.setFixedSize(180, 44)
-        self.btn_process_all.setStyleSheet("""
-            QPushButton { background-color: #FF8A35; color: #1a1a1a; border: none; border-radius: 22px; font-size: 14px; font-weight: bold; }
-            QPushButton:hover { background-color: #ff9a4f; }
-            QPushButton:pressed { background-color: #e67a25; }
-            QPushButton:disabled { background-color: #555; color: #333; }
-        """)
-        self.btn_process_all.clicked.connect(self.process_all_images)
-        process_layout.addWidget(self.btn_process_all)
-        right_layout.addLayout(process_layout)
-
-        right_wrapper_layout.addWidget(right_container)
-        right_wrapper_layout.addStretch()
-
-        # Progress bar
-        self.progress_bar = QSlider(Qt.Horizontal)
+        # Process button + thin progress bar above it
+        self.progress_bar = QProgressBar()
         self.progress_bar.setMinimum(0)
         self.progress_bar.setMaximum(100)
         self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(2)
         self.progress_bar.setVisible(False)
-        self.progress_bar.setEnabled(False)
-        self.progress_bar.setStyleSheet("""
-            QSlider::groove:horizontal { height: 8px; background: #4a4a4a; border-radius: 4px; }
-            QSlider::handle:horizontal { background: transparent; border: none; width: 0px; height: 0px; }
-            QSlider::sub-page:horizontal { background: #FF8A35; border-radius: 4px; }
-        """)
-        right_layout.addSpacing(10)
-        right_layout.addWidget(self.progress_bar)
+        self._themed(self.progress_bar, lambda: (
+            f"QProgressBar {{"
+            f"  background: {C['border_input']};"
+            f"  border: none; border-radius: 1px;"
+            f"}}"
+            f"QProgressBar::chunk {{"
+            f"  background: {C['accent']}; border-radius: 1px;"
+            f"}}"
+        ))
+        v.addWidget(self.progress_bar)
 
-        self.mode_label = QLabel("")
-        self.mode_label.setStyleSheet("color: #FF8A35; font-size: 12px;")
-        self.mode_label.setAlignment(Qt.AlignCenter)
-        self.mode_label.setFixedHeight(20)
-        right_layout.addWidget(self.mode_label)
+        self.btn_process_all = QPushButton("Process 0 / 0")
+        self.btn_process_all.setEnabled(False)
+        self.btn_process_all.setFixedHeight(40)
+        self.btn_process_all.setCursor(Qt.PointingHandCursor)
+        self._themed(self.btn_process_all, lambda: process_btn_qss())
+        self.btn_process_all.clicked.connect(self.process_all_images)
+        v.addWidget(self.btn_process_all)
 
-        top_layout.addWidget(right_wrapper)
-        top_layout.addStretch(1)
-        main_vlayout.addWidget(top_section, 1)
+        # Initialize pill state to default (JPEG)
+        self.set_export_mode(False)
+        return sec
 
-        # === BOTTOM: Thumbnail Strip ===
-        thumb_container = QWidget()
-        thumb_layout = QHBoxLayout(thumb_container)
-        thumb_layout.setContentsMargins(0, 0, 0, 0)
+    # ── status bar ──────────────────────────────────────────────────────
+    def _build_status_bar(self) -> QWidget:
+        bar = QWidget()
+        bar.setObjectName("StatusBar")
+        bar.setAttribute(Qt.WA_StyledBackground, True)
+        bar.setFixedHeight(22)
+        self._themed(bar, lambda: (
+            f"QWidget#StatusBar {{"
+            f"  background: {C['bg_strip']};"
+            f"  border-top: 1px solid {C['border_soft']};"
+            f"}}"
+        ))
+        hl = QHBoxLayout(bar)
+        hl.setContentsMargins(12, 0, 12, 0)
+        hl.setSpacing(14)
 
-        self.thumbnail_strip = ThumbnailStrip()
-        self.thumbnail_strip.thumbnail_clicked.connect(self.on_thumbnail_click)
-        self.thumbnail_strip.thumbnail_right_clicked.connect(self.on_thumbnail_right_click)
-        self.thumbnail_strip.thumbnail_paste_selected.connect(self.on_thumbnail_paste_selected)
-        thumb_layout.addWidget(self.thumbnail_strip)
+        self.status_dot = QLabel("●")
+        self._themed(self.status_dot, lambda: f"color: {C['processed']};")
+        hl.addWidget(self.status_dot)
 
-        self.fade_overlay = FadeOverlayWidget(self.thumbnail_strip)
-        self.loader_overlay = LoaderOverlay(self.centralWidget())
+        self.mode_label = QLabel("Ready")
+        self.mode_label.setFont(theme.mono_font(10, QFont.Medium))
+        self._themed(self.mode_label, lambda: f"color: {C['text_dim']};")
+        hl.addWidget(self.mode_label)
 
-        main_vlayout.addWidget(thumb_container)
+        hl.addStretch(1)
 
-        self.settings_clipboard = None
+        mod = "⌘" if sys.platform == "darwin" else "Ctrl"
+        hints = [
+            ("← →", "navigate"),
+            ("↑ ↓", "rotate"),
+            (f"{mod}O", "open"),
+            (f"{mod}R", "reset"),
+            (f"{mod}C / {mod}V", "copy · paste"),
+            ("Esc", "clear selection"),
+        ]
+        for keys, desc in hints:
+            chip = QLabel(f"{keys}  {desc}")
+            chip.setFont(theme.mono_font(10, QFont.Medium))
+            self._themed(chip, lambda: f"color: {C['text_dim']};")
+            hl.addWidget(chip)
 
-        self._build_menu_bar()
+        return bar
 
     def _build_menu_bar(self):
         """Build the native menu bar."""
@@ -982,29 +1233,21 @@ class FlashbackEditor(QMainWindow):
         self.thumbnail_strip.select_all_for_paste()
         count = len(self.thumbnail_strip.get_paste_selected_indices())
         self.mode_label.setText(f"{count} selected for paste")
-        self.mode_label.setStyleSheet("color: #FF8A35; font-size: 12px;")
-        QTimer.singleShot(2000, lambda: self.mode_label.setText(""))
+        self.mode_label.setStyleSheet(f"color: {C['accent']};")
+        QTimer.singleShot(2000, self.update_mode_label)
 
     def _menu_deselect_all_paste(self):
         self.thumbnail_strip.clear_paste_selection()
         self.mode_label.setText("Paste selection cleared")
-        self.mode_label.setStyleSheet("color: #FF8A35; font-size: 12px;")
-        QTimer.singleShot(1500, lambda: self.mode_label.setText(""))
+        self.mode_label.setStyleSheet(f"color: {C['accent']};")
+        QTimer.singleShot(1500, self.update_mode_label)
 
     def export_as_jpeg(self):
-        self.export_tiff_mode = False
-        self.btn_export_mode.setText("Export: Final JPEG")
-        self.btn_export_mode.setStyleSheet("""
-            QPushButton { background-color: #3d3d3d; color: #d0d0d0; border: 1px solid #555; border-radius: 15px; font-size: 11px; }
-        """)
+        self.set_export_mode(False)
         self.process_all_images()
 
     def export_as_tiff(self):
-        self.export_tiff_mode = True
-        self.btn_export_mode.setText("Export: Intermediate TIFF")
-        self.btn_export_mode.setStyleSheet("""
-            QPushButton { background-color: #4a4a4a; color: #FF8A35; border: 1px solid #FF8A35; border-radius: 15px; font-size: 11px; }
-        """)
+        self.set_export_mode(True)
         self.process_all_images()
 
     def center_window(self):
@@ -1177,11 +1420,11 @@ class FlashbackEditor(QMainWindow):
 
         n = len(files_to_add)
         self.mode_label.setText(f"Adding {n} image{'s' if n != 1 else ''}...")
-        self.mode_label.setStyleSheet("color: #FF8A35; font-size: 12px;")
+        self.mode_label.setStyleSheet(f"color: {C['accent']};")
 
     def _on_add_thumbnails_finished(self):
         print("✓ Add-images thumbnail generation complete!")
-        self.mode_label.setText("")
+        self.update_mode_label()
         if hasattr(self, 'add_thumbnail_worker') and self.add_thumbnail_worker:
             self.add_thumbnail_worker.deleteLater()
             self.add_thumbnail_worker = None
@@ -1253,6 +1496,13 @@ class FlashbackEditor(QMainWindow):
         self.thumbnail_strip.add_thumbnail(thumb_array, index, filename=filename)
         self.thumbnail_strip.container.setUpdatesEnabled(True)
 
+        if self.image_files and index < len(self.image_files):
+            file_path = str(self.image_files[index])
+            if self._is_processed(file_path):
+                self.thumbnail_strip.set_processed(index, True)
+            if index == self.current_index:
+                self.thumbnail_strip.set_current_index(index)
+
         if intermediate is not None and self.image_files:
             file_path = str(self.image_files[index])
             self.image_cache[file_path] = intermediate
@@ -1271,24 +1521,41 @@ class FlashbackEditor(QMainWindow):
                 self.mode_label.setText(f"{count} selected for processing")
             else:
                 self.mode_label.setText("All images will be processed")
-            self.mode_label.setStyleSheet("color: #FF8A35; font-size: 12px;")
-            QTimer.singleShot(2000, lambda: self.mode_label.setText(""))
+            self.mode_label.setStyleSheet(f"color: {C['accent']};")
+            QTimer.singleShot(2000, self.update_mode_label)
 
     def on_thumbnail_paste_selected(self, index, is_selected):
         count = len(self.thumbnail_strip.get_paste_selected_indices())
         if count > 0:
             paste_key = "Cmd+V" if sys.platform == 'darwin' else "Ctrl+V"
             self.mode_label.setText(f"{count} selected for paste ({paste_key})")
-            self.mode_label.setStyleSheet("color: #FF8A35; font-size: 12px;")
+            self.mode_label.setStyleSheet(f"color: {C['accent']};")
         else:
-            self.mode_label.setText("")
+            self.update_mode_label()
 
     def update_process_button_text(self):
+        self.btn_process_all.setStyleSheet(process_btn_qss())
         selected = self.thumbnail_strip.get_process_selected_indices()
         if selected:
             self.btn_process_all.setText(f"Process {len(selected)} / {len(self.image_files)}")
         else:
             self.btn_process_all.setText(f"Process {len(self.image_files)} / {len(self.image_files)}")
+
+    def _set_process_button_done(self, count: int):
+        """Post-export state: checkmark + 'N frames processed'."""
+        self.btn_process_all.setText(f"✓  {count} frame{'s' if count != 1 else ''} processed")
+        self.btn_process_all.setStyleSheet(f"""
+            QPushButton {{
+                background: {C['bg_input']};
+                color: {C['text_label']};
+                border: 1px solid {C['border_input']};
+                border-radius: 3px;
+                font-family: "{UI_FONT}";
+                font-size: 12px;
+                font-weight: 600;
+                padding: 10px 12px;
+            }}
+        """)
 
     # ===================================================================
     # IMAGE LOADING & DISPLAY
@@ -1296,9 +1563,15 @@ class FlashbackEditor(QMainWindow):
 
     def load_current_image(self):
         if not self.image_files:
+            self.label_filename.setText("")
+            self.label_counter.setText("0 / 0")
             return
 
         file_path = str(self.image_files[self.current_index])
+        self.label_filename.setText(Path(file_path).name)
+        self.label_counter.setText(f"{self.current_index + 1} / {len(self.image_files)}")
+        if hasattr(self, 'thumbnail_strip'):
+            self.thumbnail_strip.set_current_index(self.current_index)
 
         if file_path in self.image_settings:
             settings = self.image_settings[file_path]
@@ -1360,12 +1633,12 @@ class FlashbackEditor(QMainWindow):
 
         self.slider_exposure.setValue(int(settings['exposure_ev'] * 10))
         self.slider_wb.setValue(int(settings['wb_temp']))
-        self.slider_tint.setValue(int(settings['tint'] * 2))
+        self.slider_tint.setValue(int(round(settings['tint'] * 5)))
 
         self.label_exposure.setText(f"{settings['exposure_ev']:.1f} EV")
         temp_absolute = 5600 + int(settings['wb_temp'])
-        self.label_wb.setText(f"{temp_absolute}K")
-        self.label_tint.setText(f"{settings['tint']:+.1f}")
+        self.label_wb.setText(f"{temp_absolute} K")
+        self.label_tint.setText(f"{int(round(settings['tint'] * 5)):+d}")
 
         self.slider_exposure.blockSignals(False)
         self.slider_wb.blockSignals(False)
@@ -1415,15 +1688,15 @@ class FlashbackEditor(QMainWindow):
         new_tint = max(-10.0, min(10.0, coupled + self._tint_manual_offset))
         self.processor.user_settings['tint'] = new_tint
         self.slider_tint.blockSignals(True)
-        self.slider_tint.setValue(int(round(new_tint * 2)))
-        self.label_tint.setText(f"{new_tint:+.1f}")
+        self.slider_tint.setValue(int(round(new_tint * 5)))
+        self.label_tint.setText(f"{int(round(new_tint * 5)):+d}")
         self.slider_tint.blockSignals(False)
         return new_tint
 
     def on_wb_slider_moved(self, value):
         self.processor.preview_mode = 'fast'
         temp_absolute = 5600 + value
-        self.label_wb.setText(f"{temp_absolute}K")
+        self.label_wb.setText(f"{temp_absolute} K")
 
         if self.chk_wb_link.isChecked():
             self._apply_wb_tint_link(value)
@@ -1447,8 +1720,8 @@ class FlashbackEditor(QMainWindow):
 
     def on_tint_slider_moved(self, value):
         self.processor.preview_mode = 'fast'
-        tint = value / 2.0
-        self.label_tint.setText(f"{tint:+.1f}")
+        tint = value / 5.0
+        self.label_tint.setText(f"{value:+d}")
         # Record how far the user has nudged tint away from the coupled position
         if self.chk_wb_link.isChecked():
             self._tint_manual_offset = tint - self._coupled_tint(self.slider_wb.value())
@@ -1487,8 +1760,8 @@ class FlashbackEditor(QMainWindow):
         self.slider_tint.blockSignals(True)
 
         self.label_exposure.setText("0.0 EV")
-        self.label_wb.setText("5600K")
-        self.label_tint.setText("+0.0")
+        self.label_wb.setText("5600 K")
+        self.label_tint.setText("+0")
         self.slider_exposure.setValue(0)
         self.slider_wb.setValue(0)
         self.slider_tint.setValue(0)
@@ -1506,7 +1779,29 @@ class FlashbackEditor(QMainWindow):
         self.update_mode_label()
 
     def update_mode_label(self):
-        self.mode_label.setText("")
+        """Default status line when the processor is idle."""
+        if self.image_files:
+            total = len(self.image_files)
+            processed = sum(
+                1 for p in self.image_files if self._is_processed(str(p))
+            )
+            pending = total - processed
+            self.mode_label.setText(f"Ready   {processed} processed · {pending} pending")
+        else:
+            self.mode_label.setText("Ready")
+        self.mode_label.setStyleSheet(f"color: {C['text_dim']};")
+        self.status_dot.setStyleSheet(f"color: {C['processed']};")
+
+    def _is_processed(self, file_path: str) -> bool:
+        """True if an export file exists in output_dir for this source image."""
+        try:
+            base = Path(file_path).stem
+            for suffix in ("_processed.jpg", "_intermediate.tif"):
+                if os.path.exists(os.path.join(self.output_dir, base + suffix)):
+                    return True
+        except Exception:
+            pass
+        return False
 
     def save_current_settings(self):
         if self.image_files:
@@ -1533,8 +1828,8 @@ class FlashbackEditor(QMainWindow):
         self.settings_clipboard = self.processor.get_settings()
         self.settings_clipboard['auto_tint'] = self.chk_wb_link.isChecked()
         self.mode_label.setText("Settings copied")
-        self.mode_label.setStyleSheet("color: #FF8A35; font-size: 12px;")
-        QTimer.singleShot(2000, lambda: self.mode_label.setText(""))
+        self.mode_label.setStyleSheet(f"color: {C['accent']};")
+        QTimer.singleShot(2000, self.update_mode_label)
 
     def paste_settings(self):
         if not self.settings_clipboard:
@@ -1546,18 +1841,9 @@ class FlashbackEditor(QMainWindow):
             indices_to_apply = sorted(paste_selected)
             total = len(indices_to_apply)
 
-            if total > 1:
-                reply = QMessageBox.question(
-                    self, "Apply Settings",
-                    f"Apply copied settings to {total} selected images?",
-                    QMessageBox.Yes | QMessageBox.No
-                )
-                if reply == QMessageBox.No:
-                    return
-
             success_count = 0
             self.mode_label.setText(f"Applying to {total} images...")
-            self.mode_label.setStyleSheet("color: #FF8A35; font-size: 12px;")
+            self.mode_label.setStyleSheet(f"color: {C['accent']};")
             QApplication.processEvents()
 
             for idx in indices_to_apply:
@@ -1584,7 +1870,7 @@ class FlashbackEditor(QMainWindow):
 
             self.thumbnail_strip.clear_paste_selection()
             self.mode_label.setText(f"Settings applied to {success_count} images")
-            QTimer.singleShot(2000, lambda: self.mode_label.setText(""))
+            QTimer.singleShot(2000, self.update_mode_label)
 
         else:
             img_array = self.processor.set_settings(self.settings_clipboard)
@@ -1597,8 +1883,8 @@ class FlashbackEditor(QMainWindow):
             self.update_mode_label()
             self.update_thumbnail_for_settings(self.current_index, self.settings_clipboard)
             self.mode_label.setText("Settings pasted")
-            self.mode_label.setStyleSheet("color: #FF8A35; font-size: 12px;")
-            QTimer.singleShot(2000, lambda: self.mode_label.setText(""))
+            self.mode_label.setStyleSheet(f"color: {C['accent']};")
+            QTimer.singleShot(2000, self.update_mode_label)
 
     # ===================================================================
     # EXPORT
@@ -1610,18 +1896,15 @@ class FlashbackEditor(QMainWindow):
             self.output_dir = directory
             self.label_output.setText(directory)
 
-    def toggle_export_mode(self):
-        self.export_tiff_mode = not self.export_tiff_mode
-        if self.export_tiff_mode:
-            self.btn_export_mode.setText("Export: Intermediate TIFF")
-            self.btn_export_mode.setStyleSheet("""
-                QPushButton { background-color: #4a4a4a; color: #FF8A35; border: 1px solid #FF8A35; border-radius: 15px; font-size: 11px; }
-            """)
-        else:
-            self.btn_export_mode.setText("Export: Final JPEG")
-            self.btn_export_mode.setStyleSheet("""
-                QPushButton { background-color: #3d3d3d; color: #d0d0d0; border: 1px solid #555; border-radius: 15px; font-size: 11px; }
-            """)
+    def set_export_mode(self, tiff: bool):
+        """Select JPEG or TIFF export; sync both pills and the Process button label."""
+        self.export_tiff_mode = tiff
+        self.btn_export_jpeg.setChecked(not tiff)
+        self.btn_export_tiff.setChecked(tiff)
+        self.btn_export_jpeg.setStyleSheet(format_pill_qss(not tiff))
+        self.btn_export_tiff.setStyleSheet(format_pill_qss(tiff))
+        if hasattr(self, "btn_process_all") and hasattr(self, "thumbnail_strip"):
+            self.update_process_button_text()
 
     def process_all_images(self):
         if not self.image_files:
@@ -1630,32 +1913,19 @@ class FlashbackEditor(QMainWindow):
         selected_indices = self.thumbnail_strip.get_process_selected_indices()
         if selected_indices:
             indices_to_process = sorted(selected_indices)
-            mode_text = f"{len(indices_to_process)} selected"
         else:
             indices_to_process = list(range(len(self.image_files)))
-            mode_text = f"all {len(self.image_files)}"
 
-        reply = QMessageBox.question(
-            self, "Process Images",
-            f"Process {mode_text} images to:\n{self.output_dir}",
-            QMessageBox.Yes | QMessageBox.No
-        )
-        if reply == QMessageBox.No:
-            return
-
-        # Estimate ~50 MB per TIFF, ~5 MB per JPEG, warn if disk space is low
+        # Low disk space: inline warning in the status bar, no modal.
         mb_per_image = 50 if self.export_tiff_mode else 5
         required_mb = len(indices_to_process) * mb_per_image
         try:
             free_mb = shutil.disk_usage(self.output_dir).free // (1024 * 1024)
             if free_mb < required_mb:
-                reply = QMessageBox.warning(
-                    self, "Low Disk Space",
-                    f"Export may need ~{required_mb} MB but only {free_mb} MB free.\nContinue anyway?",
-                    QMessageBox.Yes | QMessageBox.No
+                self.mode_label.setText(
+                    f"Low disk space: ~{required_mb} MB needed, {free_mb} MB free"
                 )
-                if reply == QMessageBox.No:
-                    return
+                self.mode_label.setStyleSheet(f"color: {C['accent']};")
         except OSError:
             pass
 
@@ -1663,16 +1933,17 @@ class FlashbackEditor(QMainWindow):
         self.progress_bar.setValue(0)
         self.progress_bar.setVisible(True)
         self.btn_process_all.setEnabled(False)
-        self.mode_label.setText("Processing...")
 
         success_count = 0
+        total = len(indices_to_process)
 
         for i, idx in enumerate(indices_to_process):
             file_path = str(self.image_files[idx])
 
             try:
                 self.progress_bar.setValue(i)
-                self.mode_label.setText(f"Processing {i+1}/{len(indices_to_process)}...")
+                self.btn_process_all.setText(f"Processing {i + 1} / {total}")
+                self.mode_label.setText(f"Processing {i+1}/{total}...")
                 QApplication.processEvents()
 
                 if file_path in self.image_cache:
@@ -1693,6 +1964,7 @@ class FlashbackEditor(QMainWindow):
 
                 if export_image(self.processor, output_path, as_tiff=self.export_tiff_mode):
                     success_count += 1
+                    self.thumbnail_strip.set_processed(idx, True)
 
             except Exception as e:
                 print(f"Error processing {file_path}: {e}")
@@ -1703,14 +1975,13 @@ class FlashbackEditor(QMainWindow):
 
         self.progress_bar.setVisible(False)
         self.btn_process_all.setEnabled(True)
-        self.mode_label.setText("")
-        self.update_process_button_text()
         self.load_current_image()
+        self.update_mode_label()
 
-        QMessageBox.information(
-            self, "Complete",
-            f"Processed {success_count}/{len(indices_to_process)} images\nSaved to: {self.output_dir}"
-        )
+        if success_count == total and total > 0:
+            self._set_process_button_done(success_count)
+        else:
+            self.update_process_button_text()
 
     # ===================================================================
     # DEBUG / REFRESH
@@ -1749,14 +2020,14 @@ class FlashbackEditor(QMainWindow):
                 self.thumbnail_strip.select_all_for_paste()
                 count = len(self.thumbnail_strip.get_paste_selected_indices())
                 self.mode_label.setText(f"{count} selected for paste")
-                self.mode_label.setStyleSheet("color: #FF8A35; font-size: 12px;")
-                QTimer.singleShot(2000, lambda: self.mode_label.setText(""))
+                self.mode_label.setStyleSheet(f"color: {C['accent']};")
+                QTimer.singleShot(2000, self.update_mode_label)
             event.accept()
         elif event.key() == Qt.Key_Escape:
             self.thumbnail_strip.clear_paste_selection()
             self.mode_label.setText("Paste selection cleared")
-            self.mode_label.setStyleSheet("color: #FF8A35; font-size: 12px;")
-            QTimer.singleShot(1500, lambda: self.mode_label.setText(""))
+            self.mode_label.setStyleSheet(f"color: {C['accent']};")
+            QTimer.singleShot(1500, self.update_mode_label)
             event.accept()
         elif event.key() == Qt.Key_Left:
             if self.image_files and self.current_index > 0:
@@ -1780,6 +2051,19 @@ class FlashbackEditor(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
+        # Needs a real native window; defer one event loop pass so the
+        # NSWindow is fully constructed before we drive AppKit against it.
+        if not getattr(self, "_native_chrome_applied", False):
+            self._native_chrome_applied = True
+
+            def _do_apply():
+                try:
+                    from ui import native_chrome
+                    native_chrome.apply(self, theme.current_theme())
+                except Exception as e:
+                    print(f"[native_chrome] apply failed: {e}")
+
+            QTimer.singleShot(0, _do_apply)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1798,11 +2082,12 @@ class FlashbackEditor(QMainWindow):
         m = 8  # margin
 
         if self.image_files and hasattr(self, 'drag_overlay_add'):
-            # Split at the thumbnail strip top edge
-            strip_top = self.thumbnail_strip.mapTo(cw, QPoint(0, 0)).y()
-            strip_h = self.thumbnail_strip.height()
+            # Split at the thumbnail strip top edge; add-overlay fills the full strip.
+            strip = self.thumbnail_strip.parentWidget() or self.thumbnail_strip
+            strip_top = strip.mapTo(cw, QPoint(0, 0)).y()
+            strip_h = strip.height()
             self.drag_overlay.setGeometry(m, m, cw_w - 2 * m, max(40, strip_top - 2 * m))
-            self.drag_overlay_add.setGeometry(m, strip_top + m, cw_w - 2 * m, max(30, strip_h - 2 * m))
+            self.drag_overlay_add.setGeometry(0, strip_top, cw_w, strip_h)
         else:
             # No images loaded — full-area replace overlay only
             self.drag_overlay.setGeometry(m, m, cw_w - 2 * m, cw_h - 2 * m)

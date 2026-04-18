@@ -21,15 +21,17 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import (
     Qt, QTimer, QSize, Signal, QThread, QEvent, QPropertyAnimation, QEasingCurve,
+    QPointF,
 )
 from PySide6.QtGui import (
     QPixmap, QImage, QPainter, QColor, QPen, QCursor, QLinearGradient,
-    QMovie, QPainterPath, QColorSpace,
+    QMovie, QPainterPath, QColorSpace, QFont,
 )
 
 from core import resource_path
 from core.processor import FlashbackProcessor
 from core.config import _timing_print
+from ui.theme import qcolor, register_theme_listener
 
 
 # =============================================================================
@@ -103,9 +105,10 @@ class ThumbnailWorker(QThread):
 
 class ThumbnailWidget(QFrame):
     """
-    Individual thumbnail widget with TWO independent selection states:
-    1. Process selection: orange border (right-click)
-    2. Paste selection: white overlay (shift/cmd + left-click)
+    Individual thumbnail widget with TWO independent selection states + status:
+    1. Process selection (right-click): accent border glow
+    2. Paste selection (shift/cmd + left click): white overlay + marker
+    Plus an index label ("01") and a green "processed" dot per mockup.
     """
 
     clicked = Signal(int)        # left click
@@ -118,6 +121,8 @@ class ThumbnailWidget(QFrame):
         self.index = index
         self.is_process_selected = False
         self.is_paste_selected = False
+        self.is_current = False
+        self.is_processed = False
         self.pixmap = None
         self.setFixedSize(int(self.THUMBNAIL_HEIGHT * 1.5), self.THUMBNAIL_HEIGHT)
         self.setFrameStyle(QFrame.NoFrame)
@@ -125,6 +130,7 @@ class ThumbnailWidget(QFrame):
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        register_theme_listener(self.update)
 
     def enterEvent(self, event):
         if self.toolTip():
@@ -159,13 +165,22 @@ class ThumbnailWidget(QFrame):
         self.is_paste_selected = selected
         self.update()
 
+    def set_current(self, current: bool):
+        self.is_current = current
+        self.update()
+
+    def set_processed(self, processed: bool):
+        self.is_processed = processed
+        self.update()
+
     def paintEvent(self, event):
-        """Custom paint with dual selection highlights and rounded corners."""
+        """Custom paint: thumbnail + index label + processed/paste markers + selection ring."""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
+        radius = 4
         rounded_rect = QPainterPath()
-        rounded_rect.addRoundedRect(self.rect(), 6, 6)
+        rounded_rect.addRoundedRect(self.rect(), radius, radius)
         painter.setClipPath(rounded_rect)
 
         if self.pixmap:
@@ -177,23 +192,54 @@ class ThumbnailWidget(QFrame):
             y = (self.height() - scaled.height()) // 2
             painter.drawPixmap(x, y, scaled)
         else:
-            painter.fillRect(self.rect(), QColor(49, 49, 49))
+            painter.fillRect(self.rect(), qcolor("bg_strip"))
 
         if self.is_paste_selected:
-            painter.fillRect(self.rect(), QColor(255, 255, 255, 60))
+            marker = qcolor("paste_marker")
+            marker.setAlpha(50)
+            painter.fillRect(self.rect(), marker)
+
+        # Index label "01" in the top-left corner
+        idx_col = qcolor("text_primary")
+        idx_col.setAlpha(200)
+        painter.setPen(idx_col)
+        f = QFont("JetBrains Mono", 9)
+        f.setWeight(QFont.Medium)
+        painter.setFont(f)
+        painter.drawText(6, 14, f"{self.index + 1:02d}")
+
+        # Processed dot (bottom-right)
+        if self.is_processed:
+            painter.setBrush(qcolor("processed"))
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(self.width() - 12, self.height() - 12, 6, 6)
+
+        # Paste-selected marker (top-right)
+        if self.is_paste_selected:
+            painter.setBrush(qcolor("paste_marker"))
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(self.width() - 12, 6, 6, 6)
 
         painter.setClipping(False)
 
         if self.is_process_selected:
-            pen = QPen(QColor(255, 138, 53))
-            pen.setWidth(3)
+            pen = QPen(qcolor("accent"))
+            pen.setWidth(2)
             painter.setPen(pen)
-            painter.drawRoundedRect(1, 1, self.width() - 3, self.height() - 3, 4, 4)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(1, 1, self.width() - 2, self.height() - 2, radius, radius)
+        elif self.is_current:
+            pen = QPen(qcolor("text_primary"))
+            pen.setWidth(2)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(1, 1, self.width() - 2, self.height() - 2, radius, radius)
         else:
-            pen = QPen(QColor(60, 60, 60))
+            pen = QPen(qcolor("border_soft"))
             pen.setWidth(1)
             painter.setPen(pen)
-            painter.drawRoundedRect(0, 0, self.width() - 1, self.height() - 1, 6, 6)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(0, 0, self.width() - 1, self.height() - 1, radius, radius)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -221,6 +267,7 @@ class FadeOverlayWidget(QWidget):
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         if parent is not None:
             parent.installEventFilter(self)
+        register_theme_listener(self.update)
 
     def _update_geometry(self):
         parent = self.parent()
@@ -240,16 +287,20 @@ class FadeOverlayWidget(QWidget):
         painter = QPainter(self)
         width = self.width()
         height = self.height()
-        fade_width = 60
+        fade_width = 40
+
+        strip_bg = qcolor("bg_strip")
+        transparent = QColor(strip_bg)
+        transparent.setAlpha(0)
 
         left_gradient = QLinearGradient(0, 0, fade_width, 0)
-        left_gradient.setColorAt(0, QColor(49, 49, 49))
-        left_gradient.setColorAt(1, QColor(49, 49, 49, 0))
+        left_gradient.setColorAt(0, strip_bg)
+        left_gradient.setColorAt(1, transparent)
         painter.fillRect(0, 0, fade_width, height, left_gradient)
 
         right_gradient = QLinearGradient(width - fade_width, 0, width, 0)
-        right_gradient.setColorAt(0, QColor(49, 49, 49, 0))
-        right_gradient.setColorAt(1, QColor(49, 49, 49))
+        right_gradient.setColorAt(0, transparent)
+        right_gradient.setColorAt(1, strip_bg)
         painter.fillRect(width - fade_width, 0, fade_width, height, right_gradient)
 
 
@@ -427,15 +478,22 @@ class ThumbnailStrip(QScrollArea):
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setFixedHeight(90)
-        self.setStyleSheet("QScrollArea { border: none; background-color: #313131; }")
+        self.setFixedHeight(72)
 
         self.container = QWidget()
+        self._apply_strip_bg()
+        register_theme_listener(self._apply_strip_bg)
         self.layout = QHBoxLayout(self.container)
-        self.layout.setSpacing(8)
-        self.layout.setContentsMargins(60, 0, 60, 0)
+        self.layout.setSpacing(5)
+        self.layout.setContentsMargins(12, 0, 12, 0)
         self.layout.setAlignment(Qt.AlignLeft)
         self.setWidget(self.container)
+
+    def _apply_strip_bg(self):
+        from ui.theme import C
+        bg = C['bg_strip']
+        self.setStyleSheet(f"QScrollArea {{ border: none; background-color: {bg}; }}")
+        self.container.setStyleSheet(f"background: {bg};")
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MiddleButton:
@@ -485,6 +543,16 @@ class ThumbnailStrip(QScrollArea):
         self.thumbnails.clear()
         self.process_selected_indices.clear()
         self.paste_selected_indices.clear()
+
+    def set_current_index(self, index: int):
+        """Highlight the thumbnail for the currently-displayed image."""
+        for i, t in enumerate(self.thumbnails):
+            t.set_current(i == index)
+
+    def set_processed(self, index: int, processed: bool):
+        """Mark a thumbnail as exported (green dot)."""
+        if 0 <= index < len(self.thumbnails):
+            self.thumbnails[index].set_processed(processed)
 
     def add_thumbnail(self, pixmap, index, filename=None):
         thumb = ThumbnailWidget(index)
@@ -620,6 +688,7 @@ class RoundedLabel(QLabel):
         self._radius = radius
         self._pixmap = None
         self.setAlignment(Qt.AlignCenter)
+        register_theme_listener(self.update)
 
     def setPixmap(self, pixmap):
         self._pixmap = pixmap
@@ -636,7 +705,7 @@ class RoundedLabel(QLabel):
         path = QPainterPath()
         path.addRoundedRect(0, 0, self.width(), self.height(), self._radius, self._radius)
         painter.setClipPath(path)
-        painter.fillRect(self.rect(), QColor(49, 49, 49))
+        painter.fillRect(self.rect(), qcolor("bg_window"))
 
         if self._pixmap:
             x = (self.width() - self._pixmap.width()) // 2
@@ -678,40 +747,77 @@ class ZoomableImageWidget(QScrollArea):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setAlignment(Qt.AlignCenter)
-        self.setStyleSheet("QScrollArea { border: none; background-color: #313131; }")
+        self._apply_viewer_theme()
+        register_theme_listener(self._apply_viewer_theme)
 
-        self.image_label = RoundedLabel(radius=12)
+        self.image_label = RoundedLabel(radius=2)
         self.image_label.setMouseTracking(True)
 
-        self.placeholder_label = QLabel("Drag & drop DNG files here\nor use the Folder Icon")
+        self.placeholder_label = QLabel("Drag & drop DNG files here\nor use the Folder icon")
         self.placeholder_label.setAlignment(Qt.AlignCenter)
-        self.placeholder_label.setStyleSheet("""
-            QLabel {
-                color: #626262;
-                font-size: 14px;
-                background: transparent;
-            }
-        """)
+        self._apply_viewer_theme()
         self.setWidget(self.placeholder_label)
         self.setMinimumSize(400, 300)
         self.setMouseTracking(True)
         self._update_cursor()
 
+    def _apply_viewer_theme(self):
+        from ui.theme import C
+        bg = C['bg_window']
+        self.setStyleSheet(
+            f"QScrollArea {{ border: none; background-color: {bg}; border-radius: 2px; }}"
+            f"QScrollArea > QWidget {{ background-color: {bg}; }}"
+            f"QScrollArea > QWidget > QWidget {{ background-color: {bg}; }}"
+        )
+        vp = self.viewport()
+        if vp is not None:
+            pal = vp.palette()
+            pal.setColor(vp.backgroundRole(), qcolor("bg_window"))
+            vp.setPalette(pal)
+            vp.setAutoFillBackground(True)
+        if hasattr(self, "placeholder_label"):
+            self.placeholder_label.setStyleSheet(
+                f"QLabel {{ color: {C['text_dim']}; font-size: 13px; background: transparent; }}"
+            )
+
     def _create_zoom_cursor(self):
-        pixmap = QPixmap(32, 32)
-        pixmap.fill(Qt.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.Antialiasing)
-        pen = QPen(QColor(200, 200, 200))
-        pen.setWidth(2)
-        painter.setPen(pen)
-        painter.setBrush(Qt.NoBrush)
-        painter.drawEllipse(4, 4, 18, 18)
-        pen.setWidth(3)
-        painter.setPen(pen)
-        painter.drawLine(18, 18, 28, 28)
-        painter.end()
-        return QCursor(pixmap, 8, 8)
+        # Rasterise assets/icons/zoom.svg into a plain 32×32 cursor pixmap.
+        # Uses a single 1× pixmap so every platform treats it as a standard
+        # 32-pixel cursor (some WMs clip oversized pixmaps from the top-left).
+        from PySide6.QtSvg import QSvgRenderer
+        from PySide6.QtCore import QByteArray, QRectF
+
+        pm = QPixmap(32, 32)
+        pm.fill(Qt.transparent)
+
+        try:
+            with open(resource_path("assets/icons/zoom.svg"), "rb") as f:
+                data = f.read()
+        except OSError:
+            return QCursor(Qt.ArrowCursor)
+
+        shadow_data = data.replace(b"stroke:black", b"stroke:#000")
+        main_data = data.replace(b"stroke:black", b"stroke:#f0f0f0")
+
+        target = 24            # SVG render box
+        ox, oy = 4, 4          # centres 24px inside the 32px canvas
+
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing)
+
+        p.setOpacity(0.55)
+        QSvgRenderer(QByteArray(shadow_data)).render(
+            p, QRectF(ox + 1, oy + 1, target, target)
+        )
+        p.setOpacity(1.0)
+        QSvgRenderer(QByteArray(main_data)).render(
+            p, QRectF(ox, oy, target, target)
+        )
+        p.end()
+
+        # Glass centre in the 14-unit SVG viewBox ≈ (5.2, 5.0); after scaling
+        # to 24px and the (4, 4) offset this lands at ≈ (13, 13).
+        return QCursor(pm, 13, 13)
 
     def set_image(self, img_array):
         if img_array is None:
