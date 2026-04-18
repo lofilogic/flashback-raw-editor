@@ -369,7 +369,20 @@ class DebugPanel(QWidget):
         DebugConfig.pre_lut_dither_strength      = f("dither_strength",        DebugConfig.pre_lut_dither_strength)
         s.endGroup()
 
-        # Sync UI spinboxes/checkboxes to the loaded values
+        # Block signals while syncing UI so that partial updates don't
+        # trigger update_config() which would overwrite not-yet-restored values.
+        widgets = [
+            self.chk_halation, self.chk_ca, self.chk_softness, self.chk_grain,
+            self.chk_sharpen, self.chk_cnr, self.chk_lut, self.chk_dither,
+            self.chk_highlight_desat, self.spin_halation_thresh, self.spin_halation_blur,
+            self.spin_halation_str, self.spin_ca_str, self.spin_ca_steps,
+            self.spin_softness, self.spin_grain, self.spin_sharpen_str,
+            self.spin_sharpen_rad, self.spin_cnr, self.spin_hd_thresh,
+            self.spin_hd_rolloff, self.spin_hd_sigma, self.spin_dither,
+        ]
+        for w in widgets:
+            w.blockSignals(True)
+
         self.chk_halation.setChecked(DebugConfig.enable_halation)
         self.chk_ca.setChecked(DebugConfig.enable_chromatic_aberration)
         self.chk_softness.setChecked(DebugConfig.enable_softness)
@@ -393,6 +406,9 @@ class DebugPanel(QWidget):
         self.spin_hd_rolloff.setValue(DebugConfig.highlight_desat_rolloff_L)
         self.spin_hd_sigma.setValue(DebugConfig.highlight_desat_sigma)
         self.spin_dither.setValue(DebugConfig.pre_lut_dither_strength)
+
+        for w in widgets:
+            w.blockSignals(False)
 
     def reset_all(self):
         """Reset all parameters to defaults."""
