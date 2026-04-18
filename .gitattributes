@@ -1,0 +1,2 @@
+# LUT assets are opaque generated files — don't line-end normalize or diff.
+assets/luts/*.cube binary
