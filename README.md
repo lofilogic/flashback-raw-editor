@@ -95,17 +95,15 @@ Get the latest release for your platform from the [Releases](../../releases/late
 - `auto-tint` - Keeps an aesthetic appearance by automatically compensating tint
 
 **Zen mode**
-- Click the zen mode button to hide all controls and show only the image
 
+Click the zen mode button to hide all controls and show only the image
 - `⛶ button` — Enter Zen mode
 - `Escape` — exit Zen mode
-
 - `← / → arrow keys` — navigate images
 - `↑ / ↓ arrow keys` — rotate images
-
-`Left-click + drag up/down` — Exposure
-`Left-click + drag left/right` — White Balance
-`Right-click + drag left/right` — Tint
+- `Left-click + drag up/down` — Exposure
+- `Left-click + drag left/right` — White Balance
+- `Right-click + drag left/right` — Tint
 
 ---
 
