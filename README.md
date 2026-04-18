@@ -2,7 +2,7 @@
 
 A dedicated RAW processor and editor built specifically for the [Flashback One35 v2](https:///joinflashback.co) camera.
 
-![App Screenshot](docs/UI.png)
+![App Screenshot](https://github.com/user-attachments/assets/7b2faa24-3558-434c-9982-18855d9995c1)
 
 This app processes Flashback One35 v2 RAW files through a custom color pipeline and film emulation.
 
@@ -66,7 +66,7 @@ Get the latest release for your platform from the [Releases](../../releases/late
 
 ## How to Use
 
-![UI Walkthrough](docs/UI.gif)
+![UI Walkthrough](https://github.com/user-attachments/assets/656ea83f-2815-40ab-8950-539fdc743dbc)
 
 ### Basic workflow
 1. Open a folder of DNGs via the folder icon, drag & drop, or connect your camera (right after shooting, before developing inside the official Flashback app)
