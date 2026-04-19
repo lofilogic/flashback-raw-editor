@@ -37,11 +37,11 @@ from PySide6.QtGui import (
 
 from core import resource_path
 from core.processor import FlashbackProcessor, export_image
-from core.config import _timing_print
+from core.config import _timing_print, DebugConfig
 
 from .widgets import (
     ThumbnailWorker, ThumbnailWidget, ThumbnailStrip,
-    FadeOverlayWidget, LoaderOverlay, ZoomableImageWidget,
+    FadeOverlayWidget, LoaderOverlay, ZoomableImageWidget, VibePicker,
 )
 from .debug_panel import DebugPanel
 from .scrub_slider import ScrubSlider
@@ -261,6 +261,7 @@ class FlashbackEditor(QMainWindow):
         self.thumbnail_worker = None
         self.add_thumbnail_worker = None
         self._thumbnails_dirty = set()
+        self._lut_cache: dict = {}
 
         self._tint_manual_offset = 0.0  # user's manual tint correction on top of WB coupling
 
@@ -779,6 +780,8 @@ class FlashbackEditor(QMainWindow):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
 
+        v.addWidget(self._build_vibe_section())
+        v.addWidget(self._divider())
         v.addWidget(self._build_tone_section())
         v.addWidget(self._divider())
         v.addWidget(self._build_color_section())
@@ -836,6 +839,35 @@ class FlashbackEditor(QMainWindow):
         bl.addWidget(header_w)
         bl.addWidget(slider)
         return box
+
+    def _build_vibe_section(self) -> QWidget:
+        sec = QWidget()
+        v = QVBoxLayout(sec)
+        v.setContentsMargins(14, 14, 14, 14)
+        v.setSpacing(10)
+
+        v.addWidget(self._section_header("VIBE"))
+
+        self.vibe_picker = VibePicker()
+        self.vibe_picker.vibe_changed.connect(self._on_vibe_selected)
+        v.addWidget(self.vibe_picker)
+        return sec
+
+    def _on_vibe_selected(self, vibe_id: str):
+        from core.config import DebugConfig, VIBE_PRESETS
+        s = VIBE_PRESETS[vibe_id]
+        DebugConfig.enable_chromatic_aberration = s['enable_ca']
+        DebugConfig.ca_strength = s['ca_strength']
+        DebugConfig.softness_sigma = s['softness']
+        DebugConfig.sharpen_strength = s['sharpness']
+        DebugConfig.grain_strength = s['grain']
+        lut_path = resource_path(s['lut'])
+        if lut_path not in self._lut_cache:
+            self._lut_cache[lut_path] = colour.io.read_LUT(lut_path)
+        lut = self._lut_cache[lut_path]
+        self.processor.lut_preview = lut
+        self.processor.lut_full = lut
+        self.refresh_from_debug()
 
     def _build_tone_section(self) -> QWidget:
         sec = QWidget()

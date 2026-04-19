@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import (
     Qt, QTimer, QSize, Signal, QThread, QEvent, QPropertyAnimation, QEasingCurve,
-    QPointF,
+    QPoint, QPointF,
 )
 from PySide6.QtGui import (
     QPixmap, QImage, QPainter, QColor, QPen, QCursor, QLinearGradient,
@@ -31,7 +31,7 @@ from PySide6.QtGui import (
 from core import resource_path
 from core.processor import FlashbackProcessor
 from core.config import _timing_print
-from ui.theme import qcolor, register_theme_listener
+from ui.theme import C, qcolor, register_theme_listener, ui_font
 
 
 # =============================================================================
@@ -1003,3 +1003,157 @@ class ZoomableImageWidget(QScrollArea):
         super().resizeEvent(event)
         if self._fit_to_window:
             self._update_display()
+
+
+# =============================================================================
+# VIBE PICKER
+# =============================================================================
+
+class VibePicker(QWidget):
+    """Film-character preset selector — styled dropdown matching the HTML design."""
+
+    vibe_changed = Signal(str)
+
+    VIBES = [
+        ('disposable',  'Disposable',    'Default film character'),
+        ('point_shoot', 'Point & Shoot', 'Reduced aberration'),
+        ('rangefinder', 'Rangefinder',   'Sharp, no aberration'),
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._current = 'disposable'
+        self._setup_ui()
+        register_theme_listener(self._apply_theme)
+
+    def current_vibe(self):
+        return self._current
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._selector = QFrame()
+        self._selector.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._selector.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+        sel_layout = QHBoxLayout(self._selector)
+        sel_layout.setContentsMargins(10, 8, 10, 8)
+        sel_layout.setSpacing(8)
+
+        text_col = QWidget()
+        text_col.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        text_v = QVBoxLayout(text_col)
+        text_v.setContentsMargins(0, 0, 0, 0)
+        text_v.setSpacing(2)
+
+        self._name_lbl = QLabel()
+        self._sub_lbl = QLabel()
+        text_v.addWidget(self._name_lbl)
+        text_v.addWidget(self._sub_lbl)
+
+        self._chevron = QLabel("›")
+        self._chevron.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+        sel_layout.addWidget(text_col, 1)
+        sel_layout.addWidget(self._chevron)
+
+        layout.addWidget(self._selector)
+
+        self._selector.mousePressEvent = lambda e: self._show_popup()
+        self._update_display()
+        self._apply_theme()
+
+    def _update_display(self):
+        vibe = next(v for v in self.VIBES if v[0] == self._current)
+        self._name_lbl.setText(vibe[1])
+        self._sub_lbl.setText(vibe[2])
+
+    def _apply_theme(self):
+        self._selector.setStyleSheet(
+            f"QFrame {{ background: {C['bg_input']}; border: 1px solid {C['border_input']}; border-radius: 4px; }}"
+            f"QFrame:hover {{ border-color: {C['border_active']}; }}"
+        )
+        self._name_lbl.setFont(ui_font(12, QFont.Weight.Medium))
+        self._name_lbl.setStyleSheet(f"color: {C['text_primary']}; background: transparent; border: none;")
+        self._sub_lbl.setFont(ui_font(10, QFont.Weight.Normal))
+        self._sub_lbl.setStyleSheet(f"color: {C['text_dim']}; background: transparent; border: none;")
+        self._chevron.setFont(ui_font(16, QFont.Weight.Normal))
+        self._chevron.setStyleSheet(f"color: {C['text_dim']}; background: transparent; border: none;")
+
+    def _show_popup(self):
+        popup = QFrame(None, Qt.WindowType.Popup)
+        popup.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        popup.setStyleSheet(
+            f"QFrame#VibePopup {{ background: {C['bg_rail']}; border: 1px solid {C['border_input']};"
+            f"  border-radius: 4px; }}"
+        )
+        popup.setObjectName("VibePopup")
+
+        pop_layout = QVBoxLayout(popup)
+        pop_layout.setContentsMargins(0, 4, 0, 4)
+        pop_layout.setSpacing(0)
+
+        for vibe_id, name, sub in self.VIBES:
+            row = QFrame()
+            row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            row.setCursor(Qt.CursorShape.PointingHandCursor)
+            is_selected = vibe_id == self._current
+            row.setStyleSheet(
+                f"QFrame {{ background: {C['bg_input_active'] if is_selected else 'transparent'}; border: none; }}"
+            )
+
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(10, 8, 10, 8)
+            row_layout.setSpacing(8)
+
+            check_lbl = QLabel("✓" if is_selected else "")
+            check_lbl.setFixedWidth(14)
+            check_lbl.setFont(ui_font(11, QFont.Weight.Medium))
+            check_lbl.setStyleSheet(f"color: {C['accent']}; background: transparent; border: none;")
+
+            text_col = QWidget()
+            text_col.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            text_v = QVBoxLayout(text_col)
+            text_v.setContentsMargins(0, 0, 0, 0)
+            text_v.setSpacing(2)
+
+            name_lbl = QLabel(name)
+            name_lbl.setFont(ui_font(12, QFont.Weight.Medium))
+            name_lbl.setStyleSheet(f"color: {C['text_primary']}; background: transparent; border: none;")
+            sub_lbl = QLabel(sub)
+            sub_lbl.setFont(ui_font(10, QFont.Weight.Normal))
+            sub_lbl.setStyleSheet(f"color: {C['text_dim']}; background: transparent; border: none;")
+
+            text_v.addWidget(name_lbl)
+            text_v.addWidget(sub_lbl)
+
+            row_layout.addWidget(check_lbl)
+            row_layout.addWidget(text_col, 1)
+
+            def make_handler(vid, p, r):
+                def on_press(event):
+                    self._current = vid
+                    self._update_display()
+                    p.close()
+                    self.vibe_changed.emit(vid)
+                def on_enter(event):
+                    if vid != self._current:
+                        r.setStyleSheet(f"QFrame {{ background: {C['bg_input_hover']}; border: none; }}")
+                def on_leave(event):
+                    if vid != self._current:
+                        r.setStyleSheet("QFrame { background: transparent; border: none; }")
+                return on_press, on_enter, on_leave
+
+            press, enter, leave = make_handler(vibe_id, popup, row)
+            row.mousePressEvent = press
+            row.enterEvent = enter
+            row.leaveEvent = leave
+
+            pop_layout.addWidget(row)
+
+        global_pos = self._selector.mapToGlobal(QPoint(0, self._selector.height() + 4))
+        popup.move(global_pos)
+        popup.resize(self._selector.width(), len(self.VIBES) * 56 + 8)
+        popup.show()
