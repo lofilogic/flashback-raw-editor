@@ -730,6 +730,7 @@ class ZoomableImageWidget(QScrollArea):
     """
 
     ZOOM_LEVELS = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0]
+    ZOOM_FACTOR = 1.18  # multiplicative step per scroll tick
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -881,54 +882,37 @@ class ZoomableImageWidget(QScrollArea):
         scale_h = (viewport_size.height() - 20) / self._original_pixmap.height()
         return min(scale_w, scale_h)
 
-    def _set_zoom_at(self, zoom_level, pos=None):
+    def _set_zoom_at(self, zoom_level, cursor_vp=None):
+        """Zoom to zoom_level, keeping the point under cursor_vp (viewport coords) fixed."""
         if self._original_pixmap is None:
             return
 
-        old_zoom = self._zoom_level if not self._fit_to_window else self._get_fit_zoom()
+        old_zoom = self._get_fit_zoom() if self._fit_to_window else self._zoom_level
         zoom_ratio = zoom_level / old_zoom
 
-        self._zoom_level = max(0.25, min(4.0, zoom_level))
+        # Sample label-space position under cursor BEFORE layout changes.
+        # image_label.mapFrom(viewport, p) already accounts for both scroll
+        # offset and centering alignment, giving true label coordinates.
+        label_pos = (
+            self.image_label.mapFrom(self.viewport(), cursor_vp)
+            if cursor_vp is not None else None
+        )
 
+        self._zoom_level = max(0.1, min(4.0, zoom_level))
         fit_zoom = self._get_fit_zoom()
-        if abs(self._zoom_level - fit_zoom) < 0.05:
-            self._fit_to_window = True
-        else:
-            self._fit_to_window = False
+        self._fit_to_window = abs(self._zoom_level - fit_zoom) < 0.05
 
         self._update_display()
 
-        if pos is not None and zoom_ratio != 1.0:
-            hbar = self.horizontalScrollBar()
-            vbar = self.verticalScrollBar()
-            old_h = hbar.value() + pos.x()
-            old_v = vbar.value() + pos.y()
-            new_h = int(old_h * zoom_ratio) - pos.x()
-            new_v = int(old_v * zoom_ratio) - pos.y()
-            hbar.setValue(new_h)
-            vbar.setValue(new_v)
+        # Anchor: label_pos * zoom_ratio must end up at cursor_vp in the viewport.
+        # new_scroll = label_pos * zoom_ratio - cursor_vp
+        if label_pos is not None and zoom_ratio != 1.0:
+            new_h = round(label_pos.x() * zoom_ratio - cursor_vp.x())
+            new_v = round(label_pos.y() * zoom_ratio - cursor_vp.y())
+            self.horizontalScrollBar().setValue(max(0, new_h))
+            self.verticalScrollBar().setValue(max(0, new_v))
 
         self._update_cursor()
-
-    def _step_zoom_at(self, direction, pos=None):
-        if self._fit_to_window:
-            current_zoom = self._get_fit_zoom()
-            self._fit_to_window = False
-        else:
-            current_zoom = self._zoom_level
-
-        if direction > 0:
-            for level in self.ZOOM_LEVELS:
-                if level > current_zoom * 1.1:
-                    self._set_zoom_at(level, pos)
-                    return
-            self._set_zoom_at(4.0, pos)
-        else:
-            for level in reversed(self.ZOOM_LEVELS):
-                if level < current_zoom * 0.9:
-                    self._set_zoom_at(level, pos)
-                    return
-            self._set_zoom_at(self._get_fit_zoom(), pos)
 
     def _update_cursor(self):
         fit_zoom = self._get_fit_zoom()
@@ -948,8 +932,7 @@ class ZoomableImageWidget(QScrollArea):
                 self._last_mouse_pos = event.pos()
                 self.image_label.setCursor(Qt.ClosedHandCursor)
             else:
-                image_pos = self.image_label.mapFrom(self.viewport(), event.pos())
-                self._set_zoom_at(1.25, image_pos)
+                self._set_zoom_at(1.25, event.pos())
 
         super().mousePressEvent(event)
 
@@ -984,13 +967,12 @@ class ZoomableImageWidget(QScrollArea):
             return
 
         delta = event.angleDelta().y()
-        pos = self.image_label.mapFrom(self.viewport(), event.position().toPoint())
+        if delta == 0:
+            return
 
-        if delta > 0:
-            self._step_zoom_at(1, pos)
-        else:
-            self._step_zoom_at(-1, pos)
-
+        current = self._get_fit_zoom() if self._fit_to_window else self._zoom_level
+        factor = self.ZOOM_FACTOR if delta > 0 else (1.0 / self.ZOOM_FACTOR)
+        self._set_zoom_at(current * factor, event.position().toPoint())
         event.accept()
 
     def keyPressEvent(self, event):
@@ -1015,9 +997,9 @@ class VibePicker(QWidget):
     vibe_changed = Signal(str)
 
     VIBES = [
-        ('disposable',  'Disposable',    'Default film character'),
-        ('point_shoot', 'Point & Shoot', 'Reduced aberration'),
-        ('rangefinder', 'Rangefinder',   'Sharp, no aberration'),
+        ('disposable',  'Disposable',    'So bad it’s good'),
+        ('point_shoot', 'Point & Shoot', '90s photoalbum vibes'),
+        ('rangefinder', 'Rangefinder',   'Like-a M6'),
     ]
 
     def __init__(self, parent=None):
