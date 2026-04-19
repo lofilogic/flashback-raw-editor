@@ -1000,6 +1000,8 @@ class FlashbackEditor(QMainWindow):
 
         folder_ico = QLabel()
         folder_ico.setPixmap(svg_icon("assets/icons/folder.svg", "text_label", 12).pixmap(12, 12))
+        folder_ico.setCursor(Qt.PointingHandCursor)
+        folder_ico.mousePressEvent = lambda _: self.select_output_dir()
         ol.addWidget(folder_ico)
 
         self.label_output = QLabel(self.output_dir)
@@ -1010,17 +1012,10 @@ class FlashbackEditor(QMainWindow):
         )
         self.label_output.setWordWrap(False)
         self.label_output.setTextFormat(Qt.PlainText)
+        self.label_output.setCursor(Qt.PointingHandCursor)
+        self.label_output.setToolTip(self.output_dir)
+        self.label_output.mousePressEvent = lambda _: self.select_output_dir()
         ol.addWidget(self.label_output, 1)
-
-        self.btn_select_output = QPushButton("⋯")
-        self.btn_select_output.setFixedSize(14, 20)
-        self.btn_select_output.setCursor(Qt.PointingHandCursor)
-        self._themed(self.btn_select_output, lambda: (
-            f"QPushButton {{ background: transparent; border: none; color: {C['text_dim']}; padding: 0; }}"
-            f"QPushButton:hover {{ color: {C['text_primary']}; }}"
-        ))
-        self.btn_select_output.clicked.connect(self.select_output_dir)
-        ol.addWidget(self.btn_select_output)
         v.addWidget(out_row)
 
         # Process button + thin progress bar above it
@@ -1401,11 +1396,16 @@ class FlashbackEditor(QMainWindow):
             self.add_thumbnail_worker._is_running = False
             self.add_thumbnail_worker.wait()
 
+        if hasattr(self, 'loader_overlay'):
+            self.loader_overlay.fade_in()
+            self.loader_overlay.update_progress(0, len(files_to_add))
+
         self.add_thumbnail_worker = ThumbnailWorker(
             files_to_add,
             self.processor.lut_preview,
             self.processor.lut_full
         )
+        self.add_thumbnail_worker.progress.connect(self.loader_overlay.update_progress)
         self.add_thumbnail_worker.thumbnail_ready.connect(
             lambda i, t, mid, off=offset: self._add_thumbnail_to_ui(i + off, t, mid)
         )
@@ -1413,16 +1413,17 @@ class FlashbackEditor(QMainWindow):
         self.add_thumbnail_worker.setStackSize(32 * 1024 * 1024)
         self.add_thumbnail_worker.start()
 
-        n = len(files_to_add)
-        self.mode_label.setText(f"Adding {n} image{'s' if n != 1 else ''}...")
-        self.mode_label.setStyleSheet(f"color: {C['accent']};")
-
     def _on_add_thumbnails_finished(self):
         print("✓ Add-images thumbnail generation complete!")
-        self.update_mode_label()
         if hasattr(self, 'add_thumbnail_worker') and self.add_thumbnail_worker:
             self.add_thumbnail_worker.deleteLater()
             self.add_thumbnail_worker = None
+        try:
+            if hasattr(self, 'loader_overlay'):
+                self.loader_overlay.clear_and_hide()
+        except Exception:
+            pass
+        self.update_mode_label()
 
     # ===================================================================
     # THUMBNAIL MANAGEMENT
@@ -1890,6 +1891,7 @@ class FlashbackEditor(QMainWindow):
         if directory:
             self.output_dir = directory
             self.label_output.setText(directory)
+            self.label_output.setToolTip(directory)
 
     def set_export_mode(self, tiff: bool):
         """Select JPEG or TIFF export; sync both pills and the Process button label."""
