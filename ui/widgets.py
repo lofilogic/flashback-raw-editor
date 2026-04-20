@@ -997,9 +997,10 @@ class VibePicker(QWidget):
     vibe_changed = Signal(str)
 
     VIBES = [
-        ('disposable',  'Disposable',    'So bad it’s good'),
+        ('disposable',  'Disposable',    "So bad it's good"),
         ('point_shoot', 'Point & Shoot', '90s photoalbum vibes'),
         ('rangefinder', 'Rangefinder',   'Like-a M6'),
+        ('monochrome',  'Monochrome',    'makes everything art'),
     ]
 
     def __init__(self, parent=None):

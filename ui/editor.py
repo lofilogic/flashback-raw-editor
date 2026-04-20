@@ -647,6 +647,7 @@ class FlashbackEditor(QMainWindow):
         self.addAction(reset_sc)
 
         self._build_menu_bar()
+        self._on_vibe_selected('disposable')
 
     # ── sub-toolbar ─────────────────────────────────────────────────────
     def _build_sub_toolbar(self) -> QWidget:
@@ -862,12 +863,30 @@ class FlashbackEditor(QMainWindow):
         DebugConfig.sharpen_strength = s['sharpness']
         DebugConfig.grain_strength = s['grain']
         lut_path = resource_path(s['lut'])
-        if lut_path not in self._lut_cache:
-            self._lut_cache[lut_path] = colour.io.read_LUT(lut_path)
-        lut = self._lut_cache[lut_path]
-        self.processor.lut_preview = lut
-        self.processor.lut_full = lut
+        try:
+            if lut_path not in self._lut_cache:
+                self._lut_cache[lut_path] = colour.io.read_LUT(lut_path)
+            lut = self._lut_cache[lut_path]
+            self.processor.lut_preview = lut
+            self.processor.lut_full = lut
+        except Exception as e:
+            print(f"⚠ Could not load vibe LUT '{lut_path}': {e}")
         self.refresh_from_debug()
+        self._refresh_all_thumbnails()
+
+    _DEFAULT_USER_SETTINGS = {'exposure_ev': 0.0, 'wb_temp': 0, 'tint': 0.0}
+
+    def _refresh_all_thumbnails(self):
+        """Re-render every cached thumbnail — used after vibe/global-effect changes."""
+        if not self.image_files:
+            return
+        for idx, path in enumerate(self.image_files):
+            if idx == self.current_index:
+                continue
+            settings = self.image_settings.get(str(path), self._DEFAULT_USER_SETTINGS)
+            self.update_thumbnail_for_settings(idx, settings)
+            if idx % 5 == 0:
+                QApplication.processEvents()
 
     def _build_tone_section(self) -> QWidget:
         sec = QWidget()

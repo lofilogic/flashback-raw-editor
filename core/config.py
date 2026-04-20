@@ -55,9 +55,10 @@ DITHER_STRENGTH = 0.005
 # =============================================================================
 
 VIBE_PRESETS = {
-    'disposable':  {'enable_ca': True,  'ca_strength': 0.005, 'softness': 0.5, 'sharpness': 0.5, 'grain': 0.01,  'lut': 'assets/luts/look.cube'},
-    'point_shoot': {'enable_ca': True,  'ca_strength': 0.002, 'softness': 0.5, 'sharpness': 0.5, 'grain': 0.01,  'lut': 'assets/luts/look.cube'},
-    'rangefinder': {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.2, 'sharpness': 1.0, 'grain': 0.007, 'lut': 'assets/luts/look.cube'},
+    'disposable':  {'enable_ca': True,  'ca_strength': 0.005, 'softness': 0.5, 'sharpness': 0.5, 'grain': 0.01,  'lut': 'assets/luts/disposable.cube'},
+    'point_shoot': {'enable_ca': True,  'ca_strength': 0.002, 'softness': 0.5, 'sharpness': 0.5, 'grain': 0.01,  'lut': 'assets/luts/pointandshoot.cube'},
+    'rangefinder': {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.2, 'sharpness': 0.8, 'grain': 0.007, 'lut': 'assets/luts/rangefinder.cube'},
+    'monochrome':  {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.2, 'sharpness': 0.8, 'grain': 0.020, 'lut': 'assets/luts/monochrome.cube'},
 }
 
 # =============================================================================
