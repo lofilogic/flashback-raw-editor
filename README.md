@@ -2,7 +2,7 @@
 
 A dedicated RAW processor and editor built specifically for the [Flashback One35 v2](https:///joinflashback.co) camera.
 
-![App Screenshot](https://github.com/user-attachments/assets/7b2faa24-3558-434c-9982-18855d9995c1)
+![App Screenshot](https://github.com/user-attachments/assets/b10e7da6-35f3-425b-b700-7ea6c53224d9)
 
 This app processes Flashback One35 v2 RAW files through a custom color pipeline and film emulation.
 
@@ -16,9 +16,9 @@ Get the latest release for your platform from the [Releases](../../releases/late
 
 | Platform | Download | Status |
 |----------|----------|--------|
-| macOS (Apple Silicon) | [`Flashback-macOS.dmg`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v0.1.0-rc2/Flashback-macOS.dmg) | ✓ Tested |
-| Windows | [`Flashback-Windows-Setup.exe`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v0.1.0-rc2/Flashback-Windows-Setup.exe) | ✓ Tested |
-| Linux x86_64 | [`Flashback-Linux.AppImage`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v0.1.0-rc2/Flashback-Linux.AppImage) | ⚠ Untested — feedback welcome |
+| macOS (Apple Silicon) | [`Flashback-macOS.dmg`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v0.1.0-rc3/Flashback-macOS.dmg) | ✓ Tested |
+| Windows | [`Flashback-Windows-Setup.exe`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v0.1.0-rc3/Flashback-Windows-Setup.exe) | ✓ Tested |
+| Linux x86_64 | [`Flashback-Linux.AppImage`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v0.1.0-rc3/Flashback-Linux.AppImage) | ⚠ Untested — feedback welcome |
 
 ### macOS
 1. Open `Flashback-macOS.dmg`
@@ -81,6 +81,7 @@ Get the latest release for your platform from the [Releases](../../releases/late
 - `Scroll / Left-click` — zoom
 - `Left-click + drag` — pan (when zoomed in)
 - `Double-click` — fit to screen (when zoomed in)
+- `1 - 4` — select "vibe"
 
 **Thumbnail strip**
 - `← / → arrow keys` — navigate images
