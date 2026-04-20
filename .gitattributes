@@ -1,6 +1,5 @@
 # LUT assets are opaque generated files — don't line-end normalize or diff.
-assets/luts/*.cube binary
-
+assets/luts/*.cube filter=lfs diff=lfs merge=lfs -text
 # Doc screenshots / animations — treat as opaque binary.
 docs/*.png binary
 docs/*.gif binary
