@@ -997,10 +997,10 @@ class VibePicker(QWidget):
     vibe_changed = Signal(str)
 
     VIBES = [
-        ('disposable',  'Disposable',    "So bad it's good"),
-        ('point_shoot', 'Point & Shoot', '90s photoalbum vibes'),
-        ('rangefinder', 'Rangefinder',   'Like-a M6'),
-        ('monochrome',  'Monochrome',    'makes everything art'),
+        ('disposable',  'Disposable',    "So bad it's good",    '1'),
+        ('point_shoot', 'Point & Shoot', '90s photoalbum vibes', '2'),
+        ('rangefinder', 'Rangefinder',   'Like-a M6',            '3'),
+        ('monochrome',  'Monochrome',    'makes everything art', '4'),
     ]
 
     def __init__(self, parent=None):
@@ -1011,6 +1011,13 @@ class VibePicker(QWidget):
 
     def current_vibe(self):
         return self._current
+
+    def set_vibe(self, vibe_id: str):
+        if vibe_id == self._current or not any(v[0] == vibe_id for v in self.VIBES):
+            return
+        self._current = vibe_id
+        self._update_display()
+        self.vibe_changed.emit(vibe_id)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -1078,7 +1085,7 @@ class VibePicker(QWidget):
         pop_layout.setContentsMargins(0, 4, 0, 4)
         pop_layout.setSpacing(0)
 
-        for vibe_id, name, sub in self.VIBES:
+        for vibe_id, name, sub, shortcut in self.VIBES:
             row = QFrame()
             row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
             row.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1112,8 +1119,19 @@ class VibePicker(QWidget):
             text_v.addWidget(name_lbl)
             text_v.addWidget(sub_lbl)
 
+            shortcut_lbl = QLabel(shortcut)
+            shortcut_lbl.setFixedWidth(18)
+            shortcut_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            shortcut_lbl.setFont(ui_font(10, QFont.Weight.Medium))
+            shortcut_lbl.setStyleSheet(
+                f"color: {C['text_dim']}; background: {C['bg_input']};"
+                f" border: 1px solid {C['border_input']}; border-radius: 3px;"
+                f" padding: 1px 0;"
+            )
+
             row_layout.addWidget(check_lbl)
             row_layout.addWidget(text_col, 1)
+            row_layout.addWidget(shortcut_lbl)
 
             def make_handler(vid, p, r):
                 def on_press(event):

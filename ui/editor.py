@@ -203,6 +203,9 @@ class FullscreenZenOverlay(QWidget):
         elif event.key() == Qt.Key_V and (event.modifiers() & Qt.ControlModifier):
             if self.main_window.image_files and self.main_window.settings_clipboard:
                 self.main_window.paste_settings()
+        elif event.key() in (Qt.Key_1, Qt.Key_2, Qt.Key_3, Qt.Key_4):
+            vibes = ('disposable', 'point_shoot', 'rangefinder', 'monochrome')
+            self.main_window.vibe_picker.set_vibe(vibes[event.key() - Qt.Key_1])
 
     def close_zen(self):
         self.hide()
@@ -645,6 +648,14 @@ class FlashbackEditor(QMainWindow):
         reset_sc.setShortcut(QKeySequence("Ctrl+R"))
         reset_sc.triggered.connect(self.reset_all_sliders)
         self.addAction(reset_sc)
+
+        # 1–4 select vibe preset
+        for key, vibe_id in (('1', 'disposable'), ('2', 'point_shoot'),
+                             ('3', 'rangefinder'), ('4', 'monochrome')):
+            sc = QAction(self)
+            sc.setShortcut(QKeySequence(key))
+            sc.triggered.connect(lambda _=False, v=vibe_id: self.vibe_picker.set_vibe(v))
+            self.addAction(sc)
 
         self._build_menu_bar()
         self._on_vibe_selected('disposable')
