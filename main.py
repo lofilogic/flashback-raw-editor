@@ -4,6 +4,7 @@ Flashback One35 — entry point.
 import sys
 import platform
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QSurfaceFormat, QPalette, QColor
 
@@ -13,6 +14,11 @@ from _version import __version__
 
 def main():
     """Main entry point."""
+    # Allow fractional DPI scaling (e.g. 125%, 150%) — must be set before QApplication
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
+
     if platform.system() == 'Darwin':
         # Force sRGB color space to prevent P3 display oversaturation
         fmt = QSurfaceFormat.defaultFormat()
