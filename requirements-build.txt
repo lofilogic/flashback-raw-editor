@@ -8,6 +8,7 @@ pillow==11.3.0
 pyinstaller==6.18.0
 pyinstaller-hooks-contrib==2026.0
 PySide6==6.10.2
+exifread==3.0.0
 rawpy==0.26.1
 scipy==1.13.1
 pyobjc-framework-Cocoa==11.0; sys_platform == "darwin"
