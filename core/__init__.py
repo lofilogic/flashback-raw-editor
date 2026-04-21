@@ -80,6 +80,11 @@ def _setup_numba_cache():
 
 _setup_numba_cache()
 
+# Enable OpenCV optimizations (SIMD, multi-threaded dispatch) — no-op if already set
+import cv2 as _cv2
+_cv2.setUseOptimized(True)
+_cv2.setNumThreads(-1)
+
 # =============================================================================
 # Shared Utilities
 # =============================================================================

@@ -21,7 +21,7 @@ from pathlib import Path
 from . import resource_path
 from .config import (
     FLASHBACK_CCM, FLASHBACK_CCM2, SENSOR_BLACK, BASE_WB_SETTINGS, BASE_WB_SETTINGS2, BASE_EXPOSURE_OFFSET,
-    DebugConfig, CS_SRGB, CS_REC2020,
+    DebugConfig, REC2020_FROM_SRGB,
     GRAIN_STRENGTH, SOFTNESS_SIGMA, SHARPEN_STRENGTH, SHARPEN_RADIUS,
     _timing_print,
 )
@@ -396,7 +396,7 @@ class FlashbackProcessor:
             # Step 3: Convert to Rec.2020
             start = time.time()
             print("Converting to Rec.2020...")
-            img_rec2020_lin = colour.RGB_to_RGB(img_srgb_lin, CS_SRGB, CS_REC2020)
+            img_rec2020_lin = (img_srgb_lin.reshape(-1, 3) @ REC2020_FROM_SRGB.T).reshape(img_srgb_lin.shape)
             profile['rec2020'] = (time.time() - start) * 1000
             _timing_print(f"  After Rec.2020: [{img_rec2020_lin.min():.4f}, {img_rec2020_lin.max():.4f}]")
             _timing_print(f"    -> {profile['rec2020']:6.2f} ms")
@@ -431,9 +431,9 @@ class FlashbackProcessor:
             # Step 5: Encode to ACEScct
             start = time.time()
             print("Encoding to ACEScct...")
-            self.intermediate_acescct = colour.models.log_encoding_ACEScct(
+            self.intermediate_acescct = self._fast_acescct_encode(
                 np.maximum(1e-10, img_rec2020_lin)
-            ).astype(np.float32)
+            )
 
             # Ensure contiguous memory layout for fast access
             start = time.time()

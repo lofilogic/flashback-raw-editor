@@ -270,6 +270,11 @@ class FlashbackEditor(QMainWindow):
 
         self.pending_render = False
 
+        self._slider_render_timer = QTimer(self)
+        self._slider_render_timer.setSingleShot(True)
+        self._slider_render_timer.setInterval(40)
+        self._slider_render_timer.timeout.connect(self._on_slider_render_tick)
+
         lut_path = resource_path("assets/luts/look.cube")
         if not os.path.exists(lut_path):
             lut_path = None
@@ -1710,23 +1715,28 @@ class FlashbackEditor(QMainWindow):
     # SLIDER HANDLERS
     # ===================================================================
 
+    def _on_slider_render_tick(self):
+        img_array = self.processor._render_fast()
+        if img_array is not None:
+            self.display_image(img_array)
+            self.update_mode_label()
+
     def on_exposure_slider_moved(self, value):
         self.processor.preview_mode = 'fast'
         ev = value / 10.0
         self.label_exposure.setText(f"{ev:.1f} EV")
-        img_array = self.processor.update_setting('exposure_ev', ev)
-        self.display_image(img_array)
-        self.update_current_thumbnail(img_array)
-        self.save_current_settings()
-        self.update_mode_label()
+        self.processor.user_settings['exposure_ev'] = ev
+        self._slider_render_timer.start()
 
     def on_exposure_released(self):
+        self._slider_render_timer.stop()
         self.processor.preview_mode = 'hq'
         img_array = self.processor._render_fast()
         if img_array is not None:
             self.display_image(img_array)
             self.update_current_thumbnail(img_array)
             self.update_mode_label()
+        self.save_current_settings()
 
     def _on_wb_link_toggled(self, checked):
         self.save_current_settings()
@@ -1759,43 +1769,39 @@ class FlashbackEditor(QMainWindow):
         if self.chk_wb_link.isChecked():
             self._apply_wb_tint_link(value)
             self.processor.user_settings['wb_temp'] = value
-            img_array = self.processor.render_preview()
         else:
-            img_array = self.processor.update_setting('wb_temp', value)
+            self.processor.user_settings['wb_temp'] = value
 
-        self.display_image(img_array)
-        self.update_current_thumbnail(img_array)
-        self.save_current_settings()
-        self.update_mode_label()
+        self._slider_render_timer.start()
 
     def on_wb_released(self):
+        self._slider_render_timer.stop()
         self.processor.preview_mode = 'hq'
         img_array = self.processor._render_fast()
         if img_array is not None:
             self.display_image(img_array)
             self.update_current_thumbnail(img_array)
             self.update_mode_label()
+        self.save_current_settings()
 
     def on_tint_slider_moved(self, value):
         self.processor.preview_mode = 'fast'
         tint = value / 5.0
         self.label_tint.setText(f"{value:+d}")
-        # Record how far the user has nudged tint away from the coupled position
         if self.chk_wb_link.isChecked():
             self._tint_manual_offset = tint - self._coupled_tint(self.slider_wb.value())
-        img_array = self.processor.update_setting('tint', tint)
-        self.display_image(img_array)
-        self.update_current_thumbnail(img_array)
-        self.save_current_settings()
-        self.update_mode_label()
+        self.processor.user_settings['tint'] = tint
+        self._slider_render_timer.start()
 
     def on_tint_released(self):
+        self._slider_render_timer.stop()
         self.processor.preview_mode = 'hq'
         img_array = self.processor._render_fast()
         if img_array is not None:
             self.display_image(img_array)
             self.update_current_thumbnail(img_array)
             self.update_mode_label()
+        self.save_current_settings()
 
     def adjust_exposure(self, delta):
         current = self.slider_exposure.value()

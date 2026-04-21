@@ -29,6 +29,11 @@ BASE_EXPOSURE_OFFSET = 1
 CS_SRGB = colour.RGB_COLOURSPACES['sRGB']
 CS_REC2020 = colour.RGB_COLOURSPACES['ITU-R BT.2020']
 
+# Precomputed sRGB → Rec.2020 3×3 matrix (avoids colour-science on every load)
+REC2020_FROM_SRGB = colour.RGB_to_RGB(
+    np.eye(3, dtype=np.float32), CS_SRGB, CS_REC2020
+).astype(np.float32)
+
 # =============================================================================
 # EFFECT DEFAULTS
 # =============================================================================
