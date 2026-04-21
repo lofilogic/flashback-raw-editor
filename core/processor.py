@@ -396,7 +396,7 @@ class FlashbackProcessor:
             # Step 3: Convert to Rec.2020
             start = time.time()
             print("Converting to Rec.2020...")
-            img_rec2020_lin = (img_srgb_lin.reshape(-1, 3) @ REC2020_FROM_SRGB.T).reshape(img_srgb_lin.shape)
+            img_rec2020_lin = (img_srgb_lin.reshape(-1, 3) @ REC2020_FROM_SRGB).reshape(img_srgb_lin.shape)
             profile['rec2020'] = (time.time() - start) * 1000
             _timing_print(f"  After Rec.2020: [{img_rec2020_lin.min():.4f}, {img_rec2020_lin.max():.4f}]")
             _timing_print(f"    -> {profile['rec2020']:6.2f} ms")
