@@ -63,6 +63,7 @@ a = Analysis(
         'ui.editor',
 
         # Core processing libraries
+        'exifread',
         'rawpy',
         'colour',
         'colour.models',
