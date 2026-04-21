@@ -92,6 +92,12 @@ class DebugConfig:
     enable_lut = True
     enable_pre_lut_dither = True
 
+    # Experimental: reprocess at full sensor resolution on export.
+    # Reloads the RAW with half_size=False and scales pixel-sized effect
+    # parameters (softness, sharpen radius, halation radius, CNR sigma) by 2x
+    # so the look matches the preview. Export is ~4x slower.
+    experimental_full_res_export = False
+
     # Parameters (initialized from constants above)
     halation_threshold = HALATION_THRESHOLD
     halation_blur_radius = HALATION_BLUR_RADIUS
@@ -122,6 +128,7 @@ class DebugConfig:
         cls.enable_cnr = True
         cls.enable_lut = True
         cls.enable_pre_lut_dither = True
+        cls.experimental_full_res_export = False
 
         cls.halation_threshold = HALATION_THRESHOLD
         cls.halation_blur_radius = HALATION_BLUR_RADIUS

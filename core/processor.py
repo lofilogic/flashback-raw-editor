@@ -15,6 +15,7 @@ import colour
 import cv2
 import os
 import time
+import exifread
 from pathlib import Path
 
 from . import resource_path
@@ -43,6 +44,17 @@ from .effects import (
 )
 
 
+def _is_flashback_dng(path: str) -> bool:
+    """Return True if the file is a Flashback camera DNG (Make tag == 'Flashback')."""
+    try:
+        with open(path, 'rb') as f:
+            tags = exifread.process_file(f, details=False, stop_tag='Image Make')
+        make = str(tags.get('Image Make', '')).strip()
+        return make.lower() == 'flashback'
+    except Exception:
+        return False
+
+
 # =============================================================================
 # IMAGE PROCESSOR CLASS
 # =============================================================================
@@ -63,6 +75,9 @@ class FlashbackProcessor:
         self.current_file = None
         self.preview_mode = "fast"  # "fast" or "hq"
         self.rotation = 0  # 0, 90, 180, 270 degrees
+        self.is_full_res = False  # True when intermediate was built with half_size=False
+        self.pixel_scale = 1.0    # Multiplier for pixel-sized effect params (2.0 when full-res)
+        self.applied_rotation = 0  # Cumulative rotation baked into current intermediate
         self.grain_tiles = []  # Initialize grain tiles list
 
         # User-adjustable settings
@@ -146,10 +161,20 @@ class FlashbackProcessor:
 
         return grain
 
-    def apply_grain_linear_light(self, image, strength=GRAIN_STRENGTH):
-        """Apply grain with pre-rendered tiles."""
+    def apply_grain_linear_light(self, image, strength=GRAIN_STRENGTH, scale=0.7):
+        """Apply grain with pre-rendered tiles.
+
+        scale > 1.0 generates the grain layer at reduced size then upscales,
+        preserving apparent grain size across resolutions (at a small softness cost).
+        """
         h, w = image.shape[:2]
-        grain = self.generate_grain_layer(h, w, sigma=strength)
+        if scale > 1.0:
+            gh = max(1, int(round(h / scale)))
+            gw = max(1, int(round(w / scale)))
+            grain = self.generate_grain_layer(gh, gw, sigma=strength)
+            grain = cv2.resize(grain, (w, h), interpolation=cv2.INTER_LINEAR)
+        else:
+            grain = self.generate_grain_layer(h, w, sigma=strength)
 
         if HAS_NUMBA:
             return _apply_grain_numba(image, grain)
@@ -180,6 +205,7 @@ class FlashbackProcessor:
         elif self.rotation == 270:
             self.intermediate_acescct = self._rotate_90(self.intermediate_acescct, clockwise=False)
 
+        self.applied_rotation = (self.applied_rotation + self.rotation) % 360
         self.rotation = 0
         return self.render_preview()
 
@@ -255,7 +281,7 @@ class FlashbackProcessor:
 
         return out_buffer.reshape(orig_shape)
 
-    def load_image(self, dng_path, for_export=False, fast_mode=False):
+    def load_image(self, dng_path, for_export=False, fast_mode=False, full_res=False):
         """
         Load and preprocess RAW image to ACEScct intermediate.
         This is the slow step, done once per image.
@@ -264,13 +290,20 @@ class FlashbackProcessor:
             dng_path: Path to DNG file
             for_export: If True, apply halation (slower)
             fast_mode: If True, use LINEAR demosaic + clip highlights (10-20x faster, for thumbnails)
+            full_res: If True, develop RAW at full sensor resolution (half_size=False).
+                      Pixel-sized effect params are scaled by 2x to match preview look.
         Returns:
             preview image (numpy array)
         """
         total_start = time.time()
 
+        self.is_full_res = full_res
+        self.pixel_scale = 2.0 if full_res else 1.0
+        self.applied_rotation = 0
+        _half_size = not full_res
+
         _timing_print(f"\n{'='*60}")
-        _timing_print(f"Loading: {os.path.basename(dng_path)} (fast={fast_mode})")
+        _timing_print(f"Loading: {os.path.basename(dng_path)} (fast={fast_mode}, full_res={full_res})")
         _timing_print(f"{'='*60}")
 
         self.current_file = dng_path
@@ -292,21 +325,21 @@ class FlashbackProcessor:
             start = time.time()
             print("Developing RAW...")
             with rawpy.imread(dng_path) as raw:
-                is_not_dng = not str(self.current_file).lower().endswith('.dng')
+                is_not_flashback = not _is_flashback_dng(dng_path)
                 if fast_mode:
                     demosaic_fb = rawpy.DemosaicAlgorithm.LINEAR
                 else:
                     demosaic_fb = rawpy.DemosaicAlgorithm.AHD
                 highlight_mode = 1  # Clip: natural luma rolloff; chroma fixed pre-CCM below
 
-                if is_not_dng:
+                if is_not_flashback:
                     # Fuji RAW Development (Standard D65)
                     rgb_linear = raw.postprocess(
                         demosaic_algorithm=demosaic_fb,
                         use_camera_wb=False,
                         use_auto_wb=False,
                         user_wb=raw.daylight_whitebalance,
-                        half_size=True,
+                        half_size=_half_size,
                         no_auto_bright=True,
                         bright=1,
                         highlight_mode=highlight_mode,
@@ -332,7 +365,7 @@ class FlashbackProcessor:
                         demosaic_algorithm=demosaic_fb,
                         user_wb=BASE_WB_SETTINGS,
                         user_black=SENSOR_BLACK,
-                        half_size=True,
+                        half_size=_half_size,
                         no_auto_bright=True,
                         bright=0.5,
                         highlight_mode=highlight_mode,
@@ -382,13 +415,13 @@ class FlashbackProcessor:
                 print("Baking in halation (export only)...")
                 threshold = DebugConfig.halation_threshold
                 strength = DebugConfig.halation_strength
-                if is_not_dng:
+                if is_not_flashback:
                     threshold = 0.6
                     strength = strength / 1.5
                 img_rec2020_lin = apply_halation(
                     img_rec2020_lin,
                     threshold,
-                    DebugConfig.halation_blur_radius,
+                    DebugConfig.halation_blur_radius * self.pixel_scale,
                     strength
                 )
                 profile['halation'] = (time.time() - start) * 1000
@@ -412,7 +445,7 @@ class FlashbackProcessor:
                 start = time.time()
                 print("  Applying color noise reduction...")
                 self.intermediate_acescct = reduce_color_noise_chroma(
-                    self.intermediate_acescct, sigma=DebugConfig.cnr_sigma
+                    self.intermediate_acescct, sigma=DebugConfig.cnr_sigma * self.pixel_scale
                 )
                 profile['cnr'] = (time.time() - start) * 1000
                 _timing_print(f"    -> {profile['cnr']:6.2f} ms")
@@ -645,8 +678,8 @@ class FlashbackProcessor:
         profile['acescct_encode'] = time.time() - start
 
         start = time.time()
-        if SOFTNESS_SIGMA > 0:
-            img_acescct = apply_softness(img_acescct, SOFTNESS_SIGMA)
+        if DebugConfig.enable_softness and DebugConfig.softness_sigma > 0:
+            img_acescct = apply_softness(img_acescct, DebugConfig.softness_sigma * self.pixel_scale)
         profile['softness'] = time.time() - start
 
         start = time.time()
@@ -668,13 +701,19 @@ class FlashbackProcessor:
         profile['chromatic_aberration'] = time.time() - start
 
         start = time.time()
-        if GRAIN_STRENGTH > 0:
-            img_display = self.apply_grain_linear_light(img_display, GRAIN_STRENGTH)
+        if DebugConfig.enable_grain and DebugConfig.grain_strength > 0:
+            img_display = self.apply_grain_linear_light(
+                img_display, DebugConfig.grain_strength, scale=self.pixel_scale
+            )
         profile['grain'] = time.time() - start
 
         start = time.time()
-        if SHARPEN_STRENGTH > 0:
-            img_display = apply_sharpen(img_display, SHARPEN_STRENGTH, SHARPEN_RADIUS)
+        if DebugConfig.enable_sharpen and DebugConfig.sharpen_strength > 0:
+            img_display = apply_sharpen(
+                img_display,
+                DebugConfig.sharpen_strength,
+                DebugConfig.sharpen_radius * self.pixel_scale,
+            )
         profile['sharpen'] = time.time() - start
 
         profile['total'] = time.time() - total_start
@@ -780,7 +819,53 @@ def export_image(processor, output_path, quality=95, as_tiff=False):
 
         else:
             # JPEG EXPORT (Standard Fallback Chain)
-            img_array = processor.render_export()
+            use_full_res = (
+                DebugConfig.experimental_full_res_export
+                and processor.current_file is not None
+                and not processor.is_full_res
+            )
+            saved_state = None
+            if use_full_res:
+                root, ext_out = os.path.splitext(output_path)
+                output_path = f"{root}_full{ext_out}"
+                print("→ Experimental full-res reprocess for export…")
+                saved_state = {
+                    'intermediate': processor.intermediate_acescct,
+                    'is_full_res': processor.is_full_res,
+                    'pixel_scale': processor.pixel_scale,
+                    'applied_rotation': processor.applied_rotation,
+                    'preview_mode': processor.preview_mode,
+                }
+                try:
+                    processor.load_image(processor.current_file, for_export=True, full_res=True)
+
+                    # Re-apply any rotation the user had on the preview.
+                    # Orientation offsets between half/full rawpy decode are left to the user
+                    # to correct manually via the rotate button.
+                    prev_rot = saved_state['applied_rotation']
+                    if prev_rot:
+                        processor.rotation = prev_rot
+                        processor._apply_rotation_and_render()
+                    processor.preview_mode = "hq"
+                except Exception as e:
+                    print(f"✗ Full-res reload failed, falling back to preview resolution: {e}")
+                    # Restore preview state
+                    processor.intermediate_acescct = saved_state['intermediate']
+                    processor.is_full_res = saved_state['is_full_res']
+                    processor.pixel_scale = saved_state['pixel_scale']
+                    processor.applied_rotation = saved_state['applied_rotation']
+                    processor.preview_mode = saved_state['preview_mode']
+                    saved_state = None
+
+            try:
+                img_array = processor.render_export()
+            finally:
+                if saved_state is not None:
+                    processor.intermediate_acescct = saved_state['intermediate']
+                    processor.is_full_res = saved_state['is_full_res']
+                    processor.pixel_scale = saved_state['pixel_scale']
+                    processor.applied_rotation = saved_state['applied_rotation']
+                    processor.preview_mode = saved_state['preview_mode']
             if img_array is None:
                 print("✗ No image loaded to export")
                 return False

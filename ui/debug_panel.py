@@ -215,6 +215,28 @@ class DebugPanel(QWidget):
         live_layout.addRow("Sharpen Radius:", self.spin_sharpen_rad)
 
         form_layout.addWidget(live_group)
+
+        # --- Experimental Group ---
+        exp_group = QGroupBox("Experimental")
+        exp_group.setStyleSheet("QGroupBox { color: #FF8A35; font-weight: bold; border: 1px solid #555; border-radius: 6px; margin-top: 8px; padding-top: 8px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }")
+        exp_layout = QVBoxLayout(exp_group)
+        exp_layout.setSpacing(6)
+
+        self.chk_full_res_export = QCheckBox("Reprocess at full resolution on export")
+        self.chk_full_res_export.setToolTip(
+            "Re-develops the RAW at full sensor resolution before exporting.\n"
+            "Pixel-sized effects (softness, sharpen radius, halation, CNR) are\n"
+            "scaled 2× so the look matches preview. Export is noticeably slower."
+        )
+        self.chk_full_res_export.stateChanged.connect(self.update_config)
+        exp_layout.addWidget(self.chk_full_res_export)
+
+        exp_note = QLabel("Export will take ~4× longer. Experimental.")
+        exp_note.setStyleSheet("color: #888; font-size: 10px;")
+        exp_note.setWordWrap(True)
+        exp_layout.addWidget(exp_note)
+
+        form_layout.addWidget(exp_group)
         form_layout.addStretch()
 
         scroll.setWidget(container)
@@ -287,6 +309,7 @@ class DebugPanel(QWidget):
         DebugConfig.sharpen_radius = self.spin_sharpen_rad.value()
         DebugConfig.enable_pre_lut_dither = self.chk_dither.isChecked()
         DebugConfig.pre_lut_dither_strength = self.spin_dither.value()
+        DebugConfig.experimental_full_res_export = self.chk_full_res_export.isChecked()
 
         self.status_label.setText("Config updated. Click 'Reload Image' to apply baked effects.")
 
@@ -330,6 +353,7 @@ class DebugPanel(QWidget):
         s.setValue("hd_rolloff_L",             DebugConfig.highlight_desat_rolloff_L)
         s.setValue("hd_sigma",                 DebugConfig.highlight_desat_sigma)
         s.setValue("dither_strength",          DebugConfig.pre_lut_dither_strength)
+        s.setValue("experimental_full_res_export", DebugConfig.experimental_full_res_export)
         s.endGroup()
         self.status_label.setText("Defaults saved — will apply on next launch.")
 
@@ -368,6 +392,7 @@ class DebugPanel(QWidget):
         DebugConfig.highlight_desat_rolloff_L    = f("hd_rolloff_L",           DebugConfig.highlight_desat_rolloff_L)
         DebugConfig.highlight_desat_sigma        = f("hd_sigma",               DebugConfig.highlight_desat_sigma)
         DebugConfig.pre_lut_dither_strength      = f("dither_strength",        DebugConfig.pre_lut_dither_strength)
+        DebugConfig.experimental_full_res_export = b("experimental_full_res_export", DebugConfig.experimental_full_res_export)
         s.endGroup()
 
         # Block signals while syncing UI so that partial updates don't
@@ -375,6 +400,7 @@ class DebugPanel(QWidget):
         widgets = [
             self.chk_halation, self.chk_ca, self.chk_softness, self.chk_grain,
             self.chk_sharpen, self.chk_cnr, self.chk_lut, self.chk_dither,
+            self.chk_full_res_export,
             self.chk_highlight_desat, self.spin_halation_thresh, self.spin_halation_blur,
             self.spin_halation_str, self.spin_ca_str, self.spin_ca_steps,
             self.spin_softness, self.spin_grain, self.spin_sharpen_str,
@@ -392,6 +418,7 @@ class DebugPanel(QWidget):
         self.chk_cnr.setChecked(DebugConfig.enable_cnr)
         self.chk_lut.setChecked(DebugConfig.enable_lut)
         self.chk_dither.setChecked(DebugConfig.enable_pre_lut_dither)
+        self.chk_full_res_export.setChecked(DebugConfig.experimental_full_res_export)
         self.chk_highlight_desat.setChecked(DebugConfig.enable_highlight_desat)
         self.spin_halation_thresh.setValue(DebugConfig.halation_threshold)
         self.spin_halation_blur.setValue(DebugConfig.halation_blur_radius)
