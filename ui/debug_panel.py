@@ -210,7 +210,7 @@ class DebugPanel(QWidget):
         self.spin_sharpen_str.valueChanged.connect(self.update_preview)
         live_layout.addRow("Sharpen Strength:", self.spin_sharpen_str)
 
-        self.spin_sharpen_rad = self._create_double_spin(0.1, 5.0, SHARPEN_RADIUS, 0.1)
+        self.spin_sharpen_rad = self._create_double_spin(0.1, 20.0, SHARPEN_RADIUS, 0.1)
         self.spin_sharpen_rad.valueChanged.connect(self.update_preview)
         live_layout.addRow("Sharpen Radius:", self.spin_sharpen_rad)
 
@@ -290,6 +290,37 @@ class DebugPanel(QWidget):
         DebugConfig.pre_lut_dither_strength = self.spin_dither.value()
 
         self.status_label.setText("Config updated. Click 'Reload Image' to apply baked effects.")
+
+    def sync_from_config(self):
+        """Update all spinboxes/checkboxes from the current DebugConfig state."""
+        widgets = [
+            self.chk_halation, self.chk_ca, self.chk_softness, self.chk_grain,
+            self.chk_sharpen, self.chk_cnr, self.chk_lut, self.chk_dither,
+            self.chk_highlight_desat, self.spin_halation_thresh, self.spin_halation_blur,
+            self.spin_halation_str, self.spin_ca_str, self.spin_ca_steps,
+            self.spin_softness, self.spin_grain, self.spin_sharpen_str,
+            self.spin_sharpen_rad, self.spin_cnr, self.spin_hd_thresh,
+            self.spin_hd_rolloff, self.spin_hd_sigma, self.spin_dither,
+        ]
+        for w in widgets:
+            w.blockSignals(True)
+        self.chk_halation.setChecked(DebugConfig.enable_halation)
+        self.chk_ca.setChecked(DebugConfig.enable_chromatic_aberration)
+        self.chk_softness.setChecked(DebugConfig.enable_softness)
+        self.chk_grain.setChecked(DebugConfig.enable_grain)
+        self.chk_sharpen.setChecked(DebugConfig.enable_sharpen)
+        self.chk_cnr.setChecked(DebugConfig.enable_cnr)
+        self.chk_lut.setChecked(DebugConfig.enable_lut)
+        self.chk_dither.setChecked(DebugConfig.enable_pre_lut_dither)
+        self.chk_highlight_desat.setChecked(DebugConfig.enable_highlight_desat)
+        self.spin_ca_str.setValue(DebugConfig.ca_strength)
+        self.spin_ca_steps.setValue(DebugConfig.ca_steps)
+        self.spin_softness.setValue(DebugConfig.softness_sigma)
+        self.spin_grain.setValue(DebugConfig.grain_strength)
+        self.spin_sharpen_str.setValue(DebugConfig.sharpen_strength)
+        self.spin_sharpen_rad.setValue(DebugConfig.sharpen_radius)
+        for w in widgets:
+            w.blockSignals(False)
 
     def update_preview(self):
         """Update real-time preview immediately."""

@@ -890,6 +890,8 @@ class FlashbackEditor(QMainWindow):
             self.processor.lut_full = lut
         except Exception as e:
             print(f"⚠ Could not load vibe LUT '{lut_path}': {e}")
+        if hasattr(self, 'debug_panel'):
+            self.debug_panel.sync_from_config()
         self.refresh_from_debug()
         self._refresh_all_thumbnails()
 
