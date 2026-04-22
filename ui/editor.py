@@ -285,6 +285,7 @@ class FlashbackEditor(QMainWindow):
         self.init_ui()
 
         self.debug_panel = DebugPanel(self.processor, self)
+        self.debug_panel.sync_from_config()
         self.debug_panel.hide()
 
         screen = QApplication.primaryScreen().geometry()
