@@ -203,6 +203,8 @@ class FullscreenZenOverlay(QWidget):
         elif event.key() == Qt.Key_V and (event.modifiers() & Qt.ControlModifier):
             if self.main_window.image_files and self.main_window.settings_clipboard:
                 self.main_window.paste_settings()
+        elif event.key() == Qt.Key_R and (event.modifiers() & Qt.ControlModifier):
+            self.main_window.reset_all_sliders()
         elif event.key() in (Qt.Key_1, Qt.Key_2, Qt.Key_3, Qt.Key_4):
             vibes = ('disposable', 'point_shoot', 'rangefinder', 'monochrome')
             self.main_window.vibe_picker.set_vibe(vibes[event.key() - Qt.Key_1])
@@ -877,6 +879,7 @@ class FlashbackEditor(QMainWindow):
         DebugConfig.ca_strength = s['ca_strength']
         DebugConfig.softness_sigma = s['softness']
         DebugConfig.sharpen_strength = s['sharpness']
+        DebugConfig.sharpen_radius = s['sharpen_radius']
         DebugConfig.grain_strength = s['grain']
         lut_path = resource_path(s['lut'])
         try:

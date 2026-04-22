@@ -138,7 +138,7 @@ def apply_chromatic_aberration(image, strength=CHROMATIC_ABERRATION_STRENGTH, st
 
     for i in range(steps):
         factor = i / max(1, steps - 1) if steps > 1 else 1.0
-        scale_z = 1.0 + (strength * factor)
+        scale_z = 1.0 + (strength/2 * factor)
         M_z = cv2.getRotationMatrix2D(center, 0, scale_z)
         zoom_acc += cv2.warpAffine(ca_result, M_z, (w, h),
                                    flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
