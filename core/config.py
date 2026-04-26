@@ -25,6 +25,12 @@ BASE_WB_SETTINGS = [0.5, 1.0, 0.61, 1.0]
 BASE_WB_SETTINGS2 = [2.0333, 1.0000, 1.6796, 1.0000]
 BASE_EXPOSURE_OFFSET = 1
 
+# Static linear-space boost applied AFTER reverse-AE and BEFORE ACEScct encode.
+# Must match the value used by tools/build_color_charts.py when sampling the
+# digital chart, otherwise the LUT's input domain at runtime won't match what
+# colormatch saw at training time.
+POST_AE_EXPOSURE_BOOST_EV = 3.5
+
 # Color spaces (initialized once at import time)
 CS_SRGB = colour.RGB_COLOURSPACES['sRGB']
 CS_REC2020 = colour.RGB_COLOURSPACES['ITU-R BT.2020']
@@ -96,6 +102,17 @@ class DebugConfig:
     enable_cnr = True
     enable_lut = True
     enable_pre_lut_dither = True
+    enable_reverse_autoexposure = False
+
+    # Reference exposure time in seconds — the "middleground". Shots with a
+    # shorter ExposureTime get boosted; longer get cut. Tune empirically
+    # against your film scans.
+    reverse_autoexposure_t_ref = 1e-3
+
+    # Static post-AE exposure boost (linear gain in EV). Must match the value
+    # used to build the LUT — see POST_AE_EXPOSURE_BOOST_EV above.
+    enable_post_ae_exposure_boost = False
+    post_ae_exposure_boost_ev = POST_AE_EXPOSURE_BOOST_EV
 
     # Parameters (initialized from constants above)
     halation_threshold = HALATION_THRESHOLD
@@ -127,6 +144,10 @@ class DebugConfig:
         cls.enable_cnr = True
         cls.enable_lut = True
         cls.enable_pre_lut_dither = True
+        cls.enable_reverse_autoexposure = False
+        cls.reverse_autoexposure_t_ref = 1e-3
+        cls.enable_post_ae_exposure_boost = False
+        cls.post_ae_exposure_boost_ev = POST_AE_EXPOSURE_BOOST_EV
 
         cls.halation_threshold = HALATION_THRESHOLD
         cls.halation_blur_radius = HALATION_BLUR_RADIUS

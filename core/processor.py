@@ -33,6 +33,7 @@ from .kernels import (
     _rotate_90_counterclockwise_numba,
     _apply_grain_numba,
 )
+from .auto_exposure_reverse import extract_exposure_seconds, compute_reverse_gain
 from .effects import (
     apply_lut_fast,
     apply_chromatic_aberration,
@@ -385,6 +386,19 @@ class FlashbackProcessor:
             print("Applying base exposure...")
             img_rec2020_lin *= BASE_EXPOSURE_OFFSET
             profile['exposure'] = (time.time() - start) * 1000
+
+            # Reverse the camera's autoexposure so absolute scene brightness is
+            # preserved — bright scenes stay bright, dark scenes stay dark.
+            if DebugConfig.enable_reverse_autoexposure and not is_not_flashback:
+                exp_s = extract_exposure_seconds(dng_path)
+                gain = compute_reverse_gain(exp_s, DebugConfig.reverse_autoexposure_t_ref)
+                img_rec2020_lin *= gain
+                _timing_print(f"  Reverse AE: ExposureTime={exp_s}s, T_ref={DebugConfig.reverse_autoexposure_t_ref}s, gain={gain:.3f}")
+
+            # Static post-AE exposure boost — must match the value used to
+            # train the LUT (tools/build_color_charts.py).
+            if DebugConfig.enable_post_ae_exposure_boost:
+                img_rec2020_lin *= 2.0 ** DebugConfig.post_ae_exposure_boost_ev
             _timing_print(f"  After exposure: [{img_rec2020_lin.min():.4f}, {img_rec2020_lin.max():.4f}]")
             _timing_print(f"    -> {profile['exposure']:6.2f} ms")
 
