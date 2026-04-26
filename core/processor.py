@@ -20,9 +20,9 @@ from pathlib import Path
 
 from . import resource_path
 from .config import (
-    FLASHBACK_CCM, FLASHBACK_CCM2, SENSOR_BLACK, BASE_WB_SETTINGS, BASE_WB_SETTINGS2, BASE_EXPOSURE_OFFSET,
+    FLASHBACK_CCM, FLASHBACK_CCM2, IPHONE_CCM, SENSOR_BLACK, BASE_WB_SETTINGS, BASE_WB_SETTINGS2, BASE_EXPOSURE_OFFSET,
     DebugConfig, REC2020_FROM_SRGB,
-    GRAIN_STRENGTH, SOFTNESS_SIGMA, SHARPEN_STRENGTH, SHARPEN_RADIUS,
+    GRAIN_STRENGTH, GRAIN_TILE_SCALE, SOFTNESS_SIGMA, SHARPEN_STRENGTH, SHARPEN_RADIUS,
     _timing_print,
 )
 from .kernels import (
@@ -41,6 +41,8 @@ from .effects import (
     apply_halation,
     apply_softness,
     apply_sharpen,
+    apply_vignette,
+    apply_bloom,
     add_blue_noise_dither,
 )
 
@@ -121,6 +123,10 @@ class FlashbackProcessor:
             try:
                 tile = cv2.imread(str(path), cv2.IMREAD_COLOR).astype(np.float32) / 255.0
                 tile = cv2.cvtColor(tile, cv2.COLOR_BGR2RGB)
+                if GRAIN_TILE_SCALE != 1.0:
+                    new_h = max(1, int(round(tile.shape[0] * GRAIN_TILE_SCALE)))
+                    new_w = max(1, int(round(tile.shape[1] * GRAIN_TILE_SCALE)))
+                    tile = cv2.resize(tile, (new_w, new_h), interpolation=cv2.INTER_AREA)
                 self.grain_tiles.append(tile)
                 print(f"  ✓ Loaded grain tile: {path.name} ({tile.shape})")
             except Exception as e:
@@ -313,31 +319,31 @@ class FlashbackProcessor:
                 highlight_mode = 1  # Clip: natural luma rolloff; chroma fixed pre-CCM below
 
                 if is_not_flashback:
-                    # Fuji RAW Development (Standard D65)
+                    # Non-Flashback pipeline: daylight WB pre-applied, then a
+                    # per-camera CCM fit via tools/match_camera.py maps the
+                    # camera's raw RGB into Flashback-style linear sRGB so the
+                    # same LUT lands consistently.
                     rgb_linear = raw.postprocess(
                         demosaic_algorithm=demosaic_fb,
                         use_camera_wb=False,
                         use_auto_wb=False,
-                        user_wb=raw.daylight_whitebalance,
+                        user_wb=list(raw.daylight_whitebalance),
                         half_size=True,
                         no_auto_bright=True,
                         bright=1,
                         highlight_mode=highlight_mode,
                         gamma=(1, 1),
                         output_bps=16,
-                        output_color=rawpy.ColorSpace.sRGB
+                        output_color=rawpy.ColorSpace.raw,
                     ).astype(np.float32) / 65535.0
 
-                    h, w = rgb_linear.shape[:2]
-                    img_srgb_lin = cv2.resize(rgb_linear, (int(w * 0.7), int(h * 0.7)), interpolation=cv2.INTER_AREA)
-
-                    # Perceptual White Balance Shift
-                    perceptual_gains = np.array([0.75, 0.95, 1.35], dtype=np.float32)
-                    img_srgb_lin = img_srgb_lin * perceptual_gains
-                    img_srgb_lin = np.clip(img_srgb_lin, 0.0, 1.0)
-
                     profile['raw_develop'] = (time.time() - start) * 1000
-                    profile['color_matrix'] = 0.0
+
+                    start = time.time()
+                    print("Applying iPhone CCM...")
+                    img_srgb_lin = (rgb_linear.reshape(-1, 3) @ IPHONE_CCM.T).reshape(rgb_linear.shape)
+                    img_srgb_lin = np.clip(img_srgb_lin, 0.0, 1.0)
+                    profile['color_matrix'] = (time.time() - start) * 1000
 
                 else:
                     # --- FLASHBACK ONE35 V2 PIPELINE ---
@@ -574,6 +580,17 @@ class FlashbackProcessor:
         img_linear *= exposure_mult
         profile['exposure'] = time.time() - start
 
+        # Vignette + bloom in linear light (lens effects before color grading)
+        start = time.time()
+        if DebugConfig.enable_bloom and DebugConfig.bloom_strength > 0 and not is_fast_mode:
+            img_linear = apply_bloom(img_linear, DebugConfig.bloom_strength, DebugConfig.bloom_threshold, linear=True)
+        profile['bloom'] = time.time() - start
+
+        start = time.time()
+        if DebugConfig.enable_vignette and DebugConfig.vignette_strength > 0:
+            img_linear = apply_vignette(img_linear, DebugConfig.vignette_strength, DebugConfig.vignette_color_shift, DebugConfig.vignette_feather)
+        profile['vignette'] = time.time() - start
+
         # Re-encode to ACEScct for LUT
         start = time.time()
         img_acescct = self._fast_acescct_encode(img_linear)
@@ -598,7 +615,7 @@ class FlashbackProcessor:
         # Chromatic aberration after LUT — skipped in fast mode for responsiveness
         start = time.time()
         if DebugConfig.enable_chromatic_aberration and DebugConfig.ca_strength > 0 and not is_fast_mode:
-            img_display = apply_chromatic_aberration(img_display, DebugConfig.ca_strength, DebugConfig.ca_steps)
+            img_display = apply_chromatic_aberration(img_display, DebugConfig.ca_strength, DebugConfig.ca_steps, DebugConfig.ca_blue_blur)
         profile['chromatic_aberration'] = time.time() - start
 
         # Apply softness AFTER LUT (will blur any banding artifacts from LUT)
@@ -666,6 +683,17 @@ class FlashbackProcessor:
         img_linear *= exposure_mult
         profile['exposure'] = time.time() - start
 
+        # Vignette + bloom in linear light (lens effects before color grading)
+        start = time.time()
+        if DebugConfig.enable_bloom and DebugConfig.bloom_strength > 0:
+            img_linear = apply_bloom(img_linear, DebugConfig.bloom_strength, DebugConfig.bloom_threshold, linear=True)
+        profile['bloom'] = time.time() - start
+
+        start = time.time()
+        if DebugConfig.enable_vignette and DebugConfig.vignette_strength > 0:
+            img_linear = apply_vignette(img_linear, DebugConfig.vignette_strength, DebugConfig.vignette_color_shift, DebugConfig.vignette_feather)
+        profile['vignette'] = time.time() - start
+
         start = time.time()
         img_acescct = self._fast_acescct_encode(img_linear)
         profile['acescct_encode'] = time.time() - start
@@ -690,7 +718,7 @@ class FlashbackProcessor:
 
         start = time.time()
         if DebugConfig.enable_chromatic_aberration and DebugConfig.ca_strength > 0:
-            img_display = apply_chromatic_aberration(img_display, DebugConfig.ca_strength, DebugConfig.ca_steps)
+            img_display = apply_chromatic_aberration(img_display, DebugConfig.ca_strength, DebugConfig.ca_steps, DebugConfig.ca_blue_blur)
         profile['chromatic_aberration'] = time.time() - start
 
         start = time.time()

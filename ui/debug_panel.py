@@ -16,6 +16,7 @@ from core.config import (
     SOFTNESS_SIGMA, GRAIN_STRENGTH, SHARPEN_STRENGTH, SHARPEN_RADIUS,
     CNR_SIGMA, HIGHLIGHT_DESAT_THRESHOLD_L, HIGHLIGHT_DESAT_ROLLOFF_L,
     HIGHLIGHT_DESAT_SIGMA, DITHER_STRENGTH,
+    VIGNETTE_STRENGTH, VIGNETTE_COLOR_SHIFT, BLOOM_STRENGTH, BLOOM_THRESHOLD,
 )
 
 
@@ -174,6 +175,10 @@ class DebugPanel(QWidget):
         self.spin_ca_steps.valueChanged.connect(self.update_preview)
         live_layout.addRow("CA Steps:", self.spin_ca_steps)
 
+        self.spin_ca_blue_blur = self._create_double_spin(0.0, 5.0, 0.0, 0.1)
+        self.spin_ca_blue_blur.valueChanged.connect(self.update_preview)
+        live_layout.addRow("CA Blue Blur:", self.spin_ca_blue_blur)
+
         live_layout.addRow(self._create_separator())
 
         # Softness
@@ -194,7 +199,7 @@ class DebugPanel(QWidget):
         self.chk_grain.stateChanged.connect(self.update_preview)
         live_layout.addRow(self.chk_grain)
 
-        self.spin_grain = self._create_double_spin(0.0, 0.2, GRAIN_STRENGTH, 0.01)
+        self.spin_grain = self._create_double_spin(0.0, 1.0, GRAIN_STRENGTH, 0.01)
         self.spin_grain.valueChanged.connect(self.update_preview)
         live_layout.addRow("Grain Strength:", self.spin_grain)
 
@@ -206,13 +211,49 @@ class DebugPanel(QWidget):
         self.chk_sharpen.stateChanged.connect(self.update_preview)
         live_layout.addRow(self.chk_sharpen)
 
-        self.spin_sharpen_str = self._create_double_spin(0.0, 2.0, SHARPEN_STRENGTH, 0.1)
+        self.spin_sharpen_str = self._create_double_spin(0.0, 5.0, SHARPEN_STRENGTH, 0.1)
         self.spin_sharpen_str.valueChanged.connect(self.update_preview)
         live_layout.addRow("Sharpen Strength:", self.spin_sharpen_str)
 
         self.spin_sharpen_rad = self._create_double_spin(0.1, 20.0, SHARPEN_RADIUS, 0.1)
         self.spin_sharpen_rad.valueChanged.connect(self.update_preview)
         live_layout.addRow("Sharpen Radius:", self.spin_sharpen_rad)
+
+        live_layout.addRow(self._create_separator())
+
+        # Vignette
+        self.chk_vignette = QCheckBox("Enable Vignette")
+        self.chk_vignette.setChecked(True)
+        self.chk_vignette.stateChanged.connect(self.update_preview)
+        live_layout.addRow(self.chk_vignette)
+
+        self.spin_vignette_str = self._create_double_spin(0.0, 1.0, VIGNETTE_STRENGTH, 0.05)
+        self.spin_vignette_str.valueChanged.connect(self.update_preview)
+        live_layout.addRow("Vignette Strength:", self.spin_vignette_str)
+
+        self.spin_vignette_color = self._create_double_spin(0.0, 0.2, VIGNETTE_COLOR_SHIFT, 0.005)
+        self.spin_vignette_color.valueChanged.connect(self.update_preview)
+        live_layout.addRow("Vignette Color Shift:", self.spin_vignette_color)
+
+        self.spin_vignette_feather = self._create_double_spin(0.1, 8.0, 1.0, 0.1)
+        self.spin_vignette_feather.valueChanged.connect(self.update_preview)
+        live_layout.addRow("Vignette Feather:", self.spin_vignette_feather)
+
+        live_layout.addRow(self._create_separator())
+
+        # Bloom
+        self.chk_bloom = QCheckBox("Enable Bloom")
+        self.chk_bloom.setChecked(True)
+        self.chk_bloom.stateChanged.connect(self.update_preview)
+        live_layout.addRow(self.chk_bloom)
+
+        self.spin_bloom_str = self._create_double_spin(0.0, 1.0, BLOOM_STRENGTH, 0.05)
+        self.spin_bloom_str.valueChanged.connect(self.update_preview)
+        live_layout.addRow("Bloom Strength:", self.spin_bloom_str)
+
+        self.spin_bloom_thresh = self._create_double_spin(0.0, 1.0, BLOOM_THRESHOLD, 0.05)
+        self.spin_bloom_thresh.valueChanged.connect(self.update_preview)
+        live_layout.addRow("Bloom Threshold:", self.spin_bloom_thresh)
 
         form_layout.addWidget(live_group)
 
@@ -270,6 +311,7 @@ class DebugPanel(QWidget):
 
         DebugConfig.ca_strength = self.spin_ca_str.value()
         DebugConfig.ca_steps = self.spin_ca_steps.value()
+        DebugConfig.ca_blue_blur = self.spin_ca_blue_blur.value()
 
         DebugConfig.cnr_sigma = self.spin_cnr.value()
 
@@ -288,6 +330,13 @@ class DebugPanel(QWidget):
         DebugConfig.sharpen_radius = self.spin_sharpen_rad.value()
         DebugConfig.enable_pre_lut_dither = self.chk_dither.isChecked()
         DebugConfig.pre_lut_dither_strength = self.spin_dither.value()
+        DebugConfig.enable_vignette = self.chk_vignette.isChecked()
+        DebugConfig.vignette_strength = self.spin_vignette_str.value()
+        DebugConfig.vignette_color_shift = self.spin_vignette_color.value()
+        DebugConfig.vignette_feather = self.spin_vignette_feather.value()
+        DebugConfig.enable_bloom = self.chk_bloom.isChecked()
+        DebugConfig.bloom_strength = self.spin_bloom_str.value()
+        DebugConfig.bloom_threshold = self.spin_bloom_thresh.value()
 
         self.status_label.setText("Config updated. Click 'Reload Image' to apply baked effects.")
 
@@ -296,11 +345,14 @@ class DebugPanel(QWidget):
         widgets = [
             self.chk_halation, self.chk_ca, self.chk_softness, self.chk_grain,
             self.chk_sharpen, self.chk_cnr, self.chk_lut, self.chk_dither,
-            self.chk_highlight_desat, self.spin_halation_thresh, self.spin_halation_blur,
-            self.spin_halation_str, self.spin_ca_str, self.spin_ca_steps,
+            self.chk_highlight_desat, self.chk_vignette, self.chk_bloom,
+            self.spin_halation_thresh, self.spin_halation_blur,
+            self.spin_halation_str, self.spin_ca_str, self.spin_ca_steps, self.spin_ca_blue_blur,
             self.spin_softness, self.spin_grain, self.spin_sharpen_str,
             self.spin_sharpen_rad, self.spin_cnr, self.spin_hd_thresh,
             self.spin_hd_rolloff, self.spin_hd_sigma, self.spin_dither,
+            self.spin_vignette_str, self.spin_vignette_color, self.spin_vignette_feather,
+            self.spin_bloom_str, self.spin_bloom_thresh,
         ]
         for w in widgets:
             w.blockSignals(True)
@@ -313,12 +365,19 @@ class DebugPanel(QWidget):
         self.chk_lut.setChecked(DebugConfig.enable_lut)
         self.chk_dither.setChecked(DebugConfig.enable_pre_lut_dither)
         self.chk_highlight_desat.setChecked(DebugConfig.enable_highlight_desat)
+        self.chk_vignette.setChecked(DebugConfig.enable_vignette)
+        self.chk_bloom.setChecked(DebugConfig.enable_bloom)
         self.spin_ca_str.setValue(DebugConfig.ca_strength)
         self.spin_ca_steps.setValue(DebugConfig.ca_steps)
+        self.spin_ca_blue_blur.setValue(DebugConfig.ca_blue_blur)
         self.spin_softness.setValue(DebugConfig.softness_sigma)
         self.spin_grain.setValue(DebugConfig.grain_strength)
         self.spin_sharpen_str.setValue(DebugConfig.sharpen_strength)
         self.spin_sharpen_rad.setValue(DebugConfig.sharpen_radius)
+        self.spin_vignette_str.setValue(DebugConfig.vignette_strength)
+        self.spin_vignette_color.setValue(DebugConfig.vignette_color_shift)
+        self.spin_bloom_str.setValue(DebugConfig.bloom_strength)
+        self.spin_bloom_thresh.setValue(DebugConfig.bloom_threshold)
         for w in widgets:
             w.blockSignals(False)
 
@@ -353,6 +412,7 @@ class DebugPanel(QWidget):
         s.setValue("halation_strength",        DebugConfig.halation_strength)
         s.setValue("ca_strength",              DebugConfig.ca_strength)
         s.setValue("ca_steps",                 DebugConfig.ca_steps)
+        s.setValue("ca_blue_blur",             DebugConfig.ca_blue_blur)
         s.setValue("softness_sigma",           DebugConfig.softness_sigma)
         s.setValue("grain_strength",           DebugConfig.grain_strength)
         s.setValue("sharpen_strength",         DebugConfig.sharpen_strength)
@@ -362,6 +422,12 @@ class DebugPanel(QWidget):
         s.setValue("hd_rolloff_L",             DebugConfig.highlight_desat_rolloff_L)
         s.setValue("hd_sigma",                 DebugConfig.highlight_desat_sigma)
         s.setValue("dither_strength",          DebugConfig.pre_lut_dither_strength)
+        s.setValue("enable_vignette",          DebugConfig.enable_vignette)
+        s.setValue("vignette_strength",        DebugConfig.vignette_strength)
+        s.setValue("vignette_color_shift",     DebugConfig.vignette_color_shift)
+        s.setValue("enable_bloom",             DebugConfig.enable_bloom)
+        s.setValue("bloom_strength",           DebugConfig.bloom_strength)
+        s.setValue("bloom_threshold",          DebugConfig.bloom_threshold)
         s.endGroup()
         self.status_label.setText("Defaults saved — will apply on next launch.")
 
@@ -391,6 +457,7 @@ class DebugPanel(QWidget):
         DebugConfig.halation_strength            = f("halation_strength",      DebugConfig.halation_strength)
         DebugConfig.ca_strength                  = f("ca_strength",            DebugConfig.ca_strength)
         DebugConfig.ca_steps                     = i("ca_steps",               DebugConfig.ca_steps)
+        DebugConfig.ca_blue_blur                 = f("ca_blue_blur",           DebugConfig.ca_blue_blur)
         DebugConfig.softness_sigma               = f("softness_sigma",         DebugConfig.softness_sigma)
         DebugConfig.grain_strength               = f("grain_strength",         DebugConfig.grain_strength)
         DebugConfig.sharpen_strength             = f("sharpen_strength",       DebugConfig.sharpen_strength)
@@ -400,6 +467,12 @@ class DebugPanel(QWidget):
         DebugConfig.highlight_desat_rolloff_L    = f("hd_rolloff_L",           DebugConfig.highlight_desat_rolloff_L)
         DebugConfig.highlight_desat_sigma        = f("hd_sigma",               DebugConfig.highlight_desat_sigma)
         DebugConfig.pre_lut_dither_strength      = f("dither_strength",        DebugConfig.pre_lut_dither_strength)
+        DebugConfig.enable_vignette              = b("enable_vignette",        DebugConfig.enable_vignette)
+        DebugConfig.vignette_strength            = f("vignette_strength",      DebugConfig.vignette_strength)
+        DebugConfig.vignette_color_shift         = f("vignette_color_shift",   DebugConfig.vignette_color_shift)
+        DebugConfig.enable_bloom                 = b("enable_bloom",           DebugConfig.enable_bloom)
+        DebugConfig.bloom_strength               = f("bloom_strength",         DebugConfig.bloom_strength)
+        DebugConfig.bloom_threshold              = f("bloom_threshold",        DebugConfig.bloom_threshold)
         s.endGroup()
 
         # Block signals while syncing UI so that partial updates don't
@@ -407,11 +480,14 @@ class DebugPanel(QWidget):
         widgets = [
             self.chk_halation, self.chk_ca, self.chk_softness, self.chk_grain,
             self.chk_sharpen, self.chk_cnr, self.chk_lut, self.chk_dither,
-            self.chk_highlight_desat, self.spin_halation_thresh, self.spin_halation_blur,
-            self.spin_halation_str, self.spin_ca_str, self.spin_ca_steps,
+            self.chk_highlight_desat, self.chk_vignette, self.chk_bloom,
+            self.spin_halation_thresh, self.spin_halation_blur,
+            self.spin_halation_str, self.spin_ca_str, self.spin_ca_steps, self.spin_ca_blue_blur,
             self.spin_softness, self.spin_grain, self.spin_sharpen_str,
             self.spin_sharpen_rad, self.spin_cnr, self.spin_hd_thresh,
             self.spin_hd_rolloff, self.spin_hd_sigma, self.spin_dither,
+            self.spin_vignette_str, self.spin_vignette_color, self.spin_vignette_feather,
+            self.spin_bloom_str, self.spin_bloom_thresh,
         ]
         for w in widgets:
             w.blockSignals(True)
@@ -430,6 +506,7 @@ class DebugPanel(QWidget):
         self.spin_halation_str.setValue(DebugConfig.halation_strength)
         self.spin_ca_str.setValue(DebugConfig.ca_strength)
         self.spin_ca_steps.setValue(DebugConfig.ca_steps)
+        self.spin_ca_blue_blur.setValue(DebugConfig.ca_blue_blur)
         self.spin_softness.setValue(DebugConfig.softness_sigma)
         self.spin_grain.setValue(DebugConfig.grain_strength)
         self.spin_sharpen_str.setValue(DebugConfig.sharpen_strength)
@@ -439,6 +516,13 @@ class DebugPanel(QWidget):
         self.spin_hd_rolloff.setValue(DebugConfig.highlight_desat_rolloff_L)
         self.spin_hd_sigma.setValue(DebugConfig.highlight_desat_sigma)
         self.spin_dither.setValue(DebugConfig.pre_lut_dither_strength)
+        self.chk_vignette.setChecked(DebugConfig.enable_vignette)
+        self.spin_vignette_str.setValue(DebugConfig.vignette_strength)
+        self.spin_vignette_color.setValue(DebugConfig.vignette_color_shift)
+        self.spin_vignette_feather.setValue(DebugConfig.vignette_feather)
+        self.chk_bloom.setChecked(DebugConfig.enable_bloom)
+        self.spin_bloom_str.setValue(DebugConfig.bloom_strength)
+        self.spin_bloom_thresh.setValue(DebugConfig.bloom_threshold)
 
         for w in widgets:
             w.blockSignals(False)
@@ -455,6 +539,7 @@ class DebugPanel(QWidget):
         self.chk_ca.setChecked(True)
         self.spin_ca_str.setValue(DebugConfig.ca_strength)
         self.spin_ca_steps.setValue(DebugConfig.ca_steps)
+        self.spin_ca_blue_blur.setValue(DebugConfig.ca_blue_blur)
 
         self.chk_cnr.setChecked(True)
         self.spin_cnr.setValue(DebugConfig.cnr_sigma)
@@ -472,6 +557,14 @@ class DebugPanel(QWidget):
         self.chk_sharpen.setChecked(True)
         self.spin_sharpen_str.setValue(DebugConfig.sharpen_strength)
         self.spin_sharpen_rad.setValue(DebugConfig.sharpen_radius)
+
+        self.chk_vignette.setChecked(DebugConfig.enable_vignette)
+        self.spin_vignette_str.setValue(DebugConfig.vignette_strength)
+        self.spin_vignette_color.setValue(DebugConfig.vignette_color_shift)
+        self.spin_vignette_feather.setValue(DebugConfig.vignette_feather)
+        self.chk_bloom.setChecked(DebugConfig.enable_bloom)
+        self.spin_bloom_str.setValue(DebugConfig.bloom_strength)
+        self.spin_bloom_thresh.setValue(DebugConfig.bloom_threshold)
 
         self.status_label.setText("Reset to defaults.")
         if self.parent_editor:

@@ -20,6 +20,15 @@ FLASHBACK_CCM2 = np.array([
     [-0.167809, -0.001273, 1.169082],
 ])
 
+# Fitted via tools/match_camera.py against a ColorChecker shot, mapping
+# iPhone raw (with daylight_whitebalance pre-applied) to Flashback-style
+# linear sRGB so the same LUT lands in roughly the same place.
+IPHONE_CCM = np.array([
+    [ 0.59425110, -0.27924676,  0.02515316],
+    [-0.03373678,  0.50158660,  0.05856543],
+    [ 0.03639984, -0.34033317,  0.89340804],
+])
+
 SENSOR_BLACK = 64
 BASE_WB_SETTINGS = [0.5, 1.0, 0.61, 1.0]
 BASE_WB_SETTINGS2 = [2.0333, 1.0000, 1.6796, 1.0000]
@@ -46,13 +55,15 @@ REC2020_FROM_SRGB = colour.RGB_to_RGB(
 
 CHROMATIC_ABERRATION_STRENGTH = 0.005
 CHROMATIC_ABERRATION_STEPS = 4
-HALATION_THRESHOLD = 0.6
+CHROMATIC_ABERRATION_BLUE_BLUR = 0.3
+HALATION_THRESHOLD = 0.55
 HALATION_THRESHOLD_FUJI = 0.7
 HALATION_BLUR_RADIUS = 4
 HALATION_STRENGTH = 0.5
 SOFTNESS_SIGMA = 0.5
 GRAIN_STRENGTH = 0.01
-GRAIN_BLUR_SIGMA = 0.7
+GRAIN_BLUR_SIGMA = 0.1
+GRAIN_TILE_SCALE = 0.9 # <1.0 makes grain finer (tiles render denser); >1.0 makes it chunkier.
 SHARPEN_STRENGTH = 0.5
 SHARPEN_RADIUS = 1.0
 CNR_SIGMA = 2.0
@@ -60,16 +71,21 @@ HIGHLIGHT_DESAT_THRESHOLD_L = 60.0   # Lab L* at which desaturation begins (0-10
 HIGHLIGHT_DESAT_ROLLOFF_L   = 10.0   # width of ramp in L* units
 HIGHLIGHT_DESAT_SIGMA       = 10.0    # spatial Gaussian blur on the mask
 DITHER_STRENGTH = 0.005
+VIGNETTE_STRENGTH = 0.5
+VIGNETTE_COLOR_SHIFT = 0.05
+VIGNETTE_FEATHER = 1.0
+BLOOM_STRENGTH = 0.3
+BLOOM_THRESHOLD = 0.05
 
 # =============================================================================
 # VIBE PRESETS
 # =============================================================================
 
 VIBE_PRESETS = {
-    'disposable':  {'enable_ca': True,  'ca_strength': 0.010, 'softness': 0.5, 'sharpness': 0.2, 'sharpen_radius': 10.0, 'grain': 0.020, 'lut': 'assets/luts/disposable_smoothed.cube'},
-    'point_shoot': {'enable_ca': True,  'ca_strength': 0.002, 'softness': 0.5, 'sharpness': 0.5, 'sharpen_radius':  1.0, 'grain': 0.010, 'lut': 'assets/luts/pointandshoot.cube'},
-    'rangefinder': {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.2, 'sharpness': 0.8, 'sharpen_radius':  1.0, 'grain': 0.007, 'lut': 'assets/luts/rangefinder.cube'},
-    'monochrome':  {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.2, 'sharpness': 0.8, 'sharpen_radius':  1.0, 'grain': 0.020, 'lut': 'assets/luts/monochrome.cube'},
+    'disposable':  {'enable_ca': True,  'ca_strength': 0.010, 'softness': 0.6, 'sharpness': 2.0, 'sharpen_radius': 0.5, 'grain': 1.0, 'vignette': 0.10, 'vignette_feather': 0.4, 'bloom': 0.10, 'lut': 'assets/luts/disposable_smoothed.cube'},
+    'point_shoot': {'enable_ca': True,  'ca_strength': 0.002, 'softness': 0.5, 'sharpness': 0.5, 'sharpen_radius':  1.0, 'grain': 0.010, 'vignette': 0.10, 'vignette_feather': 1.0, 'bloom': 0.10, 'lut': 'assets/luts/pointandshoot.cube'},
+    'rangefinder': {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.2, 'sharpness': 0.8, 'sharpen_radius':  1.0, 'grain': 0.007, 'vignette': 0.05, 'vignette_feather': 1.0, 'bloom': 0.05, 'lut': 'assets/luts/rangefinder.cube'},
+    'monochrome':  {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.2, 'sharpness': 0.8, 'sharpen_radius':  1.0, 'grain': 0.020, 'vignette': 0.20, 'vignette_feather': 1.0, 'bloom': 0.05, 'lut': 'assets/luts/monochrome.cube'},
 }
 
 # =============================================================================
@@ -94,7 +110,7 @@ class DebugConfig:
     Class-level attributes act as global toggles and tunable parameters.
     """
     # Toggles
-    enable_halation = True
+    enable_halation = False
     enable_chromatic_aberration = True
     enable_softness = True
     enable_grain = True
@@ -102,6 +118,8 @@ class DebugConfig:
     enable_cnr = True
     enable_lut = True
     enable_pre_lut_dither = True
+    enable_vignette = False
+    enable_bloom = False
     enable_reverse_autoexposure = False
 
     # Reference exposure time in seconds — the "middleground". Shots with a
@@ -120,6 +138,7 @@ class DebugConfig:
     halation_strength = HALATION_STRENGTH
     ca_strength = CHROMATIC_ABERRATION_STRENGTH
     ca_steps = CHROMATIC_ABERRATION_STEPS
+    ca_blue_blur = CHROMATIC_ABERRATION_BLUE_BLUR
     softness_sigma = SOFTNESS_SIGMA
     grain_strength = GRAIN_STRENGTH
     sharpen_strength = SHARPEN_STRENGTH
@@ -130,6 +149,11 @@ class DebugConfig:
     highlight_desat_rolloff_L   = HIGHLIGHT_DESAT_ROLLOFF_L
     highlight_desat_sigma       = HIGHLIGHT_DESAT_SIGMA
     pre_lut_dither_strength = DITHER_STRENGTH
+    vignette_strength = VIGNETTE_STRENGTH
+    vignette_color_shift = VIGNETTE_COLOR_SHIFT
+    vignette_feather = VIGNETTE_FEATHER
+    bloom_strength = BLOOM_STRENGTH
+    bloom_threshold = BLOOM_THRESHOLD
 
     @classmethod
     def reset(cls):
@@ -144,6 +168,8 @@ class DebugConfig:
         cls.enable_cnr = True
         cls.enable_lut = True
         cls.enable_pre_lut_dither = True
+        cls.enable_vignette = True
+        cls.enable_bloom = True
         cls.enable_reverse_autoexposure = False
         cls.reverse_autoexposure_t_ref = 1e-3
         cls.enable_post_ae_exposure_boost = False
@@ -154,6 +180,7 @@ class DebugConfig:
         cls.halation_strength = HALATION_STRENGTH
         cls.ca_strength = CHROMATIC_ABERRATION_STRENGTH
         cls.ca_steps = CHROMATIC_ABERRATION_STEPS
+        cls.ca_blue_blur = CHROMATIC_ABERRATION_BLUE_BLUR
         cls.softness_sigma = SOFTNESS_SIGMA
         cls.grain_strength = GRAIN_STRENGTH
         cls.sharpen_strength = SHARPEN_STRENGTH
@@ -164,3 +191,8 @@ class DebugConfig:
         cls.highlight_desat_rolloff_L   = HIGHLIGHT_DESAT_ROLLOFF_L
         cls.highlight_desat_sigma       = HIGHLIGHT_DESAT_SIGMA
         cls.pre_lut_dither_strength = DITHER_STRENGTH
+        cls.vignette_strength = VIGNETTE_STRENGTH
+        cls.vignette_color_shift = VIGNETTE_COLOR_SHIFT
+        cls.vignette_feather = VIGNETTE_FEATHER
+        cls.bloom_strength = BLOOM_STRENGTH
+        cls.bloom_threshold = BLOOM_THRESHOLD

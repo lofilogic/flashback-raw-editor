@@ -882,6 +882,9 @@ class FlashbackEditor(QMainWindow):
         DebugConfig.sharpen_strength = s['sharpness']
         DebugConfig.sharpen_radius = s['sharpen_radius']
         DebugConfig.grain_strength = s['grain']
+        DebugConfig.vignette_strength = s['vignette']
+        DebugConfig.vignette_feather = s.get('vignette_feather', 1.0)
+        DebugConfig.bloom_strength = s['bloom']
         lut_path = resource_path(s['lut'])
         try:
             if lut_path not in self._lut_cache:
@@ -1732,10 +1735,11 @@ class FlashbackEditor(QMainWindow):
         ev = value / 10.0
         self.label_exposure.setText(f"{ev:.1f} EV")
         self.processor.user_settings['exposure_ev'] = ev
-        self._slider_render_timer.start()
+        img_array = self.processor._render_fast()
+        if img_array is not None:
+            self.display_image(img_array)
 
     def on_exposure_released(self):
-        self._slider_render_timer.stop()
         self.processor.preview_mode = 'hq'
         img_array = self.processor._render_fast()
         if img_array is not None:
@@ -1778,10 +1782,11 @@ class FlashbackEditor(QMainWindow):
         else:
             self.processor.user_settings['wb_temp'] = value
 
-        self._slider_render_timer.start()
+        img_array = self.processor._render_fast()
+        if img_array is not None:
+            self.display_image(img_array)
 
     def on_wb_released(self):
-        self._slider_render_timer.stop()
         self.processor.preview_mode = 'hq'
         img_array = self.processor._render_fast()
         if img_array is not None:
@@ -1797,10 +1802,11 @@ class FlashbackEditor(QMainWindow):
         if self.chk_wb_link.isChecked():
             self._tint_manual_offset = tint - self._coupled_tint(self.slider_wb.value())
         self.processor.user_settings['tint'] = tint
-        self._slider_render_timer.start()
+        img_array = self.processor._render_fast()
+        if img_array is not None:
+            self.display_image(img_array)
 
     def on_tint_released(self):
-        self._slider_render_timer.stop()
         self.processor.preview_mode = 'hq'
         img_array = self.processor._render_fast()
         if img_array is not None:

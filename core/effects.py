@@ -95,10 +95,11 @@ def _apply_lut_numpy_vectorized(image, lut_table, lut_size):
 # EFFECT FUNCTIONS
 # =============================================================================
 
-def apply_chromatic_aberration(image, strength=CHROMATIC_ABERRATION_STRENGTH, steps=CHROMATIC_ABERRATION_STEPS):
+def apply_chromatic_aberration(image, strength=CHROMATIC_ABERRATION_STRENGTH, steps=CHROMATIC_ABERRATION_STEPS, blue_blur=0.0):
     """
     Applies chromatic aberration in LINEAR Rec.2020 space.
     Called BEFORE ACEScct encoding to prevent log-space banding.
+    blue_blur: optional Gaussian sigma applied to the blue channel of the final result.
     """
     start_total = time.time()
 
@@ -113,12 +114,12 @@ def apply_chromatic_aberration(image, strength=CHROMATIC_ABERRATION_STRENGTH, st
     for i in range(steps):
         factor = i / max(1, steps - 1) if steps > 1 else 1.0
 
-        scale_r = 1.0 - (strength/2 * factor)
+        scale_r = 1.0
         M_r = cv2.getRotationMatrix2D(center, 0, scale_r)
         r_acc += cv2.warpAffine(image[:, :, 0], M_r, (w, h),
                                 flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
 
-        scale_g = 1.0 - (strength/8 * factor)
+        scale_g = 1.0 + (strength/4 * factor)
         M_g = cv2.getRotationMatrix2D(center, 0, scale_g)
         g_acc += cv2.warpAffine(image[:, :, 1], M_g, (w, h),
                                 flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
@@ -138,12 +139,15 @@ def apply_chromatic_aberration(image, strength=CHROMATIC_ABERRATION_STRENGTH, st
 
     for i in range(steps):
         factor = i / max(1, steps - 1) if steps > 1 else 1.0
-        scale_z = 1.0 + (strength/2 * factor)
+        scale_z = 1.0 + (strength/6 * factor)
         M_z = cv2.getRotationMatrix2D(center, 0, scale_z)
         zoom_acc += cv2.warpAffine(ca_result, M_z, (w, h),
                                    flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
 
     final_result = zoom_acc / steps
+
+    if blue_blur > 0:
+        final_result[:, :, 2] = cv2.GaussianBlur(final_result[:, :, 2], (0, 0), sigmaX=blue_blur, sigmaY=blue_blur)
 
     total_time = time.time() - start_total
     _timing_print(f"    [Chromatic Aberration] Total: {total_time*1000:.2f}ms (linear Rec.2020)")
@@ -232,6 +236,64 @@ def apply_sharpen(image, strength=SHARPEN_STRENGTH, radius=SHARPEN_RADIUS):
         return _unsharp_mask_numba(image, blurred, strength)
     else:
         return image + (image - blurred) * strength
+
+
+def apply_vignette(image, strength=0.5, color_shift=0.05, feather=1.0):
+    """
+    Smooth cosine vignette with warm center / cool edges.
+    Per-channel: red is darkened more at edges, blue less — produces a
+    natural blue-shift at the periphery without adding color, just removing warmth.
+    feather > 1: sharper falloff (bright center, darkness compressed to edges).
+    feather < 1: softer, more gradual falloff.
+    """
+    if strength <= 0:
+        return image
+    h, w = image.shape[:2]
+    y = np.linspace(-1.0, 1.0, h, dtype=np.float32)
+    x = np.linspace(-1.0, 1.0, w, dtype=np.float32)
+    xx, yy = np.meshgrid(x, y)
+    radius = np.sqrt(xx ** 2 + yy ** 2)
+    r_norm = np.clip(radius / np.sqrt(2.0), 0.0, 1.0)
+    falloff = (0.5 * (1.0 + np.cos(np.pi * r_norm))).astype(np.float32)
+    if feather != 1.0:
+        falloff = np.power(falloff, feather)
+    dark = 1.0 - strength * (1.0 - falloff)
+    edge = 1.0 - falloff  # 0 at center, 1 at corners
+    result = np.empty_like(image)
+    result[:, :, 0] = np.maximum(0.0, image[:, :, 0] * (dark - color_shift * edge))
+    result[:, :, 1] = np.maximum(0.0, image[:, :, 1] * dark)
+    result[:, :, 2] = np.maximum(0.0, image[:, :, 2] * (dark + color_shift * 0.4 * edge))
+    return result
+
+
+def apply_bloom(image, strength=0.3, threshold=0.6, linear=False):
+    """
+    Fast large-radius bloom via 4x downsample → heavy Gaussian → upsample → blend.
+    threshold: soft highlight extraction cutoff (0–1).
+    linear: when True, uses additive blend (correct for HDR linear-light space);
+            when False, uses screen blend (correct for display/LUT-output [0,1] space).
+    """
+    if strength <= 0:
+        return image
+    h, w = image.shape[:2]
+    luma = (0.2126 * image[:, :, 0] + 0.7152 * image[:, :, 1] + 0.0722 * image[:, :, 2]).astype(np.float32)
+    soft_mask = np.clip((luma - threshold) / max(0.01, 1.0 - threshold), 0.0, 1.0)
+    bloom_src = (image * soft_mask[:, :, np.newaxis]).astype(np.float32)
+    scale = 4
+    bh, bw = max(4, h // scale), max(4, w // scale)
+    small = cv2.resize(bloom_src, (bw, bh), interpolation=cv2.INTER_AREA)
+    sigma = max(2, bw // 5)
+    ksize = sigma * 6 + 1
+    if ksize % 2 == 0:
+        ksize += 1
+    blurred = cv2.GaussianBlur(small, (ksize, ksize), sigma)
+    bloom_layer = cv2.resize(blurred, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+    if linear:
+        result = image + bloom_layer * strength
+        return np.maximum(0.0, result).astype(np.float32)
+    else:
+        result = 1.0 - (1.0 - image) * (1.0 - bloom_layer * strength)
+        return np.clip(result, 0.0, 1.0).astype(np.float32)
 
 
 def add_blue_noise_dither(image, strength=DITHER_STRENGTH):
