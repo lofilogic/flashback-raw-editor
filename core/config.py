@@ -82,7 +82,7 @@ BLOOM_THRESHOLD = 0.05
 # =============================================================================
 
 VIBE_PRESETS = {
-    'disposable':  {'enable_ca': True,  'ca_strength': 0.010, 'softness': 0.6, 'sharpness': 2.0, 'sharpen_radius': 0.5, 'grain': 1.0, 'vignette': 0.10, 'vignette_feather': 0.4, 'bloom': 0.10, 'lut': 'assets/luts/disposable_smoothed.cube'},
+    'disposable':  {'enable_ca': True,  'ca_strength': 0.010, 'softness': 0.6, 'sharpness': 2.0, 'sharpen_radius': 0.5, 'grain': 1.0, 'vignette': 0.10, 'vignette_feather': 0.4, 'bloom': 0.10, 'lut': 'assets/luts/disposable_full_smoothed.cube'},
     'point_shoot': {'enable_ca': True,  'ca_strength': 0.002, 'softness': 0.5, 'sharpness': 0.5, 'sharpen_radius':  1.0, 'grain': 0.010, 'vignette': 0.10, 'vignette_feather': 1.0, 'bloom': 0.10, 'lut': 'assets/luts/pointandshoot.cube'},
     'rangefinder': {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.2, 'sharpness': 0.8, 'sharpen_radius':  1.0, 'grain': 0.007, 'vignette': 0.05, 'vignette_feather': 1.0, 'bloom': 0.05, 'lut': 'assets/luts/rangefinder.cube'},
     'monochrome':  {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.2, 'sharpness': 0.8, 'sharpen_radius':  1.0, 'grain': 0.020, 'vignette': 0.20, 'vignette_feather': 1.0, 'bloom': 0.05, 'lut': 'assets/luts/monochrome.cube'},
