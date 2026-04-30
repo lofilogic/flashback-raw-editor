@@ -184,6 +184,11 @@ class FullscreenZenOverlay(QWidget):
         self.drag_start_pos = None
         self.lock_axis = None
 
+        # Persist the gesture-adjusted values for the current image. The
+        # slider_*Released handlers do this in normal mode; zen drives the
+        # sliders via setValue() and bypasses those signals entirely.
+        self.main_window.save_current_settings()
+
         img_array = self.main_window.processor._render_fast()
 
         if img_array is not None:
