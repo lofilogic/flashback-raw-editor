@@ -512,7 +512,7 @@ class FlashbackProcessor:
         profile['bloom'] = time.time() - start
 
         start = time.time()
-        if DebugConfig.enable_vignette and DebugConfig.vignette_strength > 0:
+        if DebugConfig.enable_vignette and DebugConfig.vignette_strength > 0 and not downscale:
             img_linear = apply_vignette(img_linear, DebugConfig.vignette_strength, DebugConfig.vignette_color_shift, DebugConfig.vignette_feather)
         profile['vignette'] = time.time() - start
 
@@ -564,14 +564,14 @@ class FlashbackProcessor:
 
         profile['total'] = time.time() - total_start
 
-        if downscale:
-            img_display = cv2.resize(img_display, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
-
         _timing_print("\n=== FAST RENDER PROFILE (preview - no halation) ===")
         for key, value in profile.items():
             _timing_print(f"  {key:20s}: {value*1000:6.2f} ms")
         _timing_print("===========================\n")
 
+        # Return the small image as-is when downscaling — the caller (ZoomableImageWidget
+        # via Qt SmoothTransformation) handles the upscale on the GPU, which is faster
+        # than doing a cv2.resize + full-res numpy→QImage conversion here.
         return np.clip(img_display, 0, 1)
 
     def render_export(self):

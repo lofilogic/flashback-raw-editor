@@ -149,10 +149,9 @@ class RenderWorker(QThread):
 
             img = self._processor._render_fast(downscale=downscale)
 
-            with self._lock:
-                if self._pending is not None:
-                    continue
-
+            # Always emit — even if a new request arrived while rendering.
+            # Visual continuity matters more than strictly latest-only output;
+            # the next pending render will fire immediately after this emit.
             if img is not None:
                 self.render_done.emit(img, downscale)
 
