@@ -1980,7 +1980,8 @@ class FlashbackEditor(QMainWindow):
                     QApplication.processEvents()
 
             if self.current_index in paste_selected:
-                img_array = self.processor.set_settings(self.settings_clipboard)
+                self.processor.set_settings(self.settings_clipboard)
+                img_array = self.processor.render_preview()
                 self.chk_wb_link.blockSignals(True)
                 self.chk_wb_link.setChecked(self.settings_clipboard.get('auto_tint', False))
                 self.chk_wb_link.blockSignals(False)
@@ -1998,7 +1999,8 @@ class FlashbackEditor(QMainWindow):
             QTimer.singleShot(2000, self.update_mode_label)
 
         else:
-            img_array = self.processor.set_settings(self.settings_clipboard)
+            self.processor.set_settings(self.settings_clipboard)
+            img_array = self.processor.render_preview()
             self.chk_wb_link.blockSignals(True)
             self.chk_wb_link.setChecked(self.settings_clipboard.get('auto_tint', False))
             self.chk_wb_link.blockSignals(False)

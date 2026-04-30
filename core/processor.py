@@ -706,9 +706,9 @@ class FlashbackProcessor:
         return self.user_settings.copy()
 
     def set_settings(self, settings):
-        """Load settings (for copy/paste)."""
+        """Update user_settings in-place. Does not render — call render_preview()
+        separately if you need a fresh preview."""
         self.user_settings.update(settings)
-        return self.render_preview()
 
 
 # =============================================================================
