@@ -336,8 +336,6 @@ class FlashbackEditor(QMainWindow):
             self.rotate_clockwise()
         else:
             self.rotate_counterclockwise()
-        if hasattr(self, 'zen_overlay') and self.zen_overlay.isVisible():
-            self.zen_overlay.update_preview(self.image_label._original_pixmap)
 
     def on_zen_closed(self):
         self.refresh_from_debug()
@@ -1733,7 +1731,7 @@ class FlashbackEditor(QMainWindow):
             else:
                 QMessageBox.critical(self, "Error", f"Failed to load image:\n{file_path}")
 
-    def display_image(self, img_array):
+    def display_image(self, img_array, is_scrub=False):
         if img_array is None:
             return
         if hasattr(self, 'zen_overlay') and self.zen_overlay.isVisible():
@@ -1745,9 +1743,10 @@ class FlashbackEditor(QMainWindow):
             q_image = QImage(img_8bit.data, w, h, c * w, QImage.Format_RGB888)
             pixmap = QPixmap.fromImage(q_image)
             ref = self.image_label._original_pixmap
-            if ref and not ref.isNull() and pixmap.width() < ref.width():
+            if is_scrub and ref and not ref.isNull():
                 # Scrub frame (downscaled) — scale up to full-res size so the zen
-                # overlay's 1:1 layout sees a consistently-sized pixmap.
+                # overlay's 1:1 layout sees a consistently-sized pixmap. Don't
+                # update the reference: the next scrub still needs to scale to it.
                 pixmap = pixmap.scaled(ref.width(), ref.height(),
                                        Qt.KeepAspectRatio, Qt.SmoothTransformation)
             else:
@@ -1786,7 +1785,7 @@ class FlashbackEditor(QMainWindow):
 
     def _on_render_done(self, img_array, was_downscaled):
         """Receive a completed render from the background RenderWorker."""
-        self.display_image(img_array)
+        self.display_image(img_array, is_scrub=was_downscaled)
         if not was_downscaled and self._render_needs_commit:
             self._render_needs_commit = False
             self.update_current_thumbnail(img_array)
