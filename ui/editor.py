@@ -36,6 +36,7 @@ from PySide6.QtGui import (
 )
 
 from core import resource_path
+from core.gpu import gpu
 from core.processor import FlashbackProcessor, export_image
 from core.config import _timing_print, DebugConfig
 
@@ -178,7 +179,6 @@ class FullscreenZenOverlay(QWidget):
         self.drag_start_pos = None
         self.lock_axis = None
 
-        self.main_window.processor.preview_mode = 'hq'
         img_array = self.main_window.processor._render_fast()
 
         if img_array is not None:
@@ -272,11 +272,6 @@ class FlashbackEditor(QMainWindow):
 
         self.pending_render = False
 
-        self._slider_render_timer = QTimer(self)
-        self._slider_render_timer.setSingleShot(True)
-        self._slider_render_timer.setInterval(40)
-        self._slider_render_timer.timeout.connect(self._on_slider_render_tick)
-
         lut_path = resource_path("assets/luts/look.cube")
         if not os.path.exists(lut_path):
             lut_path = None
@@ -367,8 +362,8 @@ class FlashbackEditor(QMainWindow):
             try:
                 custom_lut = colour.io.read_LUT(file_path)
                 if self.processor:
-                    self.processor.lut_preview = custom_lut
-                    self.processor.lut_full = custom_lut
+                    self.processor.lut = custom_lut
+                    gpu.upload_lut(custom_lut.table)
                 lut_name = Path(file_path).name
                 self.debug_panel.lut_label.setText(f"LUT: {lut_name}")
                 self.refresh_from_debug()
@@ -398,7 +393,6 @@ class FlashbackEditor(QMainWindow):
         self.slider_exposure.blockSignals(False)
         self.label_exposure.setText("0.0 EV")
         self.processor.user_settings['exposure_ev'] = 0.0
-        self.processor.preview_mode = 'hq'
         img_array = self.processor.render_preview()
         if img_array is not None:
             self.display_image(img_array)
@@ -419,7 +413,6 @@ class FlashbackEditor(QMainWindow):
             self.slider_tint.blockSignals(False)
             self.label_tint.setText("+0")
             self.processor.user_settings['tint'] = 0.0
-        self.processor.preview_mode = 'hq'
         img_array = self.processor.render_preview()
         if img_array is not None:
             self.display_image(img_array)
@@ -434,7 +427,6 @@ class FlashbackEditor(QMainWindow):
         self.slider_tint.blockSignals(False)
         self.label_tint.setText("+0")
         self.processor.user_settings['tint'] = 0.0
-        self.processor.preview_mode = 'hq'
         img_array = self.processor.render_preview()
         if img_array is not None:
             self.display_image(img_array)
@@ -890,8 +882,8 @@ class FlashbackEditor(QMainWindow):
             if lut_path not in self._lut_cache:
                 self._lut_cache[lut_path] = colour.io.read_LUT(lut_path)
             lut = self._lut_cache[lut_path]
-            self.processor.lut_preview = lut
-            self.processor.lut_full = lut
+            self.processor.lut = lut
+            gpu.upload_lut(lut.table)
         except Exception as e:
             print(f"⚠ Could not load vibe LUT '{lut_path}': {e}")
         if hasattr(self, 'debug_panel'):
@@ -1401,7 +1393,6 @@ class FlashbackEditor(QMainWindow):
         final_width = len(self.image_files) * (expected_thumb_width + layout_spacing)
         self.thumbnail_strip.container.setMinimumWidth(final_width)
 
-        # Process main image synchronously FIRST (isolates Numba to main thread)
         self.load_current_image()
 
         if hasattr(self, 'loader_overlay'):
@@ -1410,8 +1401,7 @@ class FlashbackEditor(QMainWindow):
 
         self.thumbnail_worker = ThumbnailWorker(
             self.image_files,
-            self.processor.lut_preview,
-            self.processor.lut_full
+            self.processor.lut,
         )
 
         self.thumbnail_worker.progress.connect(self.loader_overlay.update_progress)
@@ -1422,7 +1412,6 @@ class FlashbackEditor(QMainWindow):
         if hasattr(self, '_on_thumbnails_finished'):
             self.thumbnail_worker.finished.connect(self._on_thumbnails_finished)
 
-        self.thumbnail_worker.setStackSize(32 * 1024 * 1024)  # 32MB — Numba JIT needs deep stack
         self.thumbnail_worker.start()
 
     def _on_thumbnail_error(self, index, error_message):
@@ -1478,15 +1467,13 @@ class FlashbackEditor(QMainWindow):
 
         self.add_thumbnail_worker = ThumbnailWorker(
             files_to_add,
-            self.processor.lut_preview,
-            self.processor.lut_full
+            self.processor.lut,
         )
         self.add_thumbnail_worker.progress.connect(self.loader_overlay.update_progress)
         self.add_thumbnail_worker.thumbnail_ready.connect(
             lambda i, t, mid, off=offset: self._add_thumbnail_to_ui(i + off, t, mid)
         )
         self.add_thumbnail_worker.finished.connect(self._on_add_thumbnails_finished)
-        self.add_thumbnail_worker.setStackSize(32 * 1024 * 1024)
         self.add_thumbnail_worker.start()
 
     def _on_add_thumbnails_finished(self):
@@ -1528,8 +1515,7 @@ class FlashbackEditor(QMainWindow):
             try:
                 if file_path in self.image_cache:
                     temp_processor = FlashbackProcessor(None)
-                    temp_processor.lut_preview = self.processor.lut_preview
-                    temp_processor.lut_full = self.processor.lut_full
+                    temp_processor.lut = self.processor.lut
                     temp_processor.intermediate_acescct = self.image_cache[file_path].copy()
                     temp_processor.current_file = file_path
                     temp_processor.user_settings = settings.copy()
@@ -1659,7 +1645,6 @@ class FlashbackEditor(QMainWindow):
             self.chk_wb_link.blockSignals(False)
             self.update_sliders_from_processor()
 
-        self.processor.preview_mode = 'hq'
 
         if file_path in self.image_cache:
             self.processor.intermediate_acescct = self.image_cache[file_path]
@@ -1724,23 +1709,15 @@ class FlashbackEditor(QMainWindow):
     # SLIDER HANDLERS
     # ===================================================================
 
-    def _on_slider_render_tick(self):
-        img_array = self.processor._render_fast()
-        if img_array is not None:
-            self.display_image(img_array)
-            self.update_mode_label()
-
     def on_exposure_slider_moved(self, value):
-        self.processor.preview_mode = 'fast'
         ev = value / 10.0
         self.label_exposure.setText(f"{ev:.1f} EV")
         self.processor.user_settings['exposure_ev'] = ev
-        img_array = self.processor._render_fast()
+        img_array = self.processor._render_fast(downscale=True)
         if img_array is not None:
             self.display_image(img_array)
 
     def on_exposure_released(self):
-        self.processor.preview_mode = 'hq'
         img_array = self.processor._render_fast()
         if img_array is not None:
             self.display_image(img_array)
@@ -1772,22 +1749,18 @@ class FlashbackEditor(QMainWindow):
         return new_tint
 
     def on_wb_slider_moved(self, value):
-        self.processor.preview_mode = 'fast'
         temp_absolute = 5600 + value
         self.label_wb.setText(f"{temp_absolute} K")
 
         if self.chk_wb_link.isChecked():
             self._apply_wb_tint_link(value)
-            self.processor.user_settings['wb_temp'] = value
-        else:
-            self.processor.user_settings['wb_temp'] = value
+        self.processor.user_settings['wb_temp'] = value
 
-        img_array = self.processor._render_fast()
+        img_array = self.processor._render_fast(downscale=True)
         if img_array is not None:
             self.display_image(img_array)
 
     def on_wb_released(self):
-        self.processor.preview_mode = 'hq'
         img_array = self.processor._render_fast()
         if img_array is not None:
             self.display_image(img_array)
@@ -1796,18 +1769,16 @@ class FlashbackEditor(QMainWindow):
         self.save_current_settings()
 
     def on_tint_slider_moved(self, value):
-        self.processor.preview_mode = 'fast'
         tint = value / 5.0
         self.label_tint.setText(f"{value:+d}")
         if self.chk_wb_link.isChecked():
             self._tint_manual_offset = tint - self._coupled_tint(self.slider_wb.value())
         self.processor.user_settings['tint'] = tint
-        img_array = self.processor._render_fast()
+        img_array = self.processor._render_fast(downscale=True)
         if img_array is not None:
             self.display_image(img_array)
 
     def on_tint_released(self):
-        self.processor.preview_mode = 'hq'
         img_array = self.processor._render_fast()
         if img_array is not None:
             self.display_image(img_array)

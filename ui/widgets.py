@@ -50,11 +50,10 @@ class ThumbnailWorker(QThread):
     finished = Signal()
     error = Signal(int, str)               # index, error_message
 
-    def __init__(self, image_files, processor_lut_preview, processor_lut_full):
+    def __init__(self, image_files, processor_lut):
         super().__init__()
         self.image_files = image_files
-        self.processor_lut_preview = processor_lut_preview
-        self.processor_lut_full = processor_lut_full
+        self.processor_lut = processor_lut
         self._is_running = True
 
     def run(self):
@@ -62,9 +61,8 @@ class ThumbnailWorker(QThread):
         import gc
 
         processor = FlashbackProcessor(None)
-        if self.processor_lut_preview is not None:
-            processor.lut_preview = self.processor_lut_preview
-            processor.lut_full = self.processor_lut_full
+        if self.processor_lut is not None:
+            processor.lut = self.processor_lut
 
         total = len(self.image_files)
         total_start = time.time()

@@ -22,16 +22,17 @@ from . import resource_path
 from .config import (
     FLASHBACK_CCM, FLASHBACK_CCM2, IPHONE_CCM, SENSOR_BLACK, BASE_WB_SETTINGS, BASE_WB_SETTINGS2, BASE_EXPOSURE_OFFSET,
     DebugConfig, REC2020_FROM_SRGB,
-    GRAIN_STRENGTH, GRAIN_TILE_SCALE, SOFTNESS_SIGMA, SHARPEN_STRENGTH, SHARPEN_RADIUS,
+    GRAIN_STRENGTH, GRAIN_TILE_SCALE, GRAIN_HIGHLIGHT_BIAS, SOFTNESS_SIGMA, SHARPEN_STRENGTH, SHARPEN_RADIUS,
     _timing_print,
 )
+from .gpu import gpu
 from .kernels import (
-    HAS_NUMBA,
-    _numba_acescct_decode_core,
-    _numba_acescct_encode_core,
-    _rotate_90_clockwise_numba,
-    _rotate_90_counterclockwise_numba,
-    _apply_grain_numba,
+    acescct_decode,
+    acescct_encode,
+    rotate_90_clockwise,
+    rotate_90_counterclockwise,
+    apply_grain,
+    gaussian_blur,
 )
 from .auto_exposure_reverse import extract_exposure_seconds, compute_reverse_gain
 from .effects import (
@@ -64,21 +65,21 @@ def _is_flashback_dng(path: str) -> bool:
 
 class FlashbackProcessor:
     """
-    Handles image processing with fast preview and high-quality modes.
+    Handles image processing for preview and export.
 
     Architecture:
     1. Load RAW → Preprocess to ACEScct intermediate (slow, once per image)
-    2. Fast preview: Decode → WB/Exposure → Encode → Effects → LUT (fast)
-    3. HQ preview: Fast preview + Grain + Sharpen (slower but complete)
+    2. Preview render: Decode → WB/Exposure → Encode → Effects → LUT
+       — pass downscale=True for responsive slider scrubbing
+    3. Export render: full-quality with halation, softness, grain, sharpen
     """
 
     def __init__(self, lut_path=None):
         """Initialize processor with LUT."""
         self.intermediate_acescct = None
         self.current_file = None
-        self.preview_mode = "fast"  # "fast" or "hq"
         self.rotation = 0  # 0, 90, 180, 270 degrees
-        self.grain_tiles = []  # Initialize grain tiles list
+        self.grain_tiles = []
 
         # User-adjustable settings
         self.user_settings = {
@@ -89,18 +90,14 @@ class FlashbackProcessor:
 
         self._load_grain_tiles()
 
-        # Load LUTs (preview for real-time, full for export)
-        self.lut_preview = None
-        self.lut_full = None
+        self.lut = None
 
         if lut_path and os.path.exists(lut_path):
             try:
-                self.lut_full = colour.read_LUT(lut_path)
-                print(f"✓ Full LUT loaded: {self.lut_full.name} ({self.lut_full.table.shape})")
-
-                self.lut_preview = self.lut_full
-                print(f"✓ Using full LUT for preview ({self.lut_preview.table.shape})")
-
+                self.lut = colour.read_LUT(lut_path)
+                print(f"✓ LUT loaded: {self.lut.name} ({self.lut.table.shape})")
+                gpu.upload_lut(self.lut.table)
+                print(f"✓ LUT uploaded to GPU ({self.lut.table.shape})")
             except Exception as e:
                 print(f"Warning: Could not load LUT: {e}")
         else:
@@ -166,14 +163,12 @@ class FlashbackProcessor:
         return grain
 
     def apply_grain_linear_light(self, image, strength=GRAIN_STRENGTH):
-        """Apply grain with pre-rendered tiles."""
+        """Apply grain with pre-rendered tiles. `strength` scales the blend
+        intensity in tile mode (in procedural fallback it's the noise sigma)."""
         h, w = image.shape[:2]
         grain = self.generate_grain_layer(h, w, sigma=strength)
 
-        if HAS_NUMBA:
-            return _apply_grain_numba(image, grain)
-        else:
-            return np.clip(image + (2.0 * grain) - 1.0, 0, 1)
+        return apply_grain(image, grain, intensity=strength, highlight_bias=GRAIN_HIGHLIGHT_BIAS)
 
     def rotate_clockwise(self):
         """Rotate image 90 degrees clockwise."""
@@ -203,17 +198,10 @@ class FlashbackProcessor:
         return self.render_preview()
 
     def _rotate_90(self, img, clockwise=True):
-        """Rotate 90 degrees using Numba or OpenCV."""
-        if HAS_NUMBA:
-            if clockwise:
-                return _rotate_90_clockwise_numba(img)
-            else:
-                return _rotate_90_counterclockwise_numba(img)
+        if clockwise:
+            return rotate_90_clockwise(img)
         else:
-            if clockwise:
-                return cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
-            else:
-                return cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            return rotate_90_counterclockwise(img)
 
     def _rotate_180(self, img):
         """Rotate 180 degrees using OpenCV."""
@@ -223,56 +211,11 @@ class FlashbackProcessor:
         """Get current rotation in degrees."""
         return self.rotation
 
-    def _create_acescct_luts(self):
-        """
-        Precompute 1D lookup tables for ACEScct encode/decode.
-        ACEScct is a per-channel operation, so 1D LUT works perfectly!
-        This replaces colour-science's slow Python implementation.
-        """
-        lut_size = 65536
+    def _fast_acescct_decode(self, img):
+        return acescct_decode(img)
 
-        acescct_vals = np.linspace(0, 1, lut_size, dtype=np.float32)
-
-        linear_vals = np.where(
-            acescct_vals < 0.155251141552511,
-            (acescct_vals - 0.0729055341958355) / 10.5402377416545,
-            np.power(2.0, acescct_vals * 17.52 - 9.72)
-        ).astype(np.float32)
-
-        self.acescct_decode_lut = linear_vals
-
-        linear_input = np.linspace(0, 2.0, lut_size, dtype=np.float32)
-
-        acescct_output = np.where(
-            linear_input <= 0.0078125,
-            10.5402377416545 * linear_input + 0.0729055341958355,
-            (np.log2(np.maximum(linear_input, 1e-10)) + 9.72) / 17.52
-        ).astype(np.float32)
-
-        self.acescct_encode_lut = acescct_output
-        self.acescct_encode_max = 2.0
-
-        print(f"  ✓ ACEScct LUTs created (decode: {len(linear_vals)}, encode: {len(acescct_output)} entries)")
-
-    def _fast_acescct_decode(self, acescct_img):
-        """Wrapper to safely pass data to Numba core."""
-        orig_shape = acescct_img.shape
-        flat_input = acescct_img.ravel().astype(np.float32)
-        out_buffer = np.empty_like(flat_input)
-
-        _numba_acescct_decode_core(flat_input, out_buffer)
-
-        return out_buffer.reshape(orig_shape)
-
-    def _fast_acescct_encode(self, linear_img):
-        """Wrapper to safely pass data to Numba core."""
-        orig_shape = linear_img.shape
-        flat_input = linear_img.ravel().astype(np.float32)
-        out_buffer = np.empty_like(flat_input)
-
-        _numba_acescct_encode_core(flat_input, out_buffer)
-
-        return out_buffer.reshape(orig_shape)
+    def _fast_acescct_encode(self, img):
+        return acescct_encode(img)
 
     def load_image(self, dng_path, for_export=False, fast_mode=False):
         """
@@ -344,6 +287,16 @@ class FlashbackProcessor:
                     img_srgb_lin = (rgb_linear.reshape(-1, 3) @ IPHONE_CCM.T).reshape(rgb_linear.shape)
                     img_srgb_lin = np.clip(img_srgb_lin, 0.0, 1.0)
                     profile['color_matrix'] = (time.time() - start) * 1000
+
+                    # Soft Lab desaturation in highlights
+                    if DebugConfig.enable_highlight_desat:
+                        img_srgb_lin = self._desaturate_highlights_lab(
+                            img_srgb_lin,
+                            threshold_L=DebugConfig.highlight_desat_threshold_L - 19, # iPhone highlights are brighter, so shift threshold down a bit
+                            rolloff_L=DebugConfig.highlight_desat_rolloff_L,
+                            sigma=DebugConfig.highlight_desat_sigma,
+                        )
+                    _timing_print(f"    After CCM: [{img_srgb_lin.min():.4f}, {img_srgb_lin.max():.4f}]")
 
                 else:
                     # --- FLASHBACK ONE35 V2 PIPELINE ---
@@ -451,8 +404,7 @@ class FlashbackProcessor:
 
             # Render preview
             start = time.time()
-            self.preview_mode = 'hq'
-            result = self._render_preview()
+            result = self.render_preview()
 
             profile['render_preview'] = (time.time() - start) * 1000
             profile['total'] = (time.time() - total_start) * 1000
@@ -502,7 +454,6 @@ class FlashbackProcessor:
                 img_float = img.astype(np.float32)
 
             self.intermediate_acescct = img_float
-            self.preview_mode = 'hq'
 
             _timing_print(f"✓ Loaded intermediate TIFF in {(time.time() - start)*1000:.2f} ms")
 
@@ -512,37 +463,13 @@ class FlashbackProcessor:
             print(f"✗ Failed to load intermediate TIFF: {e}")
             return None
 
-    def update_setting(self, param, value):
-        """
-        Update a user setting and re-render.
-        Automatically switches to fast mode.
-        """
-        if param in self.user_settings:
-            self.user_settings[param] = value
-            self.preview_mode = "fast"
-            return self.render_preview()
-        return None
-
-    def request_hq_preview(self):
-        """Switch to high-quality preview mode."""
-        self.preview_mode = "hq"
-        return self.render_preview()
-
-    def render_preview(self):
-        """Main render function — delegates to fast or HQ based on mode."""
+    def render_preview(self, downscale=False):
+        """Main render function. Pass downscale=True for fast slider scrub previews."""
         if self.intermediate_acescct is None:
             return None
+        return self._render_fast(downscale=downscale)
 
-        if self.preview_mode == "hq":
-            return self._render_hq()
-        else:
-            return self._render_fast()
-
-    def _render_preview(self):
-        """Internal alias used during load_image."""
-        return self.render_preview()
-
-    def _render_fast(self):
+    def _render_fast(self, downscale=False):
         """
         Fast preview render. Applies full effect chain except halation.
         Target: ~100-150ms for responsive editing.
@@ -555,9 +482,7 @@ class FlashbackProcessor:
 
         orig_h, orig_w = img.shape[:2]
 
-        is_fast_mode = getattr(self, 'preview_mode', 'hq') == 'fast'
-
-        if is_fast_mode:
+        if downscale:
             img = cv2.resize(img, (orig_w // 3, orig_h // 3), interpolation=cv2.INTER_LINEAR)
 
         # Decode ACEScct to linear Rec.2020
@@ -582,7 +507,7 @@ class FlashbackProcessor:
 
         # Vignette + bloom in linear light (lens effects before color grading)
         start = time.time()
-        if DebugConfig.enable_bloom and DebugConfig.bloom_strength > 0 and not is_fast_mode:
+        if DebugConfig.enable_bloom and DebugConfig.bloom_strength > 0 and not downscale:
             img_linear = apply_bloom(img_linear, DebugConfig.bloom_strength, DebugConfig.bloom_threshold, linear=True)
         profile['bloom'] = time.time() - start
 
@@ -596,15 +521,11 @@ class FlashbackProcessor:
         img_acescct = self._fast_acescct_encode(img_linear)
         profile['acescct_encode'] = time.time() - start
 
-        # ANTI-BANDING: Add subtle dither before LUT to mask quantization
-        if DebugConfig.enable_pre_lut_dither and DebugConfig.pre_lut_dither_strength > 0 and not is_fast_mode:
-            img_acescct = add_blue_noise_dither(img_acescct, DebugConfig.pre_lut_dither_strength)
-
         # Apply LUT FIRST (before softness to avoid revealing LUT banding)
         start = time.time()
-        if DebugConfig.enable_lut and self.lut_preview is not None:
+        if DebugConfig.enable_lut and self.lut is not None:
             try:
-                img_display = apply_lut_fast(img_acescct, self.lut_preview)
+                img_display = apply_lut_fast(img_acescct, self.lut)
             except Exception as e:
                 print(f"    [LUT ERROR]: {e}")
                 img_display = img_acescct
@@ -614,31 +535,36 @@ class FlashbackProcessor:
 
         # Chromatic aberration after LUT — skipped in fast mode for responsiveness
         start = time.time()
-        if DebugConfig.enable_chromatic_aberration and DebugConfig.ca_strength > 0 and not is_fast_mode:
+        if DebugConfig.enable_chromatic_aberration and DebugConfig.ca_strength > 0 and not downscale:
             img_display = apply_chromatic_aberration(img_display, DebugConfig.ca_strength, DebugConfig.ca_steps, DebugConfig.ca_blue_blur)
         profile['chromatic_aberration'] = time.time() - start
 
+        # Dither AFTER CA so the noise pattern doesn't get streaked by CA's
+        # radial scaling at the corners.
+        if DebugConfig.enable_pre_lut_dither and DebugConfig.pre_lut_dither_strength > 0 and not downscale:
+            img_display = add_blue_noise_dither(img_display, DebugConfig.pre_lut_dither_strength)
+
         # Apply softness AFTER LUT (will blur any banding artifacts from LUT)
         start = time.time()
-        if DebugConfig.enable_softness and DebugConfig.softness_sigma > 0 and not is_fast_mode:
+        if DebugConfig.enable_softness and DebugConfig.softness_sigma > 0 and not downscale:
             img_display = apply_softness(img_display, DebugConfig.softness_sigma)
         profile['softness'] = time.time() - start
 
         # Grain in preview
         start = time.time()
-        if DebugConfig.enable_grain and DebugConfig.grain_strength > 0 and not is_fast_mode:
+        if DebugConfig.enable_grain and DebugConfig.grain_strength > 0 and not downscale:
             img_display = self.apply_grain_linear_light(img_display, DebugConfig.grain_strength)
         profile['grain'] = time.time() - start
 
         # Sharpen in preview
         start = time.time()
-        if DebugConfig.enable_sharpen and DebugConfig.sharpen_strength > 0 and not is_fast_mode:
+        if DebugConfig.enable_sharpen and DebugConfig.sharpen_strength > 0 and not downscale:
             img_display = apply_sharpen(img_display, DebugConfig.sharpen_strength, DebugConfig.sharpen_radius)
         profile['sharpen'] = time.time() - start
 
         profile['total'] = time.time() - total_start
 
-        if is_fast_mode:
+        if downscale:
             img_display = cv2.resize(img_display, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
 
         _timing_print("\n=== FAST RENDER PROFILE (preview - no halation) ===")
@@ -647,13 +573,6 @@ class FlashbackProcessor:
         _timing_print("===========================\n")
 
         return np.clip(img_display, 0, 1)
-
-    def _render_hq(self):
-        """
-        Currently delegates to fast preview.
-        Kept because the UI calls this mode explicitly — may be expanded later.
-        """
-        return self._render_fast()
 
     def render_export(self):
         """
@@ -704,14 +623,12 @@ class FlashbackProcessor:
         profile['softness'] = time.time() - start
 
         start = time.time()
-        if self.lut_full is not None:
+        if self.lut is not None:
             try:
-                img_display = apply_lut_fast(img_acescct, self.lut_full)
+                img_display = apply_lut_fast(img_acescct, self.lut)
             except Exception as e:
                 print(f"    [LUT ERROR]: {e}")
                 img_display = img_acescct
-        elif self.lut_preview is not None:
-            img_display = apply_lut_fast(img_acescct, self.lut_preview)
         else:
             img_display = img_acescct
         profile['lut'] = time.time() - start
@@ -757,7 +674,7 @@ class FlashbackProcessor:
         L = img_lab[:, :, 0]  # L* in [0, 100]
         mask = np.clip((L - threshold_L) / max(rolloff_L, 1e-6), 0.0, 1.0)
         if sigma > 0:
-            mask = cv2.GaussianBlur(mask, (0, 0), sigmaX=sigma, sigmaY=sigma)
+            mask = gaussian_blur(mask, sigma)
 
         img_lab[:, :, 1] *= (1.0 - mask)  # a*
         img_lab[:, :, 2] *= (1.0 - mask)  # b*
@@ -791,7 +708,6 @@ class FlashbackProcessor:
     def set_settings(self, settings):
         """Load settings (for copy/paste)."""
         self.user_settings.update(settings)
-        self.preview_mode = "hq"
         return self.render_preview()
 
 
