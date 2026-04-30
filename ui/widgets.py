@@ -124,12 +124,21 @@ class RenderWorker(QThread):
         self._processor = processor
         self._lock = threading.Condition()
         self._pending = None          # None | bool (downscale flag)
+        self._epoch = 0               # bumped on invalidate(); in-flight result is dropped if epoch changed
         self._running = True
 
     def request(self, downscale: bool):
         with self._lock:
             self._pending = downscale
             self._lock.notify()
+
+    def invalidate(self):
+        """Drop any pending request and discard the in-flight render's result.
+        Call this when the processor's intermediate, LUT, or settings change
+        out from under the worker (image switch, rotate, paste, vibe change)."""
+        with self._lock:
+            self._pending = None
+            self._epoch += 1
 
     def stop(self):
         with self._lock:
@@ -146,12 +155,16 @@ class RenderWorker(QThread):
                     return
                 downscale = self._pending
                 self._pending = None
+                start_epoch = self._epoch
 
             img = self._processor._render_fast(downscale=downscale)
 
-            # Always emit — even if a new request arrived while rendering.
-            # Visual continuity matters more than strictly latest-only output;
-            # the next pending render will fire immediately after this emit.
+            with self._lock:
+                if self._epoch != start_epoch:
+                    # Invalidated mid-render — the result is computed against
+                    # state that no longer matches the UI. Drop it.
+                    continue
+
             if img is not None:
                 self.render_done.emit(img, downscale)
 

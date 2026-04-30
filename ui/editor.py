@@ -344,6 +344,8 @@ class FlashbackEditor(QMainWindow):
     def rotate_clockwise(self):
         if not self.image_files:
             return
+        if hasattr(self, '_render_worker'):
+            self._render_worker.invalidate()
         img_array = self.processor.rotate_clockwise()
         self.display_image(img_array)
         self.update_current_thumbnail(img_array)
@@ -353,6 +355,8 @@ class FlashbackEditor(QMainWindow):
     def rotate_counterclockwise(self):
         if not self.image_files:
             return
+        if hasattr(self, '_render_worker'):
+            self._render_worker.invalidate()
         img_array = self.processor.rotate_counterclockwise()
         self.display_image(img_array)
         self.update_current_thumbnail(img_array)
@@ -882,6 +886,8 @@ class FlashbackEditor(QMainWindow):
 
     def _apply_vibe_state(self, vibe_id: str, state: dict, refresh_thumbnails: bool = False):
         """Write `state` into DebugConfig, load its LUT, sync the panel, refresh preview."""
+        if hasattr(self, '_render_worker'):
+            self._render_worker.invalidate()
         apply_state_to_debug_config(state)
         self._load_lut_from_path(state.get('lut_path', ''))
         if hasattr(self, 'debug_panel'):
@@ -1673,6 +1679,12 @@ class FlashbackEditor(QMainWindow):
             self.label_counter.setText("0 / 0")
             return
 
+        # Cancel any in-flight scrub render and clear the commit flag — the
+        # processor state is about to change out from under the worker.
+        if hasattr(self, '_render_worker'):
+            self._render_worker.invalidate()
+        self._render_needs_commit = False
+
         file_path = str(self.image_files[self.current_index])
         self.label_filename.setText(Path(file_path).name)
         self.label_counter.setText(f"{self.current_index + 1} / {len(self.image_files)}")
@@ -1931,6 +1943,10 @@ class FlashbackEditor(QMainWindow):
         if not self.settings_clipboard:
             return
 
+        if hasattr(self, '_render_worker'):
+            self._render_worker.invalidate()
+        self._render_needs_commit = False
+
         paste_selected = self.thumbnail_strip.get_paste_selected_indices()
 
         if paste_selected:
@@ -2006,6 +2022,10 @@ class FlashbackEditor(QMainWindow):
     def process_all_images(self):
         if not self.image_files:
             return
+
+        if hasattr(self, '_render_worker'):
+            self._render_worker.invalidate()
+        self._render_needs_commit = False
 
         selected_indices = self.thumbnail_strip.get_process_selected_indices()
         if selected_indices:
