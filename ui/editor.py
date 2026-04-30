@@ -38,7 +38,11 @@ from PySide6.QtGui import (
 from core import resource_path
 from core.gpu import gpu
 from core.processor import FlashbackProcessor, export_image
-from core.config import _timing_print, DebugConfig
+from core.config import (
+    _timing_print, DebugConfig, VIBE_PRESETS,
+    factory_state_for, snapshot_debug_config, apply_state_to_debug_config,
+)
+from core import vibe_state
 
 from .widgets import (
     ThumbnailWorker, ThumbnailWidget, ThumbnailStrip,
@@ -354,21 +358,24 @@ class FlashbackEditor(QMainWindow):
     # ===================================================================
 
     def _load_custom_lut(self):
-        """Prompt for a .cube file and update the processor LUT."""
+        """Prompt for a .cube file. Path is stored in DebugConfig.lut_path so it
+        becomes part of the active vibe's session state and can be saved with it."""
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Select LUT", "", "LUT Files (*.cube)"
         )
-        if file_path:
-            try:
-                custom_lut = colour.io.read_LUT(file_path)
-                if self.processor:
-                    self.processor.lut = custom_lut
-                    gpu.upload_lut(custom_lut.table)
-                lut_name = Path(file_path).name
-                self.debug_panel.lut_label.setText(f"LUT: {lut_name}")
-                self.refresh_from_debug()
-            except Exception as e:
-                QMessageBox.warning(self, "LUT Load Error", f"Failed to parse LUT file:\n{e}")
+        if not file_path:
+            return
+        try:
+            custom_lut = colour.io.read_LUT(file_path)
+            self._lut_cache[file_path] = custom_lut
+            self.processor.lut = custom_lut
+            gpu.upload_lut(custom_lut.table)
+            DebugConfig.lut_path = file_path
+            self.debug_panel.refresh_lut_label()
+            self.debug_panel.update_modified_indicator()
+            self.refresh_from_debug()
+        except Exception as e:
+            QMessageBox.warning(self, "LUT Load Error", f"Failed to parse LUT file:\n{e}")
 
     # ===================================================================
     # EVENT FILTER (double-click sliders to reset)
@@ -866,30 +873,77 @@ class FlashbackEditor(QMainWindow):
         return sec
 
     def _on_vibe_selected(self, vibe_id: str):
-        from core.config import DebugConfig, VIBE_PRESETS
-        s = VIBE_PRESETS[vibe_id]
-        DebugConfig.enable_chromatic_aberration = s['enable_ca']
-        DebugConfig.ca_strength = s['ca_strength']
-        DebugConfig.softness_sigma = s['softness']
-        DebugConfig.sharpen_strength = s['sharpness']
-        DebugConfig.sharpen_radius = s['sharpen_radius']
-        DebugConfig.grain_strength = s['grain']
-        DebugConfig.vignette_strength = s['vignette']
-        DebugConfig.vignette_feather = s.get('vignette_feather', 1.0)
-        DebugConfig.bloom_strength = s['bloom']
-        lut_path = resource_path(s['lut'])
-        try:
-            if lut_path not in self._lut_cache:
-                self._lut_cache[lut_path] = colour.io.read_LUT(lut_path)
-            lut = self._lut_cache[lut_path]
-            self.processor.lut = lut
-            gpu.upload_lut(lut.table)
-        except Exception as e:
-            print(f"⚠ Could not load vibe LUT '{lut_path}': {e}")
+        """Vibe changed: load saved state if any, else factory; apply to DebugConfig + LUT."""
+        state = self._state_for_vibe(vibe_id)
+        self._apply_vibe_state(vibe_id, state, refresh_thumbnails=True)
+
+    def _state_for_vibe(self, vibe_id: str) -> dict:
+        """Saved overrides if present for `vibe_id`, otherwise the factory state."""
+        saved = vibe_state.load_all().get(vibe_id)
+        if saved:
+            base = factory_state_for(vibe_id)
+            base.update(saved)  # saved keys win, factory fills any missing
+            return base
+        return factory_state_for(vibe_id)
+
+    def _apply_vibe_state(self, vibe_id: str, state: dict, refresh_thumbnails: bool = False):
+        """Write `state` into DebugConfig, load its LUT, sync the panel, refresh preview."""
+        apply_state_to_debug_config(state)
+        self._load_lut_from_path(state.get('lut_path', ''))
         if hasattr(self, 'debug_panel'):
             self.debug_panel.sync_from_config()
+            self.debug_panel.update_modified_indicator()
         self.refresh_from_debug()
-        self._refresh_all_thumbnails()
+        if refresh_thumbnails:
+            self._refresh_all_thumbnails()
+
+    def _load_lut_from_path(self, lut_path: str):
+        """Resolve `lut_path` (relative → bundle, absolute → filesystem), load + cache,
+        push into processor + GPU. Empty path is a no-op (keeps current LUT)."""
+        if not lut_path:
+            return
+        resolved = lut_path if os.path.isabs(lut_path) else resource_path(lut_path)
+        try:
+            if resolved not in self._lut_cache:
+                self._lut_cache[resolved] = colour.io.read_LUT(resolved)
+            lut = self._lut_cache[resolved]
+            self.processor.lut = lut
+            gpu.upload_lut(lut.table)
+            DebugConfig.lut_path = lut_path
+        except Exception as e:
+            print(f"⚠ Could not load LUT '{resolved}': {e}")
+
+    # -------------------------------------------------------------------
+    # Per-vibe save / reset
+    # -------------------------------------------------------------------
+
+    def current_vibe_id(self) -> str:
+        return self.vibe_picker.current_vibe()
+
+    def save_current_vibe_defaults(self):
+        """Promote the live DebugConfig state to saved defaults for the active vibe."""
+        vibe_id = self.current_vibe_id()
+        vibe_state.save_one(vibe_id, snapshot_debug_config())
+        if hasattr(self, 'debug_panel'):
+            self.debug_panel.update_modified_indicator()
+            self.debug_panel.status_label.setText(f"Saved defaults for {vibe_id}.")
+
+    def reset_current_vibe_to_saved(self):
+        """Discard session edits, reload saved defaults (or factory if no saved)."""
+        vibe_id = self.current_vibe_id()
+        state = self._state_for_vibe(vibe_id)
+        self._apply_vibe_state(vibe_id, state, refresh_thumbnails=True)
+        if hasattr(self, 'debug_panel'):
+            label = "saved" if vibe_state.has_saved(vibe_id) else "factory (no saved defaults)"
+            self.debug_panel.status_label.setText(f"Reset {vibe_id} to {label}.")
+
+    def reset_current_vibe_to_factory(self):
+        """Wipe saved defaults for the active vibe and apply factory state."""
+        vibe_id = self.current_vibe_id()
+        vibe_state.clear_one(vibe_id)
+        self._apply_vibe_state(vibe_id, factory_state_for(vibe_id), refresh_thumbnails=True)
+        if hasattr(self, 'debug_panel'):
+            self.debug_panel.status_label.setText(f"Reset {vibe_id} to factory defaults.")
 
     _DEFAULT_USER_SETTINGS = {'exposure_ev': 0.0, 'wb_temp': 0, 'tint': 0.0}
 

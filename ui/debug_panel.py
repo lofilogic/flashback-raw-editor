@@ -7,10 +7,10 @@ from PySide6.QtWidgets import (
     QScrollArea, QFrame, QFormLayout, QDoubleSpinBox, QSpinBox, QCheckBox,
     QGroupBox,
 )
-from PySide6.QtCore import Qt, QSettings
+from PySide6.QtCore import Qt
 
 from core.config import (
-    DebugConfig,
+    DebugConfig, VIBE_FIELDS, snapshot_debug_config,
     HALATION_THRESHOLD, HALATION_BLUR_RADIUS, HALATION_STRENGTH,
     CHROMATIC_ABERRATION_STRENGTH, CHROMATIC_ABERRATION_STEPS,
     SOFTNESS_SIGMA, GRAIN_STRENGTH, SHARPEN_STRENGTH, SHARPEN_RADIUS,
@@ -36,18 +36,40 @@ class DebugPanel(QWidget):
         layout.setSpacing(10)
         layout.setContentsMargins(12, 12, 12, 12)
 
-        # Header
-        header = QHBoxLayout()
-        self.btn_reset = QPushButton("↺ Reset All")
-        self.btn_reset.setStyleSheet("QPushButton { background-color: #3d3d3d; color: #d0d0d0; border: none; padding: 6px 12px; border-radius: 4px; } QPushButton:hover { background-color: #4a4a4a; }")
-        self.btn_reset.clicked.connect(self.reset_all)
-        header.addWidget(self.btn_reset)
+        # Header — vibe-scoped controls
+        self.vibe_header_label = QLabel("Vibe defaults")
+        self.vibe_header_label.setStyleSheet("color: #d0d0d0; font-weight: bold;")
+        layout.addWidget(self.vibe_header_label)
 
-        self.btn_save_defaults = QPushButton("Save as Defaults")
-        self.btn_save_defaults.setToolTip("Save current settings as startup defaults")
-        self.btn_save_defaults.setStyleSheet("QPushButton { background-color: #3d3d3d; color: #d0d0d0; border: none; padding: 6px 12px; border-radius: 4px; } QPushButton:hover { background-color: #4a4a4a; }")
-        self.btn_save_defaults.clicked.connect(self.save_defaults)
-        header.addWidget(self.btn_save_defaults)
+        btn_style = "QPushButton { background-color: #3d3d3d; color: #d0d0d0; border: none; padding: 6px 12px; border-radius: 4px; } QPushButton:hover { background-color: #4a4a4a; }"
+
+        header = QHBoxLayout()
+        self.btn_save_vibe = QPushButton("Save")
+        self.btn_save_vibe.setToolTip(
+            "Save the current settings as the saved defaults for this vibe.\n"
+            "These are loaded on startup and when you Reset to Saved."
+        )
+        self.btn_save_vibe.setStyleSheet(btn_style)
+        self.btn_save_vibe.clicked.connect(self._on_save_vibe)
+        header.addWidget(self.btn_save_vibe)
+
+        self.btn_reset_saved = QPushButton("Reset to Saved")
+        self.btn_reset_saved.setToolTip(
+            "Discard session changes and restore your saved defaults for this vibe.\n"
+            "If you have not saved anything, this restores the factory defaults."
+        )
+        self.btn_reset_saved.setStyleSheet(btn_style)
+        self.btn_reset_saved.clicked.connect(self._on_reset_saved)
+        header.addWidget(self.btn_reset_saved)
+
+        self.btn_reset_factory = QPushButton("Reset to Factory")
+        self.btn_reset_factory.setToolTip(
+            "Discard your saved and session changes for this vibe and restore the\n"
+            "bundled factory defaults. Only affects the current vibe."
+        )
+        self.btn_reset_factory.setStyleSheet(btn_style)
+        self.btn_reset_factory.clicked.connect(self._on_reset_factory)
+        header.addWidget(self.btn_reset_factory)
 
         self.btn_reload = QPushButton("Reload Image")
         self.btn_reload.setToolTip("Reload to apply baked effects (Halation, CA, CNR)")
@@ -199,7 +221,7 @@ class DebugPanel(QWidget):
         self.chk_grain.stateChanged.connect(self.update_preview)
         live_layout.addRow(self.chk_grain)
 
-        self.spin_grain = self._create_double_spin(0.0, 1.0, GRAIN_STRENGTH, 0.01)
+        self.spin_grain = self._create_double_spin(0.0, 3.0, GRAIN_STRENGTH, 0.05)
         self.spin_grain.valueChanged.connect(self.update_preview)
         live_layout.addRow("Grain Strength:", self.spin_grain)
 
@@ -267,7 +289,43 @@ class DebugPanel(QWidget):
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
 
-        self.load_defaults()
+        # Schema-driven field → widget table for sync. Boolean fields use
+        # setChecked; numeric fields use setValue.
+        self._bool_widgets = {
+            'enable_halation': self.chk_halation,
+            'enable_chromatic_aberration': self.chk_ca,
+            'enable_softness': self.chk_softness,
+            'enable_grain': self.chk_grain,
+            'enable_sharpen': self.chk_sharpen,
+            'enable_cnr': self.chk_cnr,
+            'enable_lut': self.chk_lut,
+            'enable_pre_lut_dither': self.chk_dither,
+            'enable_highlight_desat': self.chk_highlight_desat,
+            'enable_vignette': self.chk_vignette,
+            'enable_bloom': self.chk_bloom,
+        }
+        self._numeric_widgets = {
+            'halation_threshold': self.spin_halation_thresh,
+            'halation_blur_radius': self.spin_halation_blur,
+            'halation_strength': self.spin_halation_str,
+            'ca_strength': self.spin_ca_str,
+            'ca_steps': self.spin_ca_steps,
+            'ca_blue_blur': self.spin_ca_blue_blur,
+            'softness_sigma': self.spin_softness,
+            'grain_strength': self.spin_grain,
+            'sharpen_strength': self.spin_sharpen_str,
+            'sharpen_radius': self.spin_sharpen_rad,
+            'cnr_sigma': self.spin_cnr,
+            'highlight_desat_threshold_L': self.spin_hd_thresh,
+            'highlight_desat_rolloff_L': self.spin_hd_rolloff,
+            'highlight_desat_sigma': self.spin_hd_sigma,
+            'pre_lut_dither_strength': self.spin_dither,
+            'vignette_strength': self.spin_vignette_str,
+            'vignette_color_shift': self.spin_vignette_color,
+            'vignette_feather': self.spin_vignette_feather,
+            'bloom_strength': self.spin_bloom_str,
+            'bloom_threshold': self.spin_bloom_thresh,
+        }
 
     # ===================================================================
     # HELPERS
@@ -341,49 +399,53 @@ class DebugPanel(QWidget):
         self.status_label.setText("Config updated. Click 'Reload Image' to apply baked effects.")
 
     def sync_from_config(self):
-        """Update all spinboxes/checkboxes from the current DebugConfig state."""
-        widgets = [
-            self.chk_halation, self.chk_ca, self.chk_softness, self.chk_grain,
-            self.chk_sharpen, self.chk_cnr, self.chk_lut, self.chk_dither,
-            self.chk_highlight_desat, self.chk_vignette, self.chk_bloom,
-            self.spin_halation_thresh, self.spin_halation_blur,
-            self.spin_halation_str, self.spin_ca_str, self.spin_ca_steps, self.spin_ca_blue_blur,
-            self.spin_softness, self.spin_grain, self.spin_sharpen_str,
-            self.spin_sharpen_rad, self.spin_cnr, self.spin_hd_thresh,
-            self.spin_hd_rolloff, self.spin_hd_sigma, self.spin_dither,
-            self.spin_vignette_str, self.spin_vignette_color, self.spin_vignette_feather,
-            self.spin_bloom_str, self.spin_bloom_thresh,
-        ]
-        for w in widgets:
+        """Update all panel widgets from the current DebugConfig state."""
+        all_widgets = list(self._bool_widgets.values()) + list(self._numeric_widgets.values())
+        for w in all_widgets:
             w.blockSignals(True)
-        self.chk_halation.setChecked(DebugConfig.enable_halation)
-        self.chk_ca.setChecked(DebugConfig.enable_chromatic_aberration)
-        self.chk_softness.setChecked(DebugConfig.enable_softness)
-        self.chk_grain.setChecked(DebugConfig.enable_grain)
-        self.chk_sharpen.setChecked(DebugConfig.enable_sharpen)
-        self.chk_cnr.setChecked(DebugConfig.enable_cnr)
-        self.chk_lut.setChecked(DebugConfig.enable_lut)
-        self.chk_dither.setChecked(DebugConfig.enable_pre_lut_dither)
-        self.chk_highlight_desat.setChecked(DebugConfig.enable_highlight_desat)
-        self.chk_vignette.setChecked(DebugConfig.enable_vignette)
-        self.chk_bloom.setChecked(DebugConfig.enable_bloom)
-        self.spin_ca_str.setValue(DebugConfig.ca_strength)
-        self.spin_ca_steps.setValue(DebugConfig.ca_steps)
-        self.spin_ca_blue_blur.setValue(DebugConfig.ca_blue_blur)
-        self.spin_softness.setValue(DebugConfig.softness_sigma)
-        self.spin_grain.setValue(DebugConfig.grain_strength)
-        self.spin_sharpen_str.setValue(DebugConfig.sharpen_strength)
-        self.spin_sharpen_rad.setValue(DebugConfig.sharpen_radius)
-        self.spin_vignette_str.setValue(DebugConfig.vignette_strength)
-        self.spin_vignette_color.setValue(DebugConfig.vignette_color_shift)
-        self.spin_bloom_str.setValue(DebugConfig.bloom_strength)
-        self.spin_bloom_thresh.setValue(DebugConfig.bloom_threshold)
-        for w in widgets:
-            w.blockSignals(False)
+        try:
+            for name, w in self._bool_widgets.items():
+                w.setChecked(bool(getattr(DebugConfig, name)))
+            for name, w in self._numeric_widgets.items():
+                w.setValue(getattr(DebugConfig, name))
+        finally:
+            for w in all_widgets:
+                w.blockSignals(False)
+        self.refresh_lut_label()
+
+    def refresh_lut_label(self):
+        """Update the LUT label to show the active LUT filename."""
+        from pathlib import Path as _P
+        path = getattr(DebugConfig, 'lut_path', '') or ''
+        self.lut_label.setText(f"Current LUT: {_P(path).name}" if path else "Current LUT: Default")
+
+    def update_modified_indicator(self):
+        """Show '• modified' next to the vibe header when session ≠ saved-or-factory."""
+        if not self.parent_editor or not hasattr(self.parent_editor, 'current_vibe_id'):
+            return
+        vibe_id = self.parent_editor.current_vibe_id()
+        live = snapshot_debug_config()
+        baseline = self.parent_editor._state_for_vibe(vibe_id)
+        modified = any(live.get(k) != baseline.get(k) for k, _ in VIBE_FIELDS)
+        suffix = "  •  modified" if modified else ""
+        self.vibe_header_label.setText(f"Vibe defaults — {vibe_id}{suffix}")
+
+    def _on_save_vibe(self):
+        if self.parent_editor:
+            self.parent_editor.save_current_vibe_defaults()
+
+    def _on_reset_saved(self):
+        if self.parent_editor:
+            self.parent_editor.reset_current_vibe_to_saved()
+
+    def _on_reset_factory(self):
+        if self.parent_editor:
+            self.parent_editor.reset_current_vibe_to_factory()
 
     def update_preview(self):
         """Update real-time preview immediately."""
         self.update_config()
+        self.update_modified_indicator()
         if self.parent_editor:
             self.parent_editor.refresh_from_debug()
 
@@ -392,181 +454,4 @@ class DebugPanel(QWidget):
         if self.parent_editor:
             self.parent_editor.reload_current_image()
             self.status_label.setText("Image reloaded with new baked settings.")
-
-    def save_defaults(self):
-        """Persist current DebugConfig values as startup defaults via QSettings."""
-        self.update_config()
-        s = QSettings("Flashback", "Editor")
-        s.beginGroup("debug_defaults")
-        s.setValue("enable_halation",          DebugConfig.enable_halation)
-        s.setValue("enable_ca",                DebugConfig.enable_chromatic_aberration)
-        s.setValue("enable_softness",          DebugConfig.enable_softness)
-        s.setValue("enable_grain",             DebugConfig.enable_grain)
-        s.setValue("enable_sharpen",           DebugConfig.enable_sharpen)
-        s.setValue("enable_cnr",               DebugConfig.enable_cnr)
-        s.setValue("enable_lut",               DebugConfig.enable_lut)
-        s.setValue("enable_dither",            DebugConfig.enable_pre_lut_dither)
-        s.setValue("enable_highlight_desat",   DebugConfig.enable_highlight_desat)
-        s.setValue("halation_threshold",       DebugConfig.halation_threshold)
-        s.setValue("halation_blur_radius",     DebugConfig.halation_blur_radius)
-        s.setValue("halation_strength",        DebugConfig.halation_strength)
-        s.setValue("ca_strength",              DebugConfig.ca_strength)
-        s.setValue("ca_steps",                 DebugConfig.ca_steps)
-        s.setValue("ca_blue_blur",             DebugConfig.ca_blue_blur)
-        s.setValue("softness_sigma",           DebugConfig.softness_sigma)
-        s.setValue("grain_strength",           DebugConfig.grain_strength)
-        s.setValue("sharpen_strength",         DebugConfig.sharpen_strength)
-        s.setValue("sharpen_radius",           DebugConfig.sharpen_radius)
-        s.setValue("cnr_sigma",                DebugConfig.cnr_sigma)
-        s.setValue("hd_threshold_L",           DebugConfig.highlight_desat_threshold_L)
-        s.setValue("hd_rolloff_L",             DebugConfig.highlight_desat_rolloff_L)
-        s.setValue("hd_sigma",                 DebugConfig.highlight_desat_sigma)
-        s.setValue("dither_strength",          DebugConfig.pre_lut_dither_strength)
-        s.setValue("enable_vignette",          DebugConfig.enable_vignette)
-        s.setValue("vignette_strength",        DebugConfig.vignette_strength)
-        s.setValue("vignette_color_shift",     DebugConfig.vignette_color_shift)
-        s.setValue("enable_bloom",             DebugConfig.enable_bloom)
-        s.setValue("bloom_strength",           DebugConfig.bloom_strength)
-        s.setValue("bloom_threshold",          DebugConfig.bloom_threshold)
-        s.endGroup()
-        self.status_label.setText("Defaults saved — will apply on next launch.")
-
-    def load_defaults(self):
-        """Load saved defaults from QSettings into DebugConfig and update UI."""
-        s = QSettings("Flashback", "Editor")
-        s.beginGroup("debug_defaults")
-        if not s.childKeys():
-            s.endGroup()
-            return  # Nothing saved yet — keep module defaults
-
-        def b(key, fallback): return s.value(key, fallback, type=bool)
-        def f(key, fallback): return s.value(key, fallback, type=float)
-        def i(key, fallback): return s.value(key, fallback, type=int)
-
-        DebugConfig.enable_halation              = b("enable_halation",        DebugConfig.enable_halation)
-        DebugConfig.enable_chromatic_aberration  = b("enable_ca",              DebugConfig.enable_chromatic_aberration)
-        DebugConfig.enable_softness              = b("enable_softness",        DebugConfig.enable_softness)
-        DebugConfig.enable_grain                 = b("enable_grain",           DebugConfig.enable_grain)
-        DebugConfig.enable_sharpen               = b("enable_sharpen",         DebugConfig.enable_sharpen)
-        DebugConfig.enable_cnr                   = b("enable_cnr",             DebugConfig.enable_cnr)
-        DebugConfig.enable_lut                   = b("enable_lut",             DebugConfig.enable_lut)
-        DebugConfig.enable_pre_lut_dither        = b("enable_dither",          DebugConfig.enable_pre_lut_dither)
-        DebugConfig.enable_highlight_desat       = b("enable_highlight_desat", DebugConfig.enable_highlight_desat)
-        DebugConfig.halation_threshold           = f("halation_threshold",     DebugConfig.halation_threshold)
-        DebugConfig.halation_blur_radius         = f("halation_blur_radius",   DebugConfig.halation_blur_radius)
-        DebugConfig.halation_strength            = f("halation_strength",      DebugConfig.halation_strength)
-        DebugConfig.ca_strength                  = f("ca_strength",            DebugConfig.ca_strength)
-        DebugConfig.ca_steps                     = i("ca_steps",               DebugConfig.ca_steps)
-        DebugConfig.ca_blue_blur                 = f("ca_blue_blur",           DebugConfig.ca_blue_blur)
-        DebugConfig.softness_sigma               = f("softness_sigma",         DebugConfig.softness_sigma)
-        DebugConfig.grain_strength               = f("grain_strength",         DebugConfig.grain_strength)
-        DebugConfig.sharpen_strength             = f("sharpen_strength",       DebugConfig.sharpen_strength)
-        DebugConfig.sharpen_radius               = f("sharpen_radius",         DebugConfig.sharpen_radius)
-        DebugConfig.cnr_sigma                    = f("cnr_sigma",              DebugConfig.cnr_sigma)
-        DebugConfig.highlight_desat_threshold_L  = f("hd_threshold_L",        DebugConfig.highlight_desat_threshold_L)
-        DebugConfig.highlight_desat_rolloff_L    = f("hd_rolloff_L",           DebugConfig.highlight_desat_rolloff_L)
-        DebugConfig.highlight_desat_sigma        = f("hd_sigma",               DebugConfig.highlight_desat_sigma)
-        DebugConfig.pre_lut_dither_strength      = f("dither_strength",        DebugConfig.pre_lut_dither_strength)
-        DebugConfig.enable_vignette              = b("enable_vignette",        DebugConfig.enable_vignette)
-        DebugConfig.vignette_strength            = f("vignette_strength",      DebugConfig.vignette_strength)
-        DebugConfig.vignette_color_shift         = f("vignette_color_shift",   DebugConfig.vignette_color_shift)
-        DebugConfig.enable_bloom                 = b("enable_bloom",           DebugConfig.enable_bloom)
-        DebugConfig.bloom_strength               = f("bloom_strength",         DebugConfig.bloom_strength)
-        DebugConfig.bloom_threshold              = f("bloom_threshold",        DebugConfig.bloom_threshold)
-        s.endGroup()
-
-        # Block signals while syncing UI so that partial updates don't
-        # trigger update_config() which would overwrite not-yet-restored values.
-        widgets = [
-            self.chk_halation, self.chk_ca, self.chk_softness, self.chk_grain,
-            self.chk_sharpen, self.chk_cnr, self.chk_lut, self.chk_dither,
-            self.chk_highlight_desat, self.chk_vignette, self.chk_bloom,
-            self.spin_halation_thresh, self.spin_halation_blur,
-            self.spin_halation_str, self.spin_ca_str, self.spin_ca_steps, self.spin_ca_blue_blur,
-            self.spin_softness, self.spin_grain, self.spin_sharpen_str,
-            self.spin_sharpen_rad, self.spin_cnr, self.spin_hd_thresh,
-            self.spin_hd_rolloff, self.spin_hd_sigma, self.spin_dither,
-            self.spin_vignette_str, self.spin_vignette_color, self.spin_vignette_feather,
-            self.spin_bloom_str, self.spin_bloom_thresh,
-        ]
-        for w in widgets:
-            w.blockSignals(True)
-
-        self.chk_halation.setChecked(DebugConfig.enable_halation)
-        self.chk_ca.setChecked(DebugConfig.enable_chromatic_aberration)
-        self.chk_softness.setChecked(DebugConfig.enable_softness)
-        self.chk_grain.setChecked(DebugConfig.enable_grain)
-        self.chk_sharpen.setChecked(DebugConfig.enable_sharpen)
-        self.chk_cnr.setChecked(DebugConfig.enable_cnr)
-        self.chk_lut.setChecked(DebugConfig.enable_lut)
-        self.chk_dither.setChecked(DebugConfig.enable_pre_lut_dither)
-        self.chk_highlight_desat.setChecked(DebugConfig.enable_highlight_desat)
-        self.spin_halation_thresh.setValue(DebugConfig.halation_threshold)
-        self.spin_halation_blur.setValue(DebugConfig.halation_blur_radius)
-        self.spin_halation_str.setValue(DebugConfig.halation_strength)
-        self.spin_ca_str.setValue(DebugConfig.ca_strength)
-        self.spin_ca_steps.setValue(DebugConfig.ca_steps)
-        self.spin_ca_blue_blur.setValue(DebugConfig.ca_blue_blur)
-        self.spin_softness.setValue(DebugConfig.softness_sigma)
-        self.spin_grain.setValue(DebugConfig.grain_strength)
-        self.spin_sharpen_str.setValue(DebugConfig.sharpen_strength)
-        self.spin_sharpen_rad.setValue(DebugConfig.sharpen_radius)
-        self.spin_cnr.setValue(DebugConfig.cnr_sigma)
-        self.spin_hd_thresh.setValue(DebugConfig.highlight_desat_threshold_L)
-        self.spin_hd_rolloff.setValue(DebugConfig.highlight_desat_rolloff_L)
-        self.spin_hd_sigma.setValue(DebugConfig.highlight_desat_sigma)
-        self.spin_dither.setValue(DebugConfig.pre_lut_dither_strength)
-        self.chk_vignette.setChecked(DebugConfig.enable_vignette)
-        self.spin_vignette_str.setValue(DebugConfig.vignette_strength)
-        self.spin_vignette_color.setValue(DebugConfig.vignette_color_shift)
-        self.spin_vignette_feather.setValue(DebugConfig.vignette_feather)
-        self.chk_bloom.setChecked(DebugConfig.enable_bloom)
-        self.spin_bloom_str.setValue(DebugConfig.bloom_strength)
-        self.spin_bloom_thresh.setValue(DebugConfig.bloom_threshold)
-
-        for w in widgets:
-            w.blockSignals(False)
-
-    def reset_all(self):
-        """Reset all parameters to defaults."""
-        DebugConfig.reset()
-
-        self.chk_halation.setChecked(True)
-        self.spin_halation_thresh.setValue(DebugConfig.halation_threshold)
-        self.spin_halation_blur.setValue(DebugConfig.halation_blur_radius)
-        self.spin_halation_str.setValue(DebugConfig.halation_strength)
-
-        self.chk_ca.setChecked(True)
-        self.spin_ca_str.setValue(DebugConfig.ca_strength)
-        self.spin_ca_steps.setValue(DebugConfig.ca_steps)
-        self.spin_ca_blue_blur.setValue(DebugConfig.ca_blue_blur)
-
-        self.chk_cnr.setChecked(True)
-        self.spin_cnr.setValue(DebugConfig.cnr_sigma)
-
-        self.chk_highlight_desat.setChecked(True)
-        self.spin_hd_thresh.setValue(DebugConfig.highlight_desat_threshold_L)
-        self.spin_hd_rolloff.setValue(DebugConfig.highlight_desat_rolloff_L)
-        self.spin_hd_sigma.setValue(DebugConfig.highlight_desat_sigma)
-
-        self.chk_lut.setChecked(True)
-        self.chk_softness.setChecked(True)
-        self.spin_softness.setValue(DebugConfig.softness_sigma)
-        self.chk_grain.setChecked(True)
-        self.spin_grain.setValue(DebugConfig.grain_strength)
-        self.chk_sharpen.setChecked(True)
-        self.spin_sharpen_str.setValue(DebugConfig.sharpen_strength)
-        self.spin_sharpen_rad.setValue(DebugConfig.sharpen_radius)
-
-        self.chk_vignette.setChecked(DebugConfig.enable_vignette)
-        self.spin_vignette_str.setValue(DebugConfig.vignette_strength)
-        self.spin_vignette_color.setValue(DebugConfig.vignette_color_shift)
-        self.spin_vignette_feather.setValue(DebugConfig.vignette_feather)
-        self.chk_bloom.setChecked(DebugConfig.enable_bloom)
-        self.spin_bloom_str.setValue(DebugConfig.bloom_strength)
-        self.spin_bloom_thresh.setValue(DebugConfig.bloom_threshold)
-
-        self.status_label.setText("Reset to defaults.")
-        if self.parent_editor:
-            self.parent_editor.refresh_from_debug()
 

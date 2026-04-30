@@ -63,11 +63,12 @@ HALATION_STRENGTH = 0.5
 SOFTNESS_SIGMA = 0.5
 GRAIN_STRENGTH = 0.01
 GRAIN_BLUR_SIGMA = 0.1
-GRAIN_TILE_SCALE = 0.9 # <1.0 makes grain finer (tiles render denser); >1.0 makes it chunkier.
+GRAIN_TILE_SCALE = 0.8 # <1.0 makes grain finer (tiles render denser); >1.0 makes it chunkier.
+GRAIN_HIGHLIGHT_BIAS = 0.3 # 1.0 = grain biased to highlights (matches scanned negative film density), 0.0 = biased to shadows (noise-floor look), 0.5 = flat.
 SHARPEN_STRENGTH = 0.5
 SHARPEN_RADIUS = 1.0
 CNR_SIGMA = 2.0
-HIGHLIGHT_DESAT_THRESHOLD_L = 60.0   # Lab L* at which desaturation begins (0-100)
+HIGHLIGHT_DESAT_THRESHOLD_L = 58.0   # Lab L* at which desaturation begins (0-100)
 HIGHLIGHT_DESAT_ROLLOFF_L   = 10.0   # width of ramp in L* units
 HIGHLIGHT_DESAT_SIGMA       = 10.0    # spatial Gaussian blur on the mask
 DITHER_STRENGTH = 0.005
@@ -82,10 +83,10 @@ BLOOM_THRESHOLD = 0.05
 # =============================================================================
 
 VIBE_PRESETS = {
-    'disposable':  {'enable_ca': True,  'ca_strength': 0.010, 'softness': 0.6, 'sharpness': 2.0, 'sharpen_radius': 0.5, 'grain': 1.0, 'vignette': 0.10, 'vignette_feather': 0.4, 'bloom': 0.10, 'lut': 'assets/luts/disposable_full_smoothed.cube'},
-    'point_shoot': {'enable_ca': True,  'ca_strength': 0.002, 'softness': 0.5, 'sharpness': 0.5, 'sharpen_radius':  1.0, 'grain': 0.010, 'vignette': 0.10, 'vignette_feather': 1.0, 'bloom': 0.10, 'lut': 'assets/luts/pointandshoot.cube'},
-    'rangefinder': {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.2, 'sharpness': 0.8, 'sharpen_radius':  1.0, 'grain': 0.007, 'vignette': 0.05, 'vignette_feather': 1.0, 'bloom': 0.05, 'lut': 'assets/luts/rangefinder.cube'},
-    'monochrome':  {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.2, 'sharpness': 0.8, 'sharpen_radius':  1.0, 'grain': 0.020, 'vignette': 0.20, 'vignette_feather': 1.0, 'bloom': 0.05, 'lut': 'assets/luts/monochrome.cube'},
+    'disposable':  {'enable_ca': True,  'ca_strength': 0.010, 'softness': 0.6, 'sharpness': 2.0, 'sharpen_radius': 0.5, 'grain': 1.2, 'vignette': 0.10, 'vignette_feather': 0.4, 'bloom': 0.10, 'lut': 'assets/luts/disposable_full_smoothed.cube'},
+    'point_shoot': {'enable_ca': True,  'ca_strength': 0.002, 'softness': 0.5, 'sharpness': 0.5, 'sharpen_radius':  1.0, 'grain': 0.8, 'vignette': 0.10, 'vignette_feather': 1.0, 'bloom': 0.10, 'lut': 'assets/luts/pointandshoot.cube'},
+    'rangefinder': {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.2, 'sharpness': 0.8, 'sharpen_radius':  1.0, 'grain': 0.5, 'vignette': 0.05, 'vignette_feather': 1.0, 'bloom': 0.05, 'lut': 'assets/luts/rangefinder.cube'},
+    'monochrome':  {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.2, 'sharpness': 0.8, 'sharpen_radius':  1.0, 'grain': 1.5, 'vignette': 0.20, 'vignette_feather': 1.0, 'bloom': 0.05, 'lut': 'assets/luts/monochrome.cube'},
 }
 
 # =============================================================================
@@ -93,7 +94,7 @@ VIBE_PRESETS = {
 # =============================================================================
 
 # Set to True to print per-effect timing to console (development only)
-DEBUG_TIMING = False
+DEBUG_TIMING = True
 
 def _timing_print(msg):
     """Print timing/debug messages. Controlled by DEBUG_TIMING flag."""
@@ -110,7 +111,7 @@ class DebugConfig:
     Class-level attributes act as global toggles and tunable parameters.
     """
     # Toggles
-    enable_halation = False
+    enable_halation = True
     enable_chromatic_aberration = True
     enable_softness = True
     enable_grain = True
@@ -118,8 +119,8 @@ class DebugConfig:
     enable_cnr = True
     enable_lut = True
     enable_pre_lut_dither = True
-    enable_vignette = False
-    enable_bloom = False
+    enable_vignette = True
+    enable_bloom = True
     enable_reverse_autoexposure = False
 
     # Reference exposure time in seconds — the "middleground". Shots with a
@@ -154,6 +155,10 @@ class DebugConfig:
     vignette_feather = VIGNETTE_FEATHER
     bloom_strength = BLOOM_STRENGTH
     bloom_threshold = BLOOM_THRESHOLD
+
+    # Path to the active LUT (relative for bundled, absolute for user-loaded).
+    # Empty means: fall back to whatever the processor loaded at construction.
+    lut_path = ''
 
     @classmethod
     def reset(cls):
@@ -196,3 +201,86 @@ class DebugConfig:
         cls.vignette_feather = VIGNETTE_FEATHER
         cls.bloom_strength = BLOOM_STRENGTH
         cls.bloom_threshold = BLOOM_THRESHOLD
+        cls.lut_path = ''
+
+
+# =============================================================================
+# VIBE STATE SCHEMA
+# =============================================================================
+
+# Ordered list of (field_name, type) tuples — every field that participates
+# in vibe state. Used by serialization, factory_state_for, and the panel sync.
+VIBE_FIELDS = [
+    ('enable_halation', bool),
+    ('enable_chromatic_aberration', bool),
+    ('enable_softness', bool),
+    ('enable_grain', bool),
+    ('enable_sharpen', bool),
+    ('enable_cnr', bool),
+    ('enable_lut', bool),
+    ('enable_pre_lut_dither', bool),
+    ('enable_highlight_desat', bool),
+    ('enable_vignette', bool),
+    ('enable_bloom', bool),
+    ('halation_threshold', float),
+    ('halation_blur_radius', float),
+    ('halation_strength', float),
+    ('ca_strength', float),
+    ('ca_steps', int),
+    ('ca_blue_blur', float),
+    ('softness_sigma', float),
+    ('grain_strength', float),
+    ('sharpen_strength', float),
+    ('sharpen_radius', float),
+    ('cnr_sigma', float),
+    ('highlight_desat_threshold_L', float),
+    ('highlight_desat_rolloff_L', float),
+    ('highlight_desat_sigma', float),
+    ('pre_lut_dither_strength', float),
+    ('vignette_strength', float),
+    ('vignette_color_shift', float),
+    ('vignette_feather', float),
+    ('bloom_strength', float),
+    ('bloom_threshold', float),
+    ('lut_path', str),
+]
+
+# Captured at import time, before any user code mutates DebugConfig — this is
+# the "fresh-install" baseline shared across all vibes for non-vibe-specific
+# fields (halation, CNR, dither, etc.).
+_FACTORY_BASE = {name: getattr(DebugConfig, name) for name, _ in VIBE_FIELDS}
+
+
+def factory_state_for(vibe_id: str) -> dict:
+    """Return the bundled factory state for `vibe_id` — all VIBE_FIELDS values
+    the app would use on a fresh install. Vibe-specific fields come from
+    VIBE_PRESETS; everything else is the global baseline.
+    """
+    state = dict(_FACTORY_BASE)
+    preset = VIBE_PRESETS[vibe_id]
+    state['enable_chromatic_aberration'] = preset['enable_ca']
+    state['ca_strength'] = preset['ca_strength']
+    state['softness_sigma'] = preset['softness']
+    state['sharpen_strength'] = preset['sharpness']
+    state['sharpen_radius'] = preset['sharpen_radius']
+    state['grain_strength'] = preset['grain']
+    state['vignette_strength'] = preset['vignette']
+    state['vignette_feather'] = preset.get('vignette_feather', 1.0)
+    state['bloom_strength'] = preset['bloom']
+    state['lut_path'] = preset['lut']
+    return state
+
+
+def snapshot_debug_config() -> dict:
+    """Capture the current DebugConfig as a vibe-state dict (only VIBE_FIELDS)."""
+    return {name: getattr(DebugConfig, name) for name, _ in VIBE_FIELDS}
+
+
+def apply_state_to_debug_config(state: dict) -> None:
+    """Write a vibe-state dict into DebugConfig, coercing types and ignoring unknown keys."""
+    for name, t in VIBE_FIELDS:
+        if name in state:
+            try:
+                setattr(DebugConfig, name, t(state[name]))
+            except (TypeError, ValueError):
+                pass
