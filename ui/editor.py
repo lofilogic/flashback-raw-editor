@@ -322,9 +322,9 @@ class FlashbackEditor(QMainWindow):
 
     def on_zen_navigate(self, direction):
         new_index = self.current_index + direction
-        if 0 <= new_index < len(self.image_files):
+        if 0 <= new_index < len(self.image_files) and new_index != self.current_index:
             self.current_index = new_index
-        self.load_current_image()
+            self.load_current_image()
 
     def on_zen_rotate(self, angle):
         if angle == 90:
@@ -410,6 +410,7 @@ class FlashbackEditor(QMainWindow):
         self.slider_exposure.blockSignals(False)
         self.label_exposure.setText("0.0 EV")
         self.processor.user_settings['exposure_ev'] = 0.0
+        self.save_current_settings()
         self._render_needs_commit = True
         self._render_worker.request(downscale=False)
 
@@ -426,6 +427,7 @@ class FlashbackEditor(QMainWindow):
             self.slider_tint.blockSignals(False)
             self.label_tint.setText("+0")
             self.processor.user_settings['tint'] = 0.0
+        self.save_current_settings()
         self._render_needs_commit = True
         self._render_worker.request(downscale=False)
 
@@ -436,6 +438,7 @@ class FlashbackEditor(QMainWindow):
         self.slider_tint.blockSignals(False)
         self.label_tint.setText("+0")
         self.processor.user_settings['tint'] = 0.0
+        self.save_current_settings()
         self._render_needs_commit = True
         self._render_worker.request(downscale=False)
 
@@ -1783,7 +1786,9 @@ class FlashbackEditor(QMainWindow):
             self._render_needs_commit = False
             self.update_current_thumbnail(img_array)
             self.update_mode_label()
-            self.save_current_settings()
+            # save_current_settings is called synchronously at slider release —
+            # see on_*_released / reset_*_slider — so persistence survives an
+            # image switch that invalidates this render.
 
     # ===================================================================
     # SLIDER HANDLERS
@@ -1796,6 +1801,7 @@ class FlashbackEditor(QMainWindow):
         self._render_worker.request(downscale=True)
 
     def on_exposure_released(self):
+        self.save_current_settings()
         self._render_needs_commit = True
         self._render_worker.request(downscale=False)
 
@@ -1832,6 +1838,7 @@ class FlashbackEditor(QMainWindow):
         self._render_worker.request(downscale=True)
 
     def on_wb_released(self):
+        self.save_current_settings()
         self._render_needs_commit = True
         self._render_worker.request(downscale=False)
 
@@ -1844,6 +1851,7 @@ class FlashbackEditor(QMainWindow):
         self._render_worker.request(downscale=True)
 
     def on_tint_released(self):
+        self.save_current_settings()
         self._render_needs_commit = True
         self._render_worker.request(downscale=False)
 
