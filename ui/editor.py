@@ -123,12 +123,15 @@ class FullscreenZenOverlay(QWidget):
         logical_w = pix.width() / dpr
         logical_h = pix.height() / dpr
 
-        final_pix = pix.scaled(
-            int(max_w * dpr), int(max_h * dpr),
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation
-        )
-        final_pix.setDevicePixelRatio(dpr)
+        if logical_w > max_w or logical_h > max_h:
+            final_pix = pix.scaled(
+                int(max_w * dpr), int(max_h * dpr),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+            final_pix.setDevicePixelRatio(dpr)
+        else:
+            final_pix = pix
 
         self.image_label.setPixmap(final_pix)
         self.image_label.setFixedSize(int(final_pix.width() / dpr), int(final_pix.height() / dpr))
@@ -1721,7 +1724,14 @@ class FlashbackEditor(QMainWindow):
             h, w, c = img_8bit.shape
             q_image = QImage(img_8bit.data, w, h, c * w, QImage.Format_RGB888)
             pixmap = QPixmap.fromImage(q_image)
-            self.image_label._original_pixmap = pixmap  # keep in sync for when zen closes
+            ref = self.image_label._original_pixmap
+            if ref and not ref.isNull() and pixmap.width() < ref.width():
+                # Scrub frame (downscaled) — scale up to full-res size so the zen
+                # overlay's 1:1 layout sees a consistently-sized pixmap.
+                pixmap = pixmap.scaled(ref.width(), ref.height(),
+                                       Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            else:
+                self.image_label._original_pixmap = pixmap  # full-res — update reference
             self.zen_overlay.update_preview(pixmap)
         else:
             self.image_label.set_image(img_array)
