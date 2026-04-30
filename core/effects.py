@@ -11,10 +11,11 @@ import cv2
 import time
 
 from .kernels import (
-    HAS_NUMBA,
-    _trilinear_lut_numba,
-    _screen_blend_numba,
-    _unsharp_mask_numba,
+    apply_lut_gpu,
+    apply_lut_cpu,
+    screen_blend,
+    unsharp_mask,
+    gaussian_blur,
 )
 from .config import (
     _timing_print,
@@ -29,67 +30,27 @@ from .config import (
 
 def apply_lut_fast(image, lut):
     """
-    Fast 3D LUT application using Numba JIT or optimized numpy fallback.
+    Fast 3D LUT application — GPU tetrahedral or CPU trilinear fallback.
     """
     total_start = time.time()
 
-    _timing_print(f"    [LUT DEBUG] Using LUT size: {lut.table.shape}")
-
     if image.dtype != np.float32:
-        image = np.float32(image)
+        image = image.astype(np.float32)
     if not image.flags['C_CONTIGUOUS']:
         image = np.ascontiguousarray(image)
 
-    lut_table = np.ascontiguousarray(lut.table.astype(np.float32))
-    lut_size = lut_table.shape[0]
-
-    if HAS_NUMBA:
-        result = _trilinear_lut_numba(image, lut_table, lut_size)
-        method = "Numba JIT"
+    result = apply_lut_gpu(image)
+    if result is not None:
+        method = "GPU tetrahedral"
     else:
-        result = _apply_lut_numpy_vectorized(image, lut_table, lut_size)
-        method = "Numpy vectorized"
+        lut_table = np.ascontiguousarray(lut.table.astype(np.float32))
+        result = apply_lut_cpu(image, lut_table)
+        method = "CPU trilinear"
 
-    total_time = time.time() - total_start
-    _timing_print(f"    [LUT] {method}: {total_time*1000:.2f} ms")
-
+    _timing_print(f"    [LUT] {method}: {(time.time()-total_start)*1000:.2f} ms")
     return result
 
 
-def _apply_lut_numpy_vectorized(image, lut_table, lut_size):
-    """
-    Optimized numpy fallback when Numba is unavailable.
-    """
-    img_scaled = np.clip(image, 0, 1) * (lut_size - 1)
-    indices = img_scaled.astype(np.int32)
-    fractions = img_scaled - indices
-    np.clip(indices, 0, lut_size - 2, out=indices)
-
-    r_idx = indices[:, :, 0]
-    g_idx = indices[:, :, 1]
-    b_idx = indices[:, :, 2]
-    r_frac = fractions[:, :, 0, np.newaxis]
-    g_frac = fractions[:, :, 1, np.newaxis]
-    b_frac = fractions[:, :, 2, np.newaxis]
-
-    c000 = lut_table[r_idx, g_idx, b_idx]
-    c001 = lut_table[r_idx, g_idx, b_idx + 1]
-    c010 = lut_table[r_idx, g_idx + 1, b_idx]
-    c011 = lut_table[r_idx, g_idx + 1, b_idx + 1]
-    c100 = lut_table[r_idx + 1, g_idx, b_idx]
-    c101 = lut_table[r_idx + 1, g_idx, b_idx + 1]
-    c110 = lut_table[r_idx + 1, g_idx + 1, b_idx]
-    c111 = lut_table[r_idx + 1, g_idx + 1, b_idx + 1]
-
-    c00 = c000 + (c001 - c000) * b_frac
-    c01 = c010 + (c011 - c010) * b_frac
-    c10 = c100 + (c101 - c100) * b_frac
-    c11 = c110 + (c111 - c110) * b_frac
-
-    c0 = c00 + (c01 - c00) * g_frac
-    c1 = c10 + (c11 - c10) * g_frac
-
-    return c0 + (c1 - c0) * r_frac
 
 # =============================================================================
 # EFFECT FUNCTIONS
@@ -147,7 +108,7 @@ def apply_chromatic_aberration(image, strength=CHROMATIC_ABERRATION_STRENGTH, st
     final_result = zoom_acc / steps
 
     if blue_blur > 0:
-        final_result[:, :, 2] = cv2.GaussianBlur(final_result[:, :, 2], (0, 0), sigmaX=blue_blur, sigmaY=blue_blur)
+        final_result[:, :, 2] = gaussian_blur(final_result[:, :, 2], blue_blur)
 
     total_time = time.time() - start_total
     _timing_print(f"    [Chromatic Aberration] Total: {total_time*1000:.2f}ms (linear Rec.2020)")
@@ -168,8 +129,8 @@ def reduce_color_noise_chroma(image, sigma=0.7):
     cb = b - luma
     cr = r - luma
 
-    cb_blur = cv2.GaussianBlur(cb, (0, 0), sigmaX=sigma, sigmaY=sigma)
-    cr_blur = cv2.GaussianBlur(cr, (0, 0), sigmaX=sigma, sigmaY=sigma)
+    cb_blur = gaussian_blur(cb, sigma)
+    cr_blur = gaussian_blur(cr, sigma)
 
     r_out = cr_blur + luma
     g_out = luma - (kr / kg) * cr_blur - (kb / kg) * cb_blur
@@ -181,13 +142,13 @@ def reduce_color_noise_chroma(image, sigma=0.7):
 def _halation_glow(img_f, gray, threshold, blur_radius, k=20.0):
     """Compute one halation glow layer for a given threshold and radius."""
     mask = 1.0 / (1.0 + np.exp(-k * (gray - threshold)))
-    mask = cv2.GaussianBlur(mask, (0, 0), sigmaX=2.0, sigmaY=2.0)
+    mask = gaussian_blur(mask, 2.0)
     mask_3d = np.stack([mask, mask, mask], axis=2)
     highlights = img_f * mask_3d
     glow = np.zeros_like(highlights)
-    glow[:, :, 0] = cv2.GaussianBlur(highlights[:, :, 0] * 1.0, (0, 0), sigmaX=blur_radius)
-    glow[:, :, 1] = cv2.GaussianBlur(highlights[:, :, 1] * 0.2, (0, 0), sigmaX=blur_radius)
-    glow[:, :, 2] = cv2.GaussianBlur(highlights[:, :, 2] * 0.0, (0, 0), sigmaX=blur_radius)
+    glow[:, :, 0] = gaussian_blur(highlights[:, :, 0], blur_radius)
+    glow[:, :, 1] = gaussian_blur(highlights[:, :, 1] * 0.2, blur_radius)
+    # blue channel is always multiplied by 0.0, skip the blur entirely
     return glow
 
 
@@ -212,10 +173,7 @@ def apply_halation(img, threshold=HALATION_THRESHOLD, blur_radius=HALATION_BLUR_
 
     glow_combined = (glow1 + glow2 * 0.6) * strength
 
-    if HAS_NUMBA:
-        result = _screen_blend_numba(img_f, glow_combined)
-    else:
-        result = 1.0 - (1.0 - img_f) * (1.0 - glow_combined)
+    result = screen_blend(img_f, glow_combined)
 
     total_time = time.time() - start_total
     _timing_print(f"    [Halation] Total: {total_time*1000:.2f}ms")
@@ -225,17 +183,13 @@ def apply_halation(img, threshold=HALATION_THRESHOLD, blur_radius=HALATION_BLUR_
 
 def apply_softness(image, sigma=SOFTNESS_SIGMA):
     """Subtle Gaussian blur for film-like softness."""
-    return cv2.GaussianBlur(image, (0, 0), sigmaX=sigma, sigmaY=sigma)
+    return gaussian_blur(image, sigma)
 
 
 def apply_sharpen(image, strength=SHARPEN_STRENGTH, radius=SHARPEN_RADIUS):
     """Unsharp mask sharpening."""
-    blurred = cv2.GaussianBlur(image, (0, 0), sigmaX=radius, sigmaY=radius)
-
-    if HAS_NUMBA:
-        return _unsharp_mask_numba(image, blurred, strength)
-    else:
-        return image + (image - blurred) * strength
+    blurred = gaussian_blur(image, radius)
+    return unsharp_mask(image, blurred, strength)
 
 
 def apply_vignette(image, strength=0.5, color_shift=0.05, feather=1.0):
@@ -283,10 +237,7 @@ def apply_bloom(image, strength=0.3, threshold=0.6, linear=False):
     bh, bw = max(4, h // scale), max(4, w // scale)
     small = cv2.resize(bloom_src, (bw, bh), interpolation=cv2.INTER_AREA)
     sigma = max(2, bw // 5)
-    ksize = sigma * 6 + 1
-    if ksize % 2 == 0:
-        ksize += 1
-    blurred = cv2.GaussianBlur(small, (ksize, ksize), sigma)
+    blurred = gaussian_blur(small, sigma)
     bloom_layer = cv2.resize(blurred, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
     if linear:
         result = image + bloom_layer * strength
@@ -304,5 +255,5 @@ def add_blue_noise_dither(image, strength=DITHER_STRENGTH):
     """
     h, w = image.shape[:2]
     noise = np.random.normal(0, strength, (h, w, 3)).astype(np.float32)
-    noise = cv2.GaussianBlur(noise, (0, 0), sigmaX=0.5)
+    noise = gaussian_blur(noise, 0.5)
     return np.clip(image + noise, 0, 1)

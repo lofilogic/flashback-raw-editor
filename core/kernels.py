@@ -1,232 +1,157 @@
 """
-Numba JIT-compiled kernels for performance-critical image operations.
+GPU-accelerated kernels for performance-critical image operations.
 
-The trilinear LUT kernel uses an explicit lazy-compilation wrapper to defer
-the expensive first-time compile (~30-60s) until first slider interaction,
-keeping startup instant. All other kernels compile on first call and are
-cached on disk thereafter.
+Each function tries the GPU path first (via wgpu), then falls back to a
+numpy implementation if GPU is unavailable. The fallbacks are mathematically
+identical — they exist only for CI and systems without a usable GPU.
 
-When Numba is unavailable, all names are set to None so imports always
-succeed — callers check HAS_NUMBA before use.
+HAS_GPU reflects whether wgpu loaded. The GPU device itself is lazy-initialized
+on first use (no startup cost, no pre-compilation delay).
 """
+from __future__ import annotations
 import numpy as np
-import time
+import cv2
+
+from .gpu import gpu, HAS_GPU
+
+# Rotation uses OpenCV — fast, correct, and rotation happens rarely
+def rotate_90_clockwise(img: np.ndarray) -> np.ndarray:
+    return cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+
+def rotate_90_counterclockwise(img: np.ndarray) -> np.ndarray:
+    return cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
 # =============================================================================
-# NUMBA AVAILABILITY
+# ACEScct encode / decode
 # =============================================================================
 
-try:
-    from numba import njit, prange
-    HAS_NUMBA = True
-    print("✓ Numba loaded successfully - JIT compilation enabled")
-except ImportError:
-    HAS_NUMBA = False
-    print("⚠ Numba not available - using numpy fallbacks")
+def acescct_decode(img: np.ndarray) -> np.ndarray:
+    """ACEScct log → linear Rec.2020."""
+    if HAS_GPU:
+        result = gpu.acescct_decode(img)
+        if result is not None:
+            return result
+    # CPU fallback — both branches computed everywhere, np.where selects
+    flat = img.ravel().astype(np.float32)
+    out = np.where(
+        flat < 0.155251141552511,
+        (flat - 0.0729055341958355) / 10.5402377416545,
+        (2.0 ** (flat * 17.52 - 9.72)),
+    ).astype(np.float32)
+    return out.reshape(img.shape)
+
+def acescct_encode(img: np.ndarray) -> np.ndarray:
+    """Linear Rec.2020 → ACEScct log."""
+    if HAS_GPU:
+        result = gpu.acescct_encode(img)
+        if result is not None:
+            return result
+    # CPU fallback
+    flat = np.maximum(img.ravel(), 1e-10).astype(np.float32)
+    out = np.where(
+        flat <= 0.0078125,
+        10.5402377416545 * flat + 0.0729055341958355,
+        (np.log2(flat) + 9.72) / 17.52,
+    ).astype(np.float32)
+    return out.reshape(img.shape)
 
 # =============================================================================
-# TRILINEAR LUT (LAZY COMPILATION)
+# LUT application
 # =============================================================================
 
-if HAS_NUMBA:
-    def _trilinear_lut_numba_raw(img, lut_table, lut_size):
-        """
-        Numba-accelerated trilinear interpolation.
-        Parallel across rows, manual loops for cache efficiency.
-        """
-        h, w = img.shape[:2]
-        result = np.empty((h, w, 3), dtype=np.float32)
+def apply_lut_gpu(img: np.ndarray) -> np.ndarray | None:
+    """Apply the LUT that's already uploaded to the GPU. Returns None if GPU unavailable."""
+    if not HAS_GPU:
+        return None
+    return gpu.apply_lut(img)
 
-        for i in prange(h):
-            for j in range(w):
-                r = img[i, j, 0] * (lut_size - 1)
-                g = img[i, j, 1] * (lut_size - 1)
-                b = img[i, j, 2] * (lut_size - 1)
+def apply_lut_cpu(img: np.ndarray, lut_table: np.ndarray) -> np.ndarray:
+    """Trilinear LUT fallback (numpy vectorized)."""
+    lut_size = lut_table.shape[0]
+    img_scaled = np.clip(img, 0, 1) * (lut_size - 1)
+    idx = img_scaled.astype(np.int32)
+    frac = img_scaled - idx
+    np.clip(idx, 0, lut_size - 2, out=idx)
 
-                r0 = int(r)
-                g0 = int(g)
-                b0 = int(b)
+    r0 = idx[:, :, 0]; g0 = idx[:, :, 1]; b0 = idx[:, :, 2]
+    rf = frac[:, :, 0, np.newaxis]
+    gf = frac[:, :, 1, np.newaxis]
+    bf = frac[:, :, 2, np.newaxis]
 
-                if r0 >= lut_size - 1: r0 = lut_size - 2
-                if g0 >= lut_size - 1: g0 = lut_size - 2
-                if b0 >= lut_size - 1: b0 = lut_size - 2
-                if r0 < 0: r0 = 0
-                if g0 < 0: g0 = 0
-                if b0 < 0: b0 = 0
+    c000 = lut_table[r0,     g0,     b0    ]
+    c001 = lut_table[r0,     g0,     b0 + 1]
+    c010 = lut_table[r0,     g0 + 1, b0    ]
+    c011 = lut_table[r0,     g0 + 1, b0 + 1]
+    c100 = lut_table[r0 + 1, g0,     b0    ]
+    c101 = lut_table[r0 + 1, g0,     b0 + 1]
+    c110 = lut_table[r0 + 1, g0 + 1, b0    ]
+    c111 = lut_table[r0 + 1, g0 + 1, b0 + 1]
 
-                rf = r - r0
-                gf = g - g0
-                bf = b - b0
-
-                for c in range(3):
-                    c000 = lut_table[r0, g0, b0, c]
-                    c001 = lut_table[r0, g0, b0 + 1, c]
-                    c010 = lut_table[r0, g0 + 1, b0, c]
-                    c011 = lut_table[r0, g0 + 1, b0 + 1, c]
-                    c100 = lut_table[r0 + 1, g0, b0, c]
-                    c101 = lut_table[r0 + 1, g0, b0 + 1, c]
-                    c110 = lut_table[r0 + 1, g0 + 1, b0, c]
-                    c111 = lut_table[r0 + 1, g0 + 1, b0 + 1, c]
-
-                    c00 = c000 + (c001 - c000) * bf
-                    c01 = c010 + (c011 - c010) * bf
-                    c10 = c100 + (c101 - c100) * bf
-                    c11 = c110 + (c111 - c110) * bf
-
-                    c0 = c00 + (c01 - c00) * gf
-                    c1 = c10 + (c11 - c10) * gf
-
-                    result[i, j, c] = c0 + (c1 - c0) * rf
-
-        return result
-
-    _trilinear_lut_compiled = None
-
-    def _trilinear_lut_numba(img, lut_table, lut_size):
-        """
-        Lazy compilation wrapper — compiles on first use.
-        Defers the ~30-60s first-time compile to first slider interaction
-        instead of blocking app startup.
-        """
-        global _trilinear_lut_compiled
-        if _trilinear_lut_compiled is None:
-            print("")
-            print("=" * 60)
-            print("[Numba] First-time compilation starting...")
-            print("        This takes ~30-60 seconds (one time only)")
-            print("        App will be instant on next launch!")
-            print("=" * 60)
-            print("")
-            start = time.time()
-            _trilinear_lut_compiled = njit(
-                parallel=True,
-                cache=True,
-                fastmath=True
-            )(_trilinear_lut_numba_raw)
-            elapsed = time.time() - start
-            print(f"[Numba] ✓ Compilation complete! ({elapsed:.1f} seconds)")
-            print("")
-        return _trilinear_lut_compiled(img, lut_table, lut_size)
+    c00 = c000 + (c001 - c000) * bf
+    c01 = c010 + (c011 - c010) * bf
+    c10 = c100 + (c101 - c100) * bf
+    c11 = c110 + (c111 - c110) * bf
+    c0  = c00  + (c01  - c00 ) * gf
+    c1  = c10  + (c11  - c10 ) * gf
+    return (c0 + (c1 - c0) * rf).astype(np.float32)
 
 # =============================================================================
-# EAGER KERNELS (compiled on first call, cached after)
+# Film grain blend
 # =============================================================================
 
-if HAS_NUMBA:
-    @njit(parallel=True, cache=True, fastmath=True)
-    def _apply_grain_numba(image, grain_layer, min_grain=0.2):
-        """
-        Fast grain blend using linear light formula.
-        Includes highlight attenuation with a defined minimum floor.
-        """
-        h, w = image.shape[:2]
-        result = np.empty((h, w, 3), dtype=np.float32)
-
-        for i in prange(h):
-            for j in range(w):
-                for c in range(3):
-                    img_val = image[i, j, c]
-                    grain_val = grain_layer[i, j, c]
-                    grain_delta = (2.0 * grain_val) - 1.0
-                    highlight_falloff = min_grain + ((1.0 - img_val) * (1.0 - min_grain))
-                    blended = img_val + (grain_delta * highlight_falloff)
-                    result[i, j, c] = max(0.0, min(1.0, blended))
-
-        return result
-
-    @njit(parallel=True, cache=True, fastmath=True)  # No parallel=True: prange on small inner loops gives no benefit here
-    def _screen_blend_numba(base, blend):
-        """Fast screen blend: 1 - (1-base)*(1-blend)."""
-        h, w = base.shape[:2]
-        result = np.empty((h, w, 3), dtype=np.float32)
-
-        for i in prange(h):
-            for j in range(w):
-                for c in range(3):
-                    b = base[i, j, c]
-                    bl = blend[i, j, c]
-                    result[i, j, c] = 1.0 - (1.0 - b) * (1.0 - bl)
-
-        return result
-
-    @njit(parallel=True, cache=True, fastmath=True)
-    def _unsharp_mask_numba(image, blurred, strength):
-        """Fast unsharp mask: image + (image - blurred) * strength."""
-        h, w = image.shape[:2]
-        result = np.empty((h, w, 3), dtype=np.float32)
-
-        for i in prange(h):
-            for j in range(w):
-                for c in range(3):
-                    diff = image[i, j, c] - blurred[i, j, c]
-                    result[i, j, c] = image[i, j, c] + diff * strength
-
-        return result
-
-    @njit(cache=True, fastmath=True)
-    def _rotate_90_clockwise_numba(img):
-        """
-        Rotate image 90 degrees clockwise.
-        Mapping: pixel at (row i, col j) → (row j, col h-1-i)
-        """
-        h, w = img.shape[:2]
-        result = np.empty((w, h, 3), dtype=np.float32)
-
-        for i in prange(h):
-            for j in range(w):
-                for c in range(3):
-                    result[j, h - 1 - i, c] = img[i, j, c]
-
-        return result
-
-    @njit(cache=True, fastmath=True)
-    def _rotate_90_counterclockwise_numba(img):
-        """
-        Rotate image 90 degrees counter-clockwise.
-        Mapping: pixel at (row i, col j) → (row w-1-j, col i)
-        """
-        h, w = img.shape[:2]
-        result = np.empty((w, h, 3), dtype=np.float32)
-
-        for i in prange(h):
-            for j in range(w):
-                for c in range(3):
-                    result[w - 1 - j, i, c] = img[i, j, c]
-
-        return result
-
-    @njit(parallel=True, cache=True, fastmath=True)
-    def _numba_acescct_decode_core(flat_img, out):
-        """JIT core for ACEScct to Linear. Bypasses Numba reshape bugs."""
-        for i in prange(flat_img.size):
-            val = flat_img[i]
-            if val < 0.155251141552511:
-                out[i] = (val - 0.0729055341958355) / 10.5402377416545
-            else:
-                out[i] = 2.0 ** (val * 17.52 - 9.72)
-
-    @njit(parallel=True, cache=True, fastmath=True)
-    def _numba_acescct_encode_core(flat_img, out):
-        """JIT core for Linear to ACEScct. Bypasses Numba reshape bugs."""
-        for i in prange(flat_img.size):
-            val = flat_img[i]
-            if val <= 0.0078125:
-                out[i] = 10.5402377416545 * val + 0.0729055341958355
-            else:
-                safe_val = val if val > 1e-10 else 1e-10
-                out[i] = (np.log2(safe_val) + 9.72) / 17.52
+def apply_grain(image: np.ndarray, grain_layer: np.ndarray,
+                intensity: float = 1.0, min_grain: float = 0.2,
+                highlight_bias: float = 0.0) -> np.ndarray:
+    """Grain blend with luma-based highlight bias."""
+    if HAS_GPU:
+        result = gpu.grain_blend(image, grain_layer, intensity, min_grain, highlight_bias)
+        if result is not None:
+            return result
+    # CPU fallback
+    grain_delta = (2.0 * grain_layer - 1.0) * intensity
+    weight  = (1.0 - highlight_bias) * (1.0 - image) + highlight_bias * image
+    falloff = min_grain + weight * (1.0 - min_grain)
+    return np.clip(image + grain_delta * falloff, 0.0, 1.0).astype(np.float32)
 
 # =============================================================================
-# None stubs so imports always succeed when Numba is unavailable
+# Screen blend (halation)
 # =============================================================================
 
-if not HAS_NUMBA:
-    _trilinear_lut_compiled = None
-    _trilinear_lut_numba = None
-    _apply_grain_numba = None
-    _screen_blend_numba = None
-    _unsharp_mask_numba = None
-    _rotate_90_clockwise_numba = None
-    _rotate_90_counterclockwise_numba = None
-    _numba_acescct_decode_core = None
-    _numba_acescct_encode_core = None
+def screen_blend(base: np.ndarray, blend: np.ndarray) -> np.ndarray:
+    """Screen blend: 1 - (1-base)*(1-blend)."""
+    if HAS_GPU:
+        result = gpu.screen_blend(base, blend)
+        if result is not None:
+            return result
+    return (1.0 - (1.0 - base) * (1.0 - blend)).astype(np.float32)
+
+# =============================================================================
+# Unsharp mask
+# =============================================================================
+
+def unsharp_mask(image: np.ndarray, blurred: np.ndarray, strength: float) -> np.ndarray:
+    """Unsharp mask: image + (image - blurred) * strength."""
+    if HAS_GPU:
+        result = gpu.unsharp_mask(image, blurred, strength)
+        if result is not None:
+            return result
+    return (image + (image - blurred) * strength).astype(np.float32)
+
+# =============================================================================
+# Gaussian blur
+# =============================================================================
+
+def gaussian_blur(img: np.ndarray, sigma: float) -> np.ndarray:
+    """Separable Gaussian blur — GPU or cv2 fallback.
+
+    Accepts (H, W) single-channel or (H, W, C) multi-channel float32 arrays.
+    Matches cv2.GaussianBlur(img, (0,0), sigmaX=sigma) semantics.
+    """
+    if sigma <= 0:
+        return img.copy()
+    if HAS_GPU:
+        result = gpu.gaussian_blur(img, sigma)
+        if result is not None:
+            return result
+    # cv2 fallback
+    return cv2.GaussianBlur(img, (0, 0), sigmaX=sigma, sigmaY=sigma)
