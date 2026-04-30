@@ -1,14 +1,15 @@
 colour-science==0.4.4
-imageio==2.37.2
-llvmlite==0.43.0
-numba==0.60.0
-numpy>=1.22,<2
-opencv-python-headless==4.10.0.84
+ExifRead==3.5.1
+ImageIO==2.37.2
+numpy==2.0.2
+opencv-python==4.13.0.92
 pillow==11.3.0
-pyinstaller==6.18.0
-pyinstaller-hooks-contrib==2026.0
 PySide6==6.10.2
-exifread==3.0.0
+PySide6_Addons==6.10.2
+PySide6_Essentials==6.10.2
 rawpy==0.26.1
 scipy==1.13.1
+wgpu==0.24.0
+pyinstaller==6.18.0
+pyinstaller-hooks-contrib==2026.0
 pyobjc-framework-Cocoa==11.0; sys_platform == "darwin"
