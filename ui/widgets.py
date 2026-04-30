@@ -107,10 +107,14 @@ class RenderWorker(QThread):
     Latest-wins background renderer for interactive slider scrubbing.
 
     Call request(downscale) from the main thread whenever a new render is
-    needed.  If a render is already in flight, the new parameters replace the
-    pending request; the running render finishes and is discarded, then the
-    latest request fires immediately — so the UI never shows a stale result
-    after the user stops scrubbing.
+    needed. If a render is already in flight, the new parameters replace any
+    queued request. The running render is allowed to finish and emit its
+    result (so the user keeps seeing frames during a fast scrub); the next
+    request then fires immediately, eventually converging on the latest state.
+
+    Call invalidate() when the processor's state (intermediate, LUT, settings)
+    changes out from under the worker — image switch, rotate, paste, vibe
+    change. Any in-flight render's result is dropped instead of emitted.
 
     render_done(img_array, was_downscaled) is emitted on the main thread.
     The was_downscaled flag lets the caller decide whether to bump the
