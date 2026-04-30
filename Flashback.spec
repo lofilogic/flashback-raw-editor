@@ -1,55 +1,27 @@
 # -*- mode: python ; coding: utf-8 -*-
 import sys
 import os
-import llvmlite
 from pathlib import Path
 
 block_cipher = None
 
 # Inject version from git tag (set by CI as FLASHBACK_VERSION=v0.1.0-beta7).
-# Strip leading 'v' so CFBundleShortVersionString gets '0.1.0-beta7'.
 _app_version = os.environ.get('FLASHBACK_VERSION', 'dev').lstrip('v')
 print(f"=== Building version: {_app_version} ===")
 with open('_version.py', 'w') as _vf:
     _vf.write(f'__version__ = "{_app_version}"\n')
 
-# Pre-compile Numba cache automatically before bundling.
-import subprocess
-print("=== Pre-compiling Numba cache ===")
-try:
-    subprocess.run([sys.executable, 'precompile_numba.py'], check=True)
-    print("=== Numba cache ready ===\n")
-except subprocess.CalledProcessError as e:
-    print(f"WARNING: Numba precompile failed ({e}). App will JIT-compile on first launch.\n")
-
-# Bundle the pre-compiled Numba cache so new users don't hit the JIT freeze.
-_version_key = f"numba_{llvmlite.__version__}_0"
 import platform as _platform
 _system = _platform.system()
-if _system == 'Darwin':
-    _cache_base = os.path.expanduser('~/Library/Caches/FlashbackOne35')
-elif _system == 'Windows':
-    _cache_base = os.path.join(os.environ.get('LOCALAPPDATA', os.path.expanduser('~')), 'FlashbackOne35', 'Cache')
-else:
-    _cache_base = os.path.expanduser('~/.cache/FlashbackOne35')
-_cache_src = os.path.join(_cache_base, _version_key)
-_have_cache = os.path.isdir(_cache_src)
-if not _have_cache:
-    print(f"WARNING: Numba cache not found at {_cache_src}. App will JIT-compile on first launch.")
-
-# Collect data files
-added_files = [
-    # (source_path, destination_folder_in_app)
-    ('assets', 'assets'),
-]
-if _have_cache:
-    added_files.append((_cache_src, f'_numba_cache/{_version_key}'))
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=added_files,
+    datas=[
+        ('assets', 'assets'),
+        ('core/shaders', 'core/shaders'),
+    ],
     hiddenimports=[
         # App packages
         'core',
@@ -57,6 +29,7 @@ a = Analysis(
         'core.kernels',
         'core.effects',
         'core.processor',
+        'core.gpu',
         'ui',
         'ui.widgets',
         'ui.debug_panel',
@@ -69,19 +42,17 @@ a = Analysis(
         'colour.models',
         'colour.models.rgb_to_rgb',
         'colour.RGB_COLOURSPACES',
-        
-        # Numba JIT compilation
-        'numba',
-        'numba.core.types',
-        'llvmlite',
-        'llvmlite.binding',
-        
+
+        # GPU via wgpu
+        'wgpu',
+        'wgpu.backends.wgpu_native',
+
         # Image processing
         'scipy.ndimage',
         'scipy.interpolate',
         'cv2',
         'cv2.cv2',
-        
+
         # Export libraries (CRITICAL - for JPEG export in builds)
         'PIL',
         'PIL.Image',
@@ -92,16 +63,15 @@ a = Analysis(
         'imageio.plugins',
         'imageio.plugins.pillow',
         'imageio.plugins.pillowmulti',
-        
+
         # NumPy support
         'numpy.core._dtype_ctypes',
-        
+
         # File path handling
         'pathlib',
     ],
     hookspath=[],
     hooksconfig={
-        # Include PIL plugins
         'pil': {
             'include_files': ['PIL'],
         },
@@ -113,6 +83,8 @@ a = Analysis(
         'sklearn',
         'pandas',
         'pytest',
+        'numba',
+        'llvmlite',
         # Qt modules we don't use — saves ~500MB on PySide6 6.x
         'PySide6.QtWebEngine',
         'PySide6.QtWebEngineCore',
@@ -139,17 +111,11 @@ a = Analysis(
         'PySide6.QtSerialPort',
         'PySide6.QtSql',
         'PySide6.QtTest',
-        # 'unittest',  # REMOVED - needed by numpy.testing
-        # 'pydoc',     # REMOVED - might be needed by stdlib
-        # 'email',     # REMOVED - needed by pkg_resources
-        # 'http',      # REMOVED - needed by pkg_resources
-        # 'xml',       # REMOVED - needed by pkg_resources/plistlib
-        # 'xmlrpc',    # REMOVED - needed by pkg_resources
-    ],  # Exclude heavy/unused deps to reduce build size
+    ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
-    noarchive=False, 
+    noarchive=False,
 )
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
@@ -164,14 +130,14 @@ elif _system == 'Windows':
 exe = EXE(
     pyz,
     a.scripts,
-    [],  # Remove binaries/zipfiles/datas from EXE (moved to COLLECT)
-    exclude_binaries=True,  # Important: this makes it onedir mode
+    [],
+    exclude_binaries=True,
     name='Flashback One35',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,  # No terminal window
+    console=False,
     disable_windowed_traceback=False,
     target_arch=None,
     codesign_identity=None,
@@ -179,7 +145,6 @@ exe = EXE(
     icon=_icon,
 )
 
-# COLLECT creates directory with unpacked libraries (faster loading!)
 coll = COLLECT(
     exe,
     a.binaries,
@@ -193,7 +158,7 @@ coll = COLLECT(
 
 if _system == 'Darwin':
     app = BUNDLE(
-        coll,  # Bundle the COLLECT, not exe directly
+        coll,
         name='Flashback One35.app',
         icon='assets/icons/icon.icns',
         bundle_identifier='com.julian.flashback',
