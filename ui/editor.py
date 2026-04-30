@@ -123,15 +123,12 @@ class FullscreenZenOverlay(QWidget):
         logical_w = pix.width() / dpr
         logical_h = pix.height() / dpr
 
-        if logical_w > max_w or logical_h > max_h:
-            final_pix = pix.scaled(
-                int(max_w * dpr), int(max_h * dpr),
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation
-            )
-            final_pix.setDevicePixelRatio(dpr)
-        else:
-            final_pix = pix
+        final_pix = pix.scaled(
+            int(max_w * dpr), int(max_h * dpr),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation
+        )
+        final_pix.setDevicePixelRatio(dpr)
 
         self.image_label.setPixmap(final_pix)
         self.image_label.setFixedSize(int(final_pix.width() / dpr), int(final_pix.height() / dpr))
@@ -406,12 +403,8 @@ class FlashbackEditor(QMainWindow):
         self.slider_exposure.blockSignals(False)
         self.label_exposure.setText("0.0 EV")
         self.processor.user_settings['exposure_ev'] = 0.0
-        img_array = self.processor.render_preview()
-        if img_array is not None:
-            self.display_image(img_array)
-            self.update_current_thumbnail(img_array)
-            self.save_current_settings()
-            self.update_mode_label()
+        self._render_needs_commit = True
+        self._render_worker.request(downscale=False)
 
     def reset_wb_slider(self):
         self.slider_wb.blockSignals(True)
@@ -426,12 +419,8 @@ class FlashbackEditor(QMainWindow):
             self.slider_tint.blockSignals(False)
             self.label_tint.setText("+0")
             self.processor.user_settings['tint'] = 0.0
-        img_array = self.processor.render_preview()
-        if img_array is not None:
-            self.display_image(img_array)
-            self.update_current_thumbnail(img_array)
-            self.save_current_settings()
-            self.update_mode_label()
+        self._render_needs_commit = True
+        self._render_worker.request(downscale=False)
 
     def reset_tint_slider(self):
         self._tint_manual_offset = 0.0
@@ -440,12 +429,8 @@ class FlashbackEditor(QMainWindow):
         self.slider_tint.blockSignals(False)
         self.label_tint.setText("+0")
         self.processor.user_settings['tint'] = 0.0
-        img_array = self.processor.render_preview()
-        if img_array is not None:
-            self.display_image(img_array)
-            self.update_current_thumbnail(img_array)
-            self.save_current_settings()
-            self.update_mode_label()
+        self._render_needs_commit = True
+        self._render_worker.request(downscale=False)
 
     # ===================================================================
     # THEME HELPERS
@@ -1579,7 +1564,7 @@ class FlashbackEditor(QMainWindow):
                     temp_processor.intermediate_acescct = self.image_cache[file_path].copy()
                     temp_processor.current_file = file_path
                     temp_processor.user_settings = settings.copy()
-                    img_display = temp_processor.render_preview()
+                    img_display = temp_processor._render_fast(downscale=True)
                     if img_display is not None:
                         h, w = img_display.shape[:2]
                         scale = 70 / h
