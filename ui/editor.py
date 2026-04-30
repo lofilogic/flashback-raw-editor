@@ -47,6 +47,7 @@ from core import vibe_state
 from .widgets import (
     ThumbnailWorker, ThumbnailWidget, ThumbnailStrip,
     FadeOverlayWidget, LoaderOverlay, ZoomableImageWidget, VibePicker,
+    RenderWorker,
 )
 from .debug_panel import DebugPanel
 from .scrub_slider import ScrubSlider
@@ -280,6 +281,11 @@ class FlashbackEditor(QMainWindow):
         if not os.path.exists(lut_path):
             lut_path = None
         self.processor = FlashbackProcessor(lut_path)
+
+        self._render_worker = RenderWorker(self.processor)
+        self._render_worker.render_done.connect(self._on_render_done)
+        self._render_worker.start()
+        self._render_needs_commit = False  # True after slider release
 
         self.init_ui()
 
@@ -1760,6 +1766,19 @@ class FlashbackEditor(QMainWindow):
             self._tint_manual_offset = settings['tint'] - self._coupled_tint(settings['wb_temp'])
 
     # ===================================================================
+    # RENDER WORKER CALLBACK
+    # ===================================================================
+
+    def _on_render_done(self, img_array, was_downscaled):
+        """Receive a completed render from the background RenderWorker."""
+        self.display_image(img_array)
+        if not was_downscaled and self._render_needs_commit:
+            self._render_needs_commit = False
+            self.update_current_thumbnail(img_array)
+            self.update_mode_label()
+            self.save_current_settings()
+
+    # ===================================================================
     # SLIDER HANDLERS
     # ===================================================================
 
@@ -1767,17 +1786,11 @@ class FlashbackEditor(QMainWindow):
         ev = value / 10.0
         self.label_exposure.setText(f"{ev:.1f} EV")
         self.processor.user_settings['exposure_ev'] = ev
-        img_array = self.processor._render_fast(downscale=True)
-        if img_array is not None:
-            self.display_image(img_array)
+        self._render_worker.request(downscale=True)
 
     def on_exposure_released(self):
-        img_array = self.processor._render_fast()
-        if img_array is not None:
-            self.display_image(img_array)
-            self.update_current_thumbnail(img_array)
-            self.update_mode_label()
-        self.save_current_settings()
+        self._render_needs_commit = True
+        self._render_worker.request(downscale=False)
 
     def _on_wb_link_toggled(self, checked):
         self.save_current_settings()
@@ -1809,18 +1822,11 @@ class FlashbackEditor(QMainWindow):
         if self.chk_wb_link.isChecked():
             self._apply_wb_tint_link(value)
         self.processor.user_settings['wb_temp'] = value
-
-        img_array = self.processor._render_fast(downscale=True)
-        if img_array is not None:
-            self.display_image(img_array)
+        self._render_worker.request(downscale=True)
 
     def on_wb_released(self):
-        img_array = self.processor._render_fast()
-        if img_array is not None:
-            self.display_image(img_array)
-            self.update_current_thumbnail(img_array)
-            self.update_mode_label()
-        self.save_current_settings()
+        self._render_needs_commit = True
+        self._render_worker.request(downscale=False)
 
     def on_tint_slider_moved(self, value):
         tint = value / 5.0
@@ -1828,17 +1834,11 @@ class FlashbackEditor(QMainWindow):
         if self.chk_wb_link.isChecked():
             self._tint_manual_offset = tint - self._coupled_tint(self.slider_wb.value())
         self.processor.user_settings['tint'] = tint
-        img_array = self.processor._render_fast(downscale=True)
-        if img_array is not None:
-            self.display_image(img_array)
+        self._render_worker.request(downscale=True)
 
     def on_tint_released(self):
-        img_array = self.processor._render_fast()
-        if img_array is not None:
-            self.display_image(img_array)
-            self.update_current_thumbnail(img_array)
-            self.update_mode_label()
-        self.save_current_settings()
+        self._render_needs_commit = True
+        self._render_worker.request(downscale=False)
 
     def adjust_exposure(self, delta):
         current = self.slider_exposure.value()
@@ -2166,6 +2166,11 @@ class FlashbackEditor(QMainWindow):
                     print(f"[native_chrome] apply failed: {e}")
 
             QTimer.singleShot(0, _do_apply)
+
+    def closeEvent(self, event):
+        self._render_worker.stop()
+        self._render_worker.wait()
+        super().closeEvent(event)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

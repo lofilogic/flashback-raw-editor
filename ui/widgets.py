@@ -12,6 +12,7 @@ Custom Qt widgets for the Flashback editor.
 import sys
 import os
 import time
+import threading
 import numpy as np
 import cv2
 
@@ -95,6 +96,65 @@ class ThumbnailWorker(QThread):
 
         del processor
         self.finished.emit()
+
+
+# =============================================================================
+# RENDER WORKER
+# =============================================================================
+
+class RenderWorker(QThread):
+    """
+    Latest-wins background renderer for interactive slider scrubbing.
+
+    Call request(downscale) from the main thread whenever a new render is
+    needed.  If a render is already in flight, the new parameters replace the
+    pending request; the running render finishes and is discarded, then the
+    latest request fires immediately — so the UI never shows a stale result
+    after the user stops scrubbing.
+
+    render_done(img_array, was_downscaled) is emitted on the main thread.
+    The was_downscaled flag lets the caller decide whether to bump the
+    thumbnail / persist settings.
+    """
+
+    render_done = Signal(object, bool)   # img_array, was_downscaled
+
+    def __init__(self, processor):
+        super().__init__()
+        self._processor = processor
+        self._lock = threading.Condition()
+        self._pending = None          # None | bool (downscale flag)
+        self._running = True
+
+    def request(self, downscale: bool):
+        with self._lock:
+            self._pending = downscale
+            self._lock.notify()
+
+    def stop(self):
+        with self._lock:
+            self._running = False
+            self._pending = None
+            self._lock.notify()
+
+    def run(self):
+        while True:
+            with self._lock:
+                while self._pending is None and self._running:
+                    self._lock.wait()
+                if not self._running:
+                    return
+                downscale = self._pending
+                self._pending = None
+
+            img = self._processor._render_fast(downscale=downscale)
+
+            with self._lock:
+                if self._pending is not None:
+                    continue
+
+            if img is not None:
+                self.render_done.emit(img, downscale)
 
 
 # =============================================================================
