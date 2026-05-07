@@ -73,7 +73,7 @@ Get the latest release for your platform from the [Releases](../../releases/late
 2. Browse images in the thumbnail strip at the bottom
 3. Adjust **Exposure**, **White Balance**, and **Tint** with the sliders
 4. Set your export folder and click **Process** to export JPEGs
-5. Alternatively export 16-bit tif-intermediates to quickly reprocess later
+5. Alternatively export 16-bit tif-intermediates or DNGs to quickly reprocess later or edit in external Software
 
 ### Controls
 
