@@ -160,6 +160,9 @@ class DebugConfig:
     # Empty means: fall back to whatever the processor loaded at construction.
     lut_path = ''
 
+    # ProfileName string embedded in exported DNGs (tag 50936).
+    dng_profile_name = 'Flashback Standard'
+
     @classmethod
     def reset(cls):
         """Reset all parameters to module defaults.

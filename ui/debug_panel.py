@@ -5,7 +5,7 @@ Toggle visibility with F12.
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QFrame, QFormLayout, QDoubleSpinBox, QSpinBox, QCheckBox,
-    QGroupBox,
+    QGroupBox, QLineEdit,
 )
 from PySide6.QtCore import Qt
 
@@ -278,6 +278,26 @@ class DebugPanel(QWidget):
 
         form_layout.addWidget(live_group)
 
+        # --- DNG Export Group ---
+        dng_group = QGroupBox("DNG Export")
+        dng_group.setStyleSheet("QGroupBox { color: #d0d0d0; font-weight: bold; border: 1px solid #555; border-radius: 6px; margin-top: 8px; padding-top: 8px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }")
+        dng_layout = QHBoxLayout(dng_group)
+        dng_layout.setSpacing(6)
+
+        dng_layout.addWidget(QLabel("Profile Name:"))
+        self.dng_profile_edit = QLineEdit()
+        self.dng_profile_edit.setPlaceholderText("Flashback Standard")
+        self.dng_profile_edit.setText(DebugConfig.dng_profile_name)
+        self.dng_profile_edit.setStyleSheet("QLineEdit { background-color: #3d3d3d; color: #d0d0d0; border: 1px solid #555; border-radius: 4px; padding: 4px; }")
+        dng_layout.addWidget(self.dng_profile_edit, 1)
+
+        btn_set_profile = QPushButton("Set")
+        btn_set_profile.setStyleSheet(btn_style)
+        btn_set_profile.clicked.connect(self._on_set_dng_profile)
+        dng_layout.addWidget(btn_set_profile)
+
+        form_layout.addWidget(dng_group)
+
         form_layout.addStretch()
 
         scroll.setWidget(container)
@@ -428,6 +448,13 @@ class DebugPanel(QWidget):
         modified = any(live.get(k) != baseline.get(k) for k, _ in VIBE_FIELDS)
         suffix = "  •  modified" if modified else ""
         self.vibe_header_label.setText(f"Vibe defaults — {vibe_id}{suffix}")
+
+    def _on_set_dng_profile(self):
+        name = self.dng_profile_edit.text().strip() or 'Flashback Standard'
+        self.dng_profile_edit.setText(name)
+        if self.parent_editor:
+            self.parent_editor.set_dng_profile_name(name)
+        self.status_label.setText(f"DNG profile name set to '{name}'.")
 
     def _on_save_vibe(self):
         if self.parent_editor:

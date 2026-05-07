@@ -262,6 +262,10 @@ class FlashbackEditor(QMainWindow):
         self.app_settings = QSettings("Flashback", "Editor")
         self.pending_file_path = None
 
+        # Restore persisted DNG profile name
+        from core.config import DebugConfig as _DC
+        _DC.dng_profile_name = self.app_settings.value("dng_profile_name", "Flashback Standard")
+
         # Theme: load persisted choice (default: light) and register listener
         # so every setStyleSheet()/icon registered below can be re-applied.
         saved_theme = self.app_settings.value("theme", "light")
@@ -503,6 +507,11 @@ class FlashbackEditor(QMainWindow):
                 native_chrome.apply(self, theme.current_theme())
             except Exception:
                 pass
+
+    def set_dng_profile_name(self, name: str):
+        from core.config import DebugConfig
+        DebugConfig.dng_profile_name = name
+        self.app_settings.setValue("dng_profile_name", name)
 
     def toggle_theme(self):
         new_name = theme.toggle_theme()   # listeners fire → _apply_theme()
@@ -2117,6 +2126,7 @@ class FlashbackEditor(QMainWindow):
 
                 if self.export_mode == 'dng':
                     from core.dng_export import export_dng
+                    from core.config import DebugConfig
                     thumb = None
                     strip_pixmap = None
                     if 0 <= idx < len(self.thumbnail_strip.thumbnails):
@@ -2138,7 +2148,7 @@ class FlashbackEditor(QMainWindow):
                         tw = 512
                         th = max(1, int(thumb.shape[0] * tw / thumb.shape[1]))
                         thumb = cv2.resize(thumb, (tw, th), interpolation=cv2.INTER_LINEAR)
-                    ok = export_dng(file_path, output_path, thumb)
+                    ok = export_dng(file_path, output_path, thumb, DebugConfig.dng_profile_name)
                 elif export_image(self.processor, output_path, as_tiff=(self.export_mode == 'tiff')):
                     ok = True
                 else:
