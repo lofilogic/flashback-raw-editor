@@ -14,7 +14,9 @@ jobs:
       matrix:
         include:
           - os: macos-14        # Apple Silicon (M1/M2 runner)
-            artifact: Flashback-macOS
+            artifact: Flashback-macOS-AppleSilicon
+          - os: macos-13        # Intel x86_64 runner
+            artifact: Flashback-macOS-Intel
           - os: windows-latest
             artifact: Flashback-Windows
           - os: ubuntu-22.04
@@ -76,15 +78,15 @@ jobs:
             --icon "Flashback One35.app" 150 185 \
             --app-drop-link 450 185 \
             --no-internet-enable \
-            "Flashback-macOS.dmg" \
+            "${{ matrix.artifact }}.dmg" \
             "dist/Flashback One35.app"
 
       - name: Upload artifact (macOS)
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
-          name: Flashback-macOS
-          path: Flashback-macOS.dmg
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.dmg
           retention-days: 14
 
       # ── Windows: Inno Setup installer ───────────────────────────
@@ -165,6 +167,14 @@ jobs:
             artifacts/**/*.dmg
             artifacts/**/*.exe
             artifacts/**/*.AppImage
+          body: |
+            ### Downloads
+            | Platform | File |
+            |---|---|
+            | macOS — Apple Silicon (M1/M2/M3/M4) | `Flashback-macOS-AppleSilicon.dmg` |
+            | macOS — Intel (x86_64) | `Flashback-macOS-Intel.dmg` |
+            | Windows | `Flashback-Windows-Setup.exe` |
+            | Linux | `Flashback-Linux.AppImage` |
           generate_release_notes: true
           draft: false
           # Tags containing -beta or -rc are automatically marked as pre-release

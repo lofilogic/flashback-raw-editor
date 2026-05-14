@@ -37,7 +37,11 @@ from PySide6.QtGui import (
 
 from core import resource_path
 from core.gpu import gpu
-from core.processor import FlashbackProcessor, export_image
+if os.environ.get('FB_PROCESSOR', '').lower() == 'v2':
+    from core.processor_v2 import FlashbackProcessorV2 as FlashbackProcessor, export_image_v2 as export_image
+    print('[FB] using processor_v2')
+else:
+    from core.processor import FlashbackProcessor, export_image
 from core.config import (
     _timing_print, DebugConfig, VIBE_PRESETS,
     factory_state_for, snapshot_debug_config, apply_state_to_debug_config,
@@ -311,6 +315,8 @@ class FlashbackEditor(QMainWindow):
 
         QTimer.singleShot(500, self.detect_camera)
 
+        QApplication.instance().installEventFilter(self)
+
         self.zen_overlay = FullscreenZenOverlay(self)
         self.zen_overlay.closed.connect(self.on_zen_closed)
         self.zen_overlay.navigated.connect(self.on_zen_navigate)
@@ -395,10 +401,36 @@ class FlashbackEditor(QMainWindow):
             QMessageBox.warning(self, "LUT Load Error", f"Failed to parse LUT file:\n{e}")
 
     # ===================================================================
-    # EVENT FILTER (double-click sliders to reset)
+    # EVENT FILTER (arrow key navigation + double-click sliders to reset)
     # ===================================================================
 
     def eventFilter(self, source, event):
+        if event.type() == QEvent.Type.KeyPress:
+            # Always route arrow keys to image navigation/rotation, regardless
+            # of which widget has focus.  Guard against modal dialogs (file
+            # picker, message boxes) and unrelated windows.
+            active = QApplication.activeWindow()
+            if active in (self, getattr(self, 'zen_overlay', None)):
+                key = event.key()
+                if key == Qt.Key_Left:
+                    if self.image_files and self.current_index > 0:
+                        self.current_index -= 1
+                        self.load_current_image()
+                    return True
+                elif key == Qt.Key_Right:
+                    if self.image_files and self.current_index < len(self.image_files) - 1:
+                        self.current_index += 1
+                        self.load_current_image()
+                    return True
+                elif key == Qt.Key_Up:
+                    if self.image_files:
+                        self.rotate_clockwise()
+                    return True
+                elif key == Qt.Key_Down:
+                    if self.image_files:
+                        self.rotate_counterclockwise()
+                    return True
+
         if event.type() == QEvent.Type.MouseButtonDblClick:
             if source == self.slider_exposure:
                 self.reset_exposure_slider()
@@ -652,16 +684,6 @@ class FlashbackEditor(QMainWindow):
 
         self.loader_overlay = LoaderOverlay(self.centralWidget())
         self.settings_clipboard = None
-
-        # Keyboard: ↑ rotates clockwise, ↓ rotates counter-clockwise
-        rotate_cw_sc = QAction(self)
-        rotate_cw_sc.setShortcut(QKeySequence(Qt.Key_Up))
-        rotate_cw_sc.triggered.connect(self.rotate_clockwise)
-        self.addAction(rotate_cw_sc)
-        rotate_ccw_sc = QAction(self)
-        rotate_ccw_sc.setShortcut(QKeySequence(Qt.Key_Down))
-        rotate_ccw_sc.triggered.connect(self.rotate_counterclockwise)
-        self.addAction(rotate_ccw_sc)
 
         # ⌘R resets all sliders
         reset_sc = QAction(self)
@@ -1402,6 +1424,21 @@ class FlashbackEditor(QMainWindow):
     # Volume labels that identify a Flashback camera
     CAMERA_VOLUME_NAMES = {'ONE35 V2', 'ONE35'}
 
+    @staticmethod
+    def _get_volume_name(path: Path) -> str:
+        """Return the volume label for a mount point (cross-platform)."""
+        if sys.platform == 'win32':
+            import ctypes
+            buf = ctypes.create_unicode_buffer(1024)
+            try:
+                ctypes.windll.kernel32.GetVolumeInformationW(
+                    str(path), buf, len(buf), None, None, None, None, 0
+                )
+                return buf.value
+            except Exception:
+                return ''
+        return path.name
+
     def detect_camera(self):
         """Auto-detect Flashback camera by volume name (cross-platform)."""
         mount_points = []
@@ -1424,13 +1461,14 @@ class FlashbackEditor(QMainWindow):
         for mount in mount_points:
             if not mount.is_dir():
                 continue
-            if mount.name not in self.CAMERA_VOLUME_NAMES:
+            vol_name = self._get_volume_name(mount)
+            if vol_name not in self.CAMERA_VOLUME_NAMES:
                 continue
             dng_files = list(mount.glob("*.dng")) + list(mount.glob("*.DNG"))
             if dng_files:
                 reply = QMessageBox.question(
                     self, "Camera Detected",
-                    f"Found {len(dng_files)} DNG files on {mount.name}.\n\nLoad these files?",
+                    f"Found {len(dng_files)} DNG files on {vol_name}.\n\nLoad these files?",
                     QMessageBox.Yes | QMessageBox.No
                 )
                 if reply == QMessageBox.Yes:
@@ -1438,7 +1476,7 @@ class FlashbackEditor(QMainWindow):
             else:
                 QMessageBox.information(
                     self, "Camera Connected",
-                    f"{mount.name} is connected but contains no DNG files."
+                    f"{vol_name} is connected but contains no DNG files."
                 )
             return
 
@@ -1774,7 +1812,10 @@ class FlashbackEditor(QMainWindow):
                 self.image_label._original_pixmap = pixmap  # full-res — update reference
             self.zen_overlay.update_preview(pixmap)
         else:
-            self.image_label.set_image(img_array)
+            if is_scrub:
+                self.image_label.set_scrub_image(img_array)
+            else:
+                self.image_label.set_image(img_array)
 
     def update_sliders_from_processor(self):
         settings = self.processor.user_settings
@@ -2220,16 +2261,6 @@ class FlashbackEditor(QMainWindow):
             self.mode_label.setText("Paste selection cleared")
             self.mode_label.setStyleSheet(f"color: {C['accent']};")
             QTimer.singleShot(1500, self.update_mode_label)
-            event.accept()
-        elif event.key() == Qt.Key_Left:
-            if self.image_files and self.current_index > 0:
-                self.current_index -= 1
-                self.load_current_image()
-            event.accept()
-        elif event.key() == Qt.Key_Right:
-            if self.image_files and self.current_index < len(self.image_files) - 1:
-                self.current_index += 1
-                self.load_current_image()
             event.accept()
         elif event.key() == Qt.Key_F12:
             if self.debug_panel.isVisible():

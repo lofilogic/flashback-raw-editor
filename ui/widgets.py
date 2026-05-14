@@ -30,7 +30,10 @@ from PySide6.QtGui import (
 )
 
 from core import resource_path
-from core.processor import FlashbackProcessor
+if os.environ.get('FB_PROCESSOR', '').lower() == 'v2':
+    from core.processor_v2 import FlashbackProcessorV2 as FlashbackProcessor
+else:
+    from core.processor import FlashbackProcessor
 from core.config import _timing_print
 from ui.theme import C, qcolor, register_theme_listener, ui_font
 
@@ -908,6 +911,27 @@ class ZoomableImageWidget(QScrollArea):
             self.setWidget(self.image_label)
 
         self._update_display()
+
+    def set_scrub_image(self, img_array):
+        """Display a downscaled scrub frame without replacing the full-res reference pixmap.
+
+        When zoomed in, a slider-drag render is downscaled for speed.  Calling
+        set_image() would overwrite _original_pixmap with the small frame, making
+        _zoom_level * new_width < expected size and causing a visible jump.  This
+        method renders the scrub frame at the correct on-screen size instead.
+        """
+        if self._original_pixmap is None or self._fit_to_window:
+            self.set_image(img_array)
+            return
+        img_8bit = (np.clip(img_array, 0, 1) * 255).astype(np.uint8)
+        h, w, c = img_8bit.shape
+        q_image = QImage(img_8bit.data, w, h, c * w, QImage.Format_RGB888)
+        scrub_pix = QPixmap.fromImage(q_image)
+        display_w = int(self._original_pixmap.width() * self._zoom_level)
+        display_h = int(self._original_pixmap.height() * self._zoom_level)
+        scaled = scrub_pix.scaled(display_w, display_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.image_label.setPixmap(scaled)
+        self.image_label.setFixedSize(scaled.size())
 
     def set_pixmap(self, pixmap):
         self._original_pixmap = pixmap
