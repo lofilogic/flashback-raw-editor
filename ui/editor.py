@@ -1464,7 +1464,7 @@ class FlashbackEditor(QMainWindow):
             vol_name = self._get_volume_name(mount)
             if vol_name not in self.CAMERA_VOLUME_NAMES:
                 continue
-            dng_files = list(mount.glob("*.dng")) + list(mount.glob("*.DNG"))
+            dng_files = list(set(mount.glob("*.dng")) | set(mount.glob("*.DNG")))
             if dng_files:
                 reply = QMessageBox.question(
                     self, "Camera Detected",
