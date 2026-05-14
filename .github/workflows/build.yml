@@ -15,8 +15,6 @@ jobs:
         include:
           - os: macos-14        # Apple Silicon (M1/M2 runner)
             artifact: Flashback-macOS-AppleSilicon
-          - os: macos-13        # Intel x86_64 runner
-            artifact: Flashback-macOS-Intel
           - os: windows-latest
             artifact: Flashback-Windows
           - os: ubuntu-22.04
@@ -171,8 +169,7 @@ jobs:
             ### Downloads
             | Platform | File |
             |---|---|
-            | macOS — Apple Silicon (M1/M2/M3/M4) | `Flashback-macOS-AppleSilicon.dmg` |
-            | macOS — Intel (x86_64) | `Flashback-macOS-Intel.dmg` |
+            | macOS (Apple Silicon — M1/M2/M3/M4) | `Flashback-macOS-AppleSilicon.dmg` |
             | Windows | `Flashback-Windows-Setup.exe` |
             | Linux | `Flashback-Linux.AppImage` |
           generate_release_notes: true
