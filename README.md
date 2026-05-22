@@ -16,7 +16,7 @@ Get the latest release for your platform from the [Releases](../../releases/late
 
 | Platform | Download | Status |
 |----------|----------|--------|
-| macOS (Apple Silicon) | [`Flashback-macOS.dmg`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v1.1.2/Flashback-macOS.dmg) | ✓ Tested |
+| macOS (Apple Silicon) | [`Flashback-macOS-AppleSilicon.dmg`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v1.1.2/Flashback-macOS-AppleSilicon.dmg) | ✓ Tested |
 | Windows | [`Flashback-Windows-Setup.exe`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v1.1.2/Flashback-Windows-Setup.exe) | ✓ Tested |
 | Linux x86_64 | [`Flashback-Linux.AppImage`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v1.1.2/Flashback-Linux.AppImage) | ⚠ Untested — feedback welcome |
 
