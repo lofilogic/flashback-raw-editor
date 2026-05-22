@@ -222,11 +222,19 @@ class GPUPipeline:
         )
 
     def _dispatch(self, pipeline, bind_group, n_elements: int, workgroup_size: int = 256):
+        n_wg = (n_elements + workgroup_size - 1) // workgroup_size
+        # WebGPU limits each dispatch dimension to 65535; use 2D for large images.
+        # Shaders reconstruct the linear index as: id.y * (65535 * workgroup_size) + id.x
+        if n_wg <= 65535:
+            nx, ny = n_wg, 1
+        else:
+            nx = 65535
+            ny = (n_wg + nx - 1) // nx
         enc = self._device.create_command_encoder()
         cp = enc.begin_compute_pass()
         cp.set_pipeline(pipeline)
         cp.set_bind_group(0, bind_group)
-        cp.dispatch_workgroups((n_elements + workgroup_size - 1) // workgroup_size)
+        cp.dispatch_workgroups(nx, ny)
         cp.end()
         return enc
 

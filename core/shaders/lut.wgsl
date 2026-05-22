@@ -68,7 +68,7 @@ fn tetrahedral(rgb: vec3f) -> vec3f {
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3u) {
-    let pixel = id.x;
+    let pixel = id.y * 4194240u + id.x; // 65535 * 64 — supports 2D dispatch for large images
     if pixel >= u.width * u.height { return; }
     let base = pixel * 3u;
     let result = tetrahedral(vec3f(img_in[base], img_in[base + 1u], img_in[base + 2u]));

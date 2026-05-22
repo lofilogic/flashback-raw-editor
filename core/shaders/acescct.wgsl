@@ -26,14 +26,14 @@ fn encode(v: f32) -> f32 {
 
 @compute @workgroup_size(256)
 fn main_decode(@builtin(global_invocation_id) id: vec3u) {
-    let i = id.x;
+    let i = id.y * 16776960u + id.x; // 65535 * 256 — supports 2D dispatch for large images
     if i >= arrayLength(&data_in) { return; }
     data_out[i] = decode(data_in[i]);
 }
 
 @compute @workgroup_size(256)
 fn main_encode(@builtin(global_invocation_id) id: vec3u) {
-    let i = id.x;
+    let i = id.y * 16776960u + id.x;
     if i >= arrayLength(&data_in) { return; }
     data_out[i] = encode(data_in[i]);
 }

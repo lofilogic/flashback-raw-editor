@@ -404,7 +404,7 @@ class FlashbackProcessor:
 
             # Render preview
             start = time.time()
-            result = self.render_preview()
+            result = self.render_preview(downscale=fast_mode)
 
             profile['render_preview'] = (time.time() - start) * 1000
             profile['total'] = (time.time() - total_start) * 1000

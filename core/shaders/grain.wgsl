@@ -19,7 +19,7 @@ struct Uniforms {
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) id: vec3u) {
-    let i = id.x;
+    let i = id.y * 16776960u + id.x; // 65535 * 256 — supports 2D dispatch for large images
     if i >= arrayLength(&image) { return; }
     let img_val    = image[i];
     let grain_val  = grain[i];

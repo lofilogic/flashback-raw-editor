@@ -16,7 +16,7 @@ struct UnsharpUniforms {
 // Screen blend: 1 - (1-a)*(1-b)
 @compute @workgroup_size(256)
 fn main_screen(@builtin(global_invocation_id) id: vec3u) {
-    let i = id.x;
+    let i = id.y * 16776960u + id.x; // 65535 * 256 — supports 2D dispatch for large images
     if i >= arrayLength(&a) { return; }
     output[i] = 1.0 - (1.0 - a[i]) * (1.0 - b[i]);
 }
@@ -24,7 +24,7 @@ fn main_screen(@builtin(global_invocation_id) id: vec3u) {
 // Unsharp mask: image + (image - blurred) * strength
 @compute @workgroup_size(256)
 fn main_unsharp(@builtin(global_invocation_id) id: vec3u) {
-    let i = id.x;
+    let i = id.y * 16776960u + id.x;
     if i >= arrayLength(&a) { return; }
     output[i] = a[i] + (a[i] - b[i]) * u.strength;
 }

@@ -25,7 +25,7 @@ struct Uniforms {
 
 @compute @workgroup_size(64)
 fn main_h(@builtin(global_invocation_id) id: vec3u) {
-    let pixel = id.x;
+    let pixel = id.y * 4194240u + id.x; // 65535 * 64 — supports 2D dispatch for large images
     if pixel >= u.width * u.height { return; }
 
     let x    = i32(pixel % u.width);
@@ -46,7 +46,7 @@ fn main_h(@builtin(global_invocation_id) id: vec3u) {
 
 @compute @workgroup_size(64)
 fn main_v(@builtin(global_invocation_id) id: vec3u) {
-    let pixel = id.x;
+    let pixel = id.y * 4194240u + id.x;
     if pixel >= u.width * u.height { return; }
 
     let x    = i32(pixel % u.width);
