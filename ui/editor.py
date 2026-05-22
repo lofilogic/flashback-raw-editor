@@ -219,8 +219,8 @@ class FullscreenZenOverlay(QWidget):
                 self.main_window.paste_settings()
         elif event.key() == Qt.Key_R and (event.modifiers() & Qt.ControlModifier):
             self.main_window.reset_all_sliders()
-        elif event.key() in (Qt.Key_1, Qt.Key_2, Qt.Key_3, Qt.Key_4):
-            vibes = ('disposable', 'point_shoot', 'rangefinder', 'monochrome')
+        elif event.key() in (Qt.Key_1, Qt.Key_2, Qt.Key_3, Qt.Key_4, Qt.Key_5):
+            vibes = ('disposable', 'point_shoot', 'rangefinder', 'monochrome', 'flashback_classic_v1')
             self.main_window.vibe_picker.set_vibe(vibes[event.key() - Qt.Key_1])
 
     def close_zen(self):
@@ -693,7 +693,8 @@ class FlashbackEditor(QMainWindow):
 
         # 1–4 select vibe preset
         for key, vibe_id in (('1', 'disposable'), ('2', 'point_shoot'),
-                             ('3', 'rangefinder'), ('4', 'monochrome')):
+                             ('3', 'rangefinder'), ('4', 'monochrome'),
+                             ('5', 'flashback_classic_v1')):
             sc = QAction(self)
             sc.setShortcut(QKeySequence(key))
             sc.triggered.connect(lambda _=False, v=vibe_id: self.vibe_picker.set_vibe(v))
@@ -988,11 +989,16 @@ class FlashbackEditor(QMainWindow):
         """Re-render every cached thumbnail — used after vibe/global-effect changes."""
         if not self.image_files:
             return
+        # One shared temp processor for the whole batch — avoids reloading grain
+        # tiles and the LUT on every iteration (both happen in __init__).
+        batch_processor = FlashbackProcessor(None)
+        batch_processor.grain_tiles = self.processor.grain_tiles
+        batch_processor.lut = self.processor.lut
         for idx, path in enumerate(self.image_files):
             if idx == self.current_index:
                 continue
             settings = self.image_settings.get(str(path), self._DEFAULT_USER_SETTINGS)
-            self.update_thumbnail_for_settings(idx, settings)
+            self.update_thumbnail_for_settings(idx, settings, _processor=batch_processor)
             if idx % 5 == 0:
                 QApplication.processEvents()
 
@@ -1611,7 +1617,7 @@ class FlashbackEditor(QMainWindow):
     # THUMBNAIL MANAGEMENT
     # ===================================================================
 
-    def update_thumbnail_for_settings(self, index, settings):
+    def update_thumbnail_for_settings(self, index, settings, _processor=None):
         if not self.image_files or index >= len(self.image_files):
             return
 
@@ -1633,8 +1639,9 @@ class FlashbackEditor(QMainWindow):
         else:
             try:
                 if file_path in self.image_cache:
-                    temp_processor = FlashbackProcessor(None)
-                    temp_processor.lut = self.processor.lut
+                    temp_processor = _processor or FlashbackProcessor(None)
+                    if _processor is None:
+                        temp_processor.lut = self.processor.lut
                     temp_processor.intermediate_acescct = self.image_cache[file_path].copy()
                     temp_processor.current_file = file_path
                     temp_processor.user_settings = settings.copy()

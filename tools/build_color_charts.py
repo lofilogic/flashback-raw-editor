@@ -22,6 +22,7 @@ Usage:
 """
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -46,7 +47,9 @@ DIGITAL_EXTS = {'.tif', '.tiff'}
 
 
 def load_film(path: Path) -> np.ndarray:
-    """Load film image as float32 RGB in [0,1] (gamma-encoded sRGB)."""
+    """Load film image as float32 RGB in [0,1]. Pixel values pass through
+    untouched — the encoding is told to downstream metrics via
+    --film-colorspace."""
     img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
     if img is None:
         raise IOError(f"Could not read film image: {path}")
@@ -104,20 +107,61 @@ def load_digital(path: Path, boost_ev: float = 0.0) -> np.ndarray:
     return img
 
 
+def _trailing_number(stem: str):
+    """Return the trailing integer in `stem` as a string, or None."""
+    m = re.search(r'(\d+)$', stem)
+    return m.group(1) if m else None
+
+
 def pair_files(film_dir: Path, digital_dir: Path):
-    """Match film/digital files by filename stem."""
-    film_by_stem = {p.stem: p for p in film_dir.iterdir()
-                    if p.suffix.lower() in FILM_EXTS}
-    digital_by_stem = {p.stem: p for p in digital_dir.iterdir()
-                       if p.suffix.lower() in DIGITAL_EXTS}
+    """Match film/digital files. Prefers exact stem match; if no exact
+    matches are found, falls back to matching by the trailing integer in
+    each stem (so 'film1.tif' pairs with 'digital1.tif', 'film_42.tif'
+    with 'digital_42.tif', etc.)."""
+    film_files = [p for p in film_dir.iterdir()
+                  if p.suffix.lower() in FILM_EXTS]
+    digital_files = [p for p in digital_dir.iterdir()
+                     if p.suffix.lower() in DIGITAL_EXTS]
+    film_by_stem = {p.stem: p for p in film_files}
+    digital_by_stem = {p.stem: p for p in digital_files}
     common = sorted(set(film_by_stem) & set(digital_by_stem))
-    only_film = sorted(set(film_by_stem) - set(digital_by_stem))
-    only_dig = sorted(set(digital_by_stem) - set(film_by_stem))
+
+    if common:
+        only_film = sorted(set(film_by_stem) - set(digital_by_stem))
+        only_dig = sorted(set(digital_by_stem) - set(film_by_stem))
+        if only_film:
+            print(f"  ⚠ No digital match for: {', '.join(only_film)}")
+        if only_dig:
+            print(f"  ⚠ No film match for: {', '.join(only_dig)}")
+        return [(s, film_by_stem[s], digital_by_stem[s]) for s in common]
+
+    # Fallback: trailing-number pairing.
+    film_by_num = {}
+    digital_by_num = {}
+    for p in film_files:
+        n = _trailing_number(p.stem)
+        if n is not None:
+            film_by_num.setdefault(n, p)
+    for p in digital_files:
+        n = _trailing_number(p.stem)
+        if n is not None:
+            digital_by_num.setdefault(n, p)
+    common_nums = sorted(set(film_by_num) & set(digital_by_num),
+                         key=lambda x: int(x))
+    if common_nums:
+        print(f"  ℹ Pairing by trailing number ({len(common_nums)} pairs).")
+    only_film = sorted(set(film_by_num) - set(digital_by_num), key=lambda x: int(x))
+    only_dig = sorted(set(digital_by_num) - set(film_by_num), key=lambda x: int(x))
     if only_film:
-        print(f"  ⚠ No digital match for: {', '.join(only_film)}")
+        print(f"  ⚠ No digital match for film numbers: {', '.join(only_film)}")
     if only_dig:
-        print(f"  ⚠ No film match for: {', '.join(only_dig)}")
-    return [(s, film_by_stem[s], digital_by_stem[s]) for s in common]
+        print(f"  ⚠ No film match for digital numbers: {', '.join(only_dig)}")
+    # Zero-pad the chart key to the width of the largest number so output
+    # files sort correctly in any browser and cross-reference cleanly to
+    # the source filmN/digitalN.
+    width = max((len(n) for n in common_nums), default=1)
+    return [(n.zfill(width), film_by_num[n], digital_by_num[n])
+            for n in common_nums]
 
 
 # ---------------------------------------------------------------------------
@@ -183,10 +227,11 @@ def extract_patch(img: np.ndarray, y: int, x: int, win: int):
     return median.astype(np.float32), std, max_q_dist
 
 
-def hue_diff_deg(rgb_a: np.ndarray, rgb_b: np.ndarray, colorspace: str):
-    """Per-sample (|hue_a - hue_b|, min_chroma) using colorspace-aware Lab."""
-    la = rgb_to_lab(rgb_a, colorspace)
-    lb = rgb_to_lab(rgb_b, colorspace)
+def hue_diff_deg(rgb_a: np.ndarray, rgb_b: np.ndarray,
+                 cs_a: str, cs_b: str):
+    """Per-sample (|hue_a - hue_b|, min_chroma) using per-side Lab."""
+    la = rgb_to_lab(rgb_a, cs_a)
+    lb = rgb_to_lab(rgb_b, cs_b)
     ha = np.degrees(np.arctan2(la[:, 2], la[:, 1]))
     hb = np.degrees(np.arctan2(lb[:, 2], lb[:, 1]))
     diff = np.abs(((ha - hb + 180.0) % 360.0) - 180.0)
@@ -205,7 +250,8 @@ def collect_candidates(film: np.ndarray, digital: np.ndarray,
                        hue_chroma_min: float = 8.0,
                        max_delta_mad: float = 3.0,
                        border_px: int = 0,
-                       colorspace: str = 'srgb',
+                       film_colorspace: str = 'srgb',
+                       digital_colorspace: str = 'acescct_ap1',
                        flatness_metric: str = 'rgb',
                        detect_blur_sigma: float = -1.0):
     """Find patches that are flat in both images, then validate sample-window
@@ -236,8 +282,8 @@ def collect_candidates(film: np.ndarray, digital: np.ndarray,
     else:
         film_d, digital_d = film_b, digital_b
 
-    std_f = flatness_map(film_d, patch_detect, flatness_metric, colorspace)
-    std_d = flatness_map(digital_d, patch_detect, flatness_metric, colorspace)
+    std_f = flatness_map(film_d, patch_detect, flatness_metric, film_colorspace)
+    std_d = flatness_map(digital_d, patch_detect, flatness_metric, digital_colorspace)
 
     h, w = film.shape[:2]
     if border_px > 0:
@@ -297,7 +343,8 @@ def collect_candidates(film: np.ndarray, digital: np.ndarray,
     if out and max_hue_diff_deg < 180.0:
         film_arr = np.stack([o[0] for o in out])
         dig_arr = np.stack([o[1] for o in out])
-        hd, chroma = hue_diff_deg(film_arr, dig_arr, colorspace)
+        hd, chroma = hue_diff_deg(film_arr, dig_arr,
+                                  film_colorspace, digital_colorspace)
         keep = (chroma < hue_chroma_min) | (hd <= max_hue_diff_deg)
         stats['hue_rejected'] = int((~keep).sum())
         out = [o for o, k in zip(out, keep) if k]
@@ -309,7 +356,8 @@ def collect_candidates(film: np.ndarray, digital: np.ndarray,
     if out and len(out) >= 6 and max_delta_mad > 0:
         film_arr = np.stack([o[0] for o in out])
         dig_arr = np.stack([o[1] for o in out])
-        delta_lab = rgb_to_lab(film_arr, colorspace) - rgb_to_lab(dig_arr, colorspace)
+        delta_lab = (rgb_to_lab(film_arr, film_colorspace)
+                     - rgb_to_lab(dig_arr, digital_colorspace))
         center = np.median(delta_lab, axis=0)
         residual = np.linalg.norm(delta_lab - center, axis=1)
         mad = np.median(np.abs(residual - np.median(residual))) + 1e-6
@@ -346,6 +394,13 @@ def rgb_to_lab(rgb01: np.ndarray, colorspace: str) -> np.ndarray:
     elif colorspace == 'acescct_rec2020':
         linear = _acescct_decode(flat)
         cs = colour.RGB_COLOURSPACES['ITU-R BT.2020']
+        xyz = colour.RGB_to_XYZ(linear, cs, apply_cctf_decoding=False)
+        lab = colour.XYZ_to_Lab(xyz, illuminant=cs.whitepoint).astype(np.float32)
+    elif colorspace == 'acescct_ap1':
+        # True ACEScct: log AP1 -> linear AP1 -> XYZ_D60 -> Lab. Matches what
+        # processor_v2's TIFF export writes.
+        linear = _acescct_decode(flat)
+        cs = colour.RGB_COLOURSPACES['ACEScg']
         xyz = colour.RGB_to_XYZ(linear, cs, apply_cctf_decoding=False)
         lab = colour.XYZ_to_Lab(xyz, illuminant=cs.whitepoint).astype(np.float32)
     else:
@@ -474,43 +529,53 @@ def main():
     ap.add_argument('--grid', type=parse_grid, default=(8, 6),
                     help='cols x rows, e.g. 8x6 (default 8x6 → 48 swatches)')
     ap.add_argument('--border-frac', type=float, default=0.12)
-    ap.add_argument('--border-px', type=int, default=0,
+    ap.add_argument('--border-px', type=int, default=100,
                     help='absolute border (in pixels) to ignore on each edge; '
                          'overrides --border-frac when > 0')
     ap.add_argument('--patch-detect', type=int, default=16)
-    ap.add_argument('--patch-sample', type=int, default=48)
+    ap.add_argument('--patch-sample', type=int, default=12)
     ap.add_argument('--blur-sigma', type=float, default=1.5,
                     help='Gaussian blur sigma applied for color extraction')
-    ap.add_argument('--detect-blur-sigma', type=float, default=-1.0,
+    ap.add_argument('--detect-blur-sigma', type=float, default=5.0,
                     help='separate blur sigma for the flatness DETECTOR; '
                          'higher = more permissive on textured content '
                          '(e.g. fabric, paint). -1 = use --blur-sigma value.')
-    ap.add_argument('--flatness-pct', type=float, default=10.0,
+    ap.add_argument('--flatness-pct', type=float, default=50.0,
                     help='per-image percentile of local std-dev that defines "flat"')
     ap.add_argument('--cell-px', type=int, default=80)
-    ap.add_argument('--film-colorspace',
-                    choices=['srgb', 'rec2020_g24', 'acescct_rec2020'],
-                    default='srgb',
-                    help='encoding of BOTH film and digital TIFFs (used for '
-                         'all perceptual metrics: flatness, hue, delta-MAD, '
-                         'k-means selection). Pixel values themselves are '
-                         'passed through untouched.')
+    cs_choices = ['srgb', 'rec2020_g24', 'acescct_rec2020', 'acescct_ap1']
+    ap.add_argument('--film-colorspace', choices=cs_choices,
+                    default='acescct_ap1',
+                    help='encoding of the FILM images, used for perceptual '
+                         'metrics on the film side. Pixel values themselves '
+                         'are passed through untouched. Default acescct_ap1 '
+                         'matches v2 film export; use srgb for legacy 8-bit '
+                         'JPEG film.')
+    ap.add_argument('--digital-colorspace', choices=cs_choices,
+                    default='acescct_ap1',
+                    help='encoding of the DIGITAL TIFFs, used for perceptual '
+                         'metrics on the digital side. Default acescct_ap1 '
+                         'matches processor_v2 TIFF output. Use '
+                         'acescct_rec2020 for v1 TIFFs.')
     ap.add_argument('--flatness-metric', choices=['rgb', 'chroma'],
-                    default='rgb',
-                    help='"rgb": std-dev on all 3 channels (current default, '
-                         'biases against chromatic content). "chroma": std-dev '
-                         'on (a*, b*) only — keeps regions with consistent hue '
-                         'even if lighting varies (recommended for ACEScct).')
-    ap.add_argument('--exposure-boost-ev', type=float,
-                    default=POST_AE_EXPOSURE_BOOST_EV,
+                    default='chroma',
+                    help='"chroma" (default): std-dev on (a*, b*) only — keeps '
+                         'regions with consistent hue even if lighting varies. '
+                         '"rgb": std-dev on all 3 channels — biases against '
+                         'chromatic content.')
+    ap.add_argument('--exposure-boost-ev', type=float, default=0.0,
                     help='linear-space EV boost applied to digital pixels '
-                         'before sampling. Must match DebugConfig.post_ae_'
-                         'exposure_boost_ev in the app. 0 = disabled.')
+                         'before sampling. Default 0 — leave this at 0 if '
+                         'the digital TIFFs were exported from processor_v2 '
+                         'with enable_post_ae_exposure_boost ON (the boost '
+                         'is already baked in). Set it to '
+                         f'POST_AE_EXPOSURE_BOOST_EV ({POST_AE_EXPOSURE_BOOST_EV}) '
+                         'only if you exported the TIFFs *without* the boost.')
     ap.add_argument('--stride', type=int, default=None,
                     help='spacing between candidate centers (default: patch_sample/2)')
-    ap.add_argument('--sample-flatness-pct', type=float, default=30.0,
+    ap.add_argument('--sample-flatness-pct', type=float, default=70.0,
                     help='per-image percentile of *sample-window* std-dev to '
-                         'keep — second-stage flatness gate (default 30)')
+                         'keep — second-stage flatness gate (default 70)')
     ap.add_argument('--max-quad-disagreement', type=float, default=0.04,
                     help='reject candidate if max distance between its 4 '
                          'quadrant medians exceeds this (default 0.04)')
@@ -526,6 +591,11 @@ def main():
                          'median (catches parallax-swap outliers; default 3)')
     ap.add_argument('--report', action='store_true',
                     help='print per-pair candidate funnel (kept vs rejected)')
+    ap.add_argument('--only', type=str, default='',
+                    help='comma-separated list of pair keys to process '
+                         '(e.g. "5" or "3,7,12"). Matches against either the '
+                         'chart key (zero-padded number) or its int value, so '
+                         '"--only 5" finds pair "05". Empty = all pairs.')
     args = ap.parse_args()
 
     cols, rows = args.grid
@@ -537,7 +607,22 @@ def main():
     if not pairs:
         print("No matching pairs found.")
         sys.exit(1)
-    print(f"Found {len(pairs)} pairs. Grid: {cols}×{rows} = {n} swatches.")
+
+    if args.only.strip():
+        wanted = {t.strip() for t in args.only.split(',') if t.strip()}
+        def _matches(stem):
+            if stem in wanted:
+                return True
+            try:
+                return str(int(stem)) in wanted
+            except ValueError:
+                return False
+        pairs = [p for p in pairs if _matches(p[0])]
+        if not pairs:
+            print(f"No pairs match --only {args.only!r}.")
+            sys.exit(1)
+
+    print(f"Processing {len(pairs)} pair(s). Grid: {cols}×{rows} = {n} swatches.")
 
     for stem, film_path, dig_path in pairs:
         print(f"\n[{stem}]")
@@ -558,7 +643,8 @@ def main():
             hue_chroma_min=args.hue_chroma_min,
             max_delta_mad=args.max_delta_mad,
             border_px=args.border_px,
-            colorspace=args.film_colorspace,
+            film_colorspace=args.film_colorspace,
+            digital_colorspace=args.digital_colorspace,
             flatness_metric=args.flatness_metric,
             detect_blur_sigma=args.detect_blur_sigma,
         )

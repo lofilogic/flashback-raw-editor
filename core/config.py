@@ -34,11 +34,30 @@ BASE_WB_SETTINGS = [0.5, 1.0, 0.61, 1.0]
 BASE_WB_SETTINGS2 = [2.0333, 1.0000, 1.6796, 1.0000]
 BASE_EXPOSURE_OFFSET = 1
 
+# v2 pipeline: constant render-time exposure lift (EV). Applied alongside
+# user exposure_ev and NOT counteracted post-LUT, so it genuinely raises
+# output brightness. Tune to compensate for the gap between the LUT's
+# training input level and the clean camera-metered intermediate.
+# Does not affect the intermediate or TIFF exports.
+BASE_EXPOSURE_OFFSET_V2 = 2.0
+
 # Static linear-space boost applied AFTER reverse-AE and BEFORE ACEScct encode.
 # Must match the value used by tools/build_color_charts.py when sampling the
 # digital chart, otherwise the LUT's input domain at runtime won't match what
 # colormatch saw at training time.
-POST_AE_EXPOSURE_BOOST_EV = 3.5
+POST_AE_EXPOSURE_BOOST_EV = 2.0
+
+# Fraction of the full reverse-AE + boost effect applied at slider zero.
+# 0.0 = camera-metered look (AE fully preserved), 1.0 = old behavior (full
+# reverse-AE + boost visible through the LUT). ~0.3 gives a mild film character
+# while keeping brightness close to the camera-metered original.
+REVERSE_AE_STRENGTH = 0.3
+
+# processor_v2 "Push / Pull" slider extent, in EV (each direction). Pulling
+# left scales the pre-LUT exposure down by 2^pp and counteracts it post-LUT
+# (brightness ~unchanged, film toe more pronounced); pushing right does the
+# opposite. Also drives grain highlight-bias.
+PUSH_PULL_RANGE_EV = 2.0
 
 # Color spaces (initialized once at import time)
 CS_SRGB = colour.RGB_COLOURSPACES['sRGB']
@@ -83,10 +102,11 @@ BLOOM_THRESHOLD = 0.05
 # =============================================================================
 
 VIBE_PRESETS = {
-    'disposable':  {'enable_ca': True,  'ca_strength': 0.010, 'softness': 0.6, 'sharpness': 2.0, 'sharpen_radius': 0.5, 'grain': 1.2, 'vignette': 0.10, 'vignette_feather': 0.4, 'bloom': 0.10, 'lut': 'assets/luts/disposable_full.cube'},
-    'point_shoot': {'enable_ca': True,  'ca_strength': 0.002, 'softness': 0.5, 'sharpness': 0.5, 'sharpen_radius':  1.0, 'grain': 0.8, 'vignette': 0.10, 'vignette_feather': 1.0, 'bloom': 0.10, 'lut': 'assets/luts/pointandshoot.cube'},
-    'rangefinder': {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.2, 'sharpness': 0.8, 'sharpen_radius':  1.0, 'grain': 0.5, 'vignette': 0.05, 'vignette_feather': 1.0, 'bloom': 0.05, 'lut': 'assets/luts/rangefinder.cube'},
-    'monochrome':  {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.2, 'sharpness': 0.8, 'sharpen_radius':  1.0, 'grain': 1.5, 'vignette': 0.20, 'vignette_feather': 1.0, 'bloom': 0.05, 'lut': 'assets/luts/monochrome.cube'},
+    'disposable':           {'enable_ca': True,  'ca_strength': 0.010, 'softness': 0.3, 'sharpness': 2.0, 'sharpen_radius': 0.5, 'grain': 1.2, 'vignette': 0.10, 'vignette_feather': 0.4, 'bloom': 0.10, 'lut': 'assets/luts/disposable_ap1.cube'},
+    'flashback_classic_v1': {'enable_ca': True,  'ca_strength': 0.010, 'softness': 0.5, 'sharpness': 1.0, 'sharpen_radius': 0.5, 'grain': 2.0, 'vignette': 0.10, 'vignette_feather': 0.4, 'bloom': 0.10, 'lut': 'assets/luts/V1.cube', 'base_exposure_offset_v2': 0.0},
+    'point_shoot': {'enable_ca': True,  'ca_strength': 0.002, 'softness': 0.3, 'sharpness': 0.5, 'sharpen_radius':  1.0, 'grain': 0.8, 'vignette': 0.10, 'vignette_feather': 1.0, 'bloom': 0.10, 'lut': 'assets/luts/pointandshoot.cube'},
+    'rangefinder': {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.1, 'sharpness': 0.8, 'sharpen_radius':  1.0, 'grain': 0.5, 'vignette': 0.05, 'vignette_feather': 1.0, 'bloom': 0.05, 'lut': 'assets/luts/rangefinder.cube'},
+    'monochrome':  {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.1, 'sharpness': 0.8, 'sharpen_radius':  1.0, 'grain': 1.5, 'vignette': 0.20, 'vignette_feather': 1.0, 'bloom': 0.05, 'lut': 'assets/luts/monochrome.cube'},
 }
 
 # =============================================================================
@@ -133,6 +153,11 @@ class DebugConfig:
     enable_post_ae_exposure_boost = False
     post_ae_exposure_boost_ev = POST_AE_EXPOSURE_BOOST_EV
 
+    # Fraction of the full (reverse-AE + boost) effect applied at slider zero.
+    # 0.0 = camera-metered look, 1.0 = full LUT-trained character. The post-LUT
+    # reapply always counteracts exactly this fraction, so brightness is preserved.
+    reverse_ae_strength = REVERSE_AE_STRENGTH
+
     # Parameters (initialized from constants above)
     halation_threshold = HALATION_THRESHOLD
     halation_blur_radius = HALATION_BLUR_RADIUS
@@ -145,7 +170,7 @@ class DebugConfig:
     sharpen_strength = SHARPEN_STRENGTH
     sharpen_radius = SHARPEN_RADIUS
     cnr_sigma = CNR_SIGMA
-    enable_highlight_desat = True
+    enable_highlight_desat = False
     highlight_desat_threshold_L = HIGHLIGHT_DESAT_THRESHOLD_L
     highlight_desat_rolloff_L   = HIGHLIGHT_DESAT_ROLLOFF_L
     highlight_desat_sigma       = HIGHLIGHT_DESAT_SIGMA
@@ -155,6 +180,10 @@ class DebugConfig:
     vignette_feather = VIGNETTE_FEATHER
     bloom_strength = BLOOM_STRENGTH
     bloom_threshold = BLOOM_THRESHOLD
+
+    # Render-time EV lift applied to the v2 pipeline on top of user exposure_ev.
+    # Tune per-vibe to compensate for the LUT's training input level.
+    base_exposure_offset_v2 = BASE_EXPOSURE_OFFSET_V2
 
     # Path to the active LUT (relative for bundled, absolute for user-loaded).
     # Empty means: fall back to whatever the processor loaded at construction.
@@ -182,6 +211,7 @@ class DebugConfig:
         cls.reverse_autoexposure_t_ref = 1e-3
         cls.enable_post_ae_exposure_boost = False
         cls.post_ae_exposure_boost_ev = POST_AE_EXPOSURE_BOOST_EV
+        cls.reverse_ae_strength = REVERSE_AE_STRENGTH
 
         cls.halation_threshold = HALATION_THRESHOLD
         cls.halation_blur_radius = HALATION_BLUR_RADIUS
@@ -194,7 +224,7 @@ class DebugConfig:
         cls.sharpen_strength = SHARPEN_STRENGTH
         cls.sharpen_radius = SHARPEN_RADIUS
         cls.cnr_sigma = CNR_SIGMA
-        cls.enable_highlight_desat = True
+        cls.enable_highlight_desat = False
         cls.highlight_desat_threshold_L = HIGHLIGHT_DESAT_THRESHOLD_L
         cls.highlight_desat_rolloff_L   = HIGHLIGHT_DESAT_ROLLOFF_L
         cls.highlight_desat_sigma       = HIGHLIGHT_DESAT_SIGMA
@@ -246,6 +276,7 @@ VIBE_FIELDS = [
     ('bloom_strength', float),
     ('bloom_threshold', float),
     ('lut_path', str),
+    ('base_exposure_offset_v2', float),
 ]
 
 # Captured at import time, before any user code mutates DebugConfig — this is
@@ -271,6 +302,7 @@ def factory_state_for(vibe_id: str) -> dict:
     state['vignette_feather'] = preset.get('vignette_feather', 1.0)
     state['bloom_strength'] = preset['bloom']
     state['lut_path'] = preset['lut']
+    state['base_exposure_offset_v2'] = preset.get('base_exposure_offset_v2', BASE_EXPOSURE_OFFSET_V2)
     return state
 
 

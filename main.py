@@ -1,6 +1,7 @@
 """
 Flashback One35 — entry point.
 """
+import os
 import sys
 import platform
 
@@ -8,7 +9,10 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QSurfaceFormat, QPalette, QColor
 
-from ui.editor import FlashbackEditor
+if os.environ.get('FB_PROCESSOR', '').lower() == 'v2':
+    from ui.editor_v2 import FlashbackEditorV2 as FlashbackEditor
+else:
+    from ui.editor import FlashbackEditor
 from _version import __version__
 
 
