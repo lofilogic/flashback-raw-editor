@@ -30,10 +30,7 @@ from PySide6.QtGui import (
 )
 
 from core import resource_path
-if os.environ.get('FB_PROCESSOR', '').lower() == 'v2':
-    from core.processor_v2 import FlashbackProcessorV2 as FlashbackProcessor
-else:
-    from core.processor import FlashbackProcessor
+from core.processor import FlashbackProcessor
 from core.config import _timing_print
 from ui.theme import C, qcolor, register_theme_listener, ui_font
 

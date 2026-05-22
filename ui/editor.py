@@ -37,11 +37,7 @@ from PySide6.QtGui import (
 
 from core import resource_path
 from core.gpu import gpu
-if os.environ.get('FB_PROCESSOR', '').lower() == 'v2':
-    from core.processor_v2 import FlashbackProcessorV2 as FlashbackProcessor, export_image_v2 as export_image
-    print('[FB] using processor_v2')
-else:
-    from core.processor import FlashbackProcessor, export_image
+from core.processor import FlashbackProcessor, export_image
 from core.config import (
     _timing_print, DebugConfig, VIBE_PRESETS,
     factory_state_for, snapshot_debug_config, apply_state_to_debug_config,
@@ -983,7 +979,7 @@ class FlashbackEditor(QMainWindow):
         if hasattr(self, 'debug_panel'):
             self.debug_panel.status_label.setText(f"Reset {vibe_id} to factory defaults.")
 
-    _DEFAULT_USER_SETTINGS = {'exposure_ev': 0.0, 'wb_temp': 0, 'tint': 0.0}
+    _DEFAULT_USER_SETTINGS = {'exposure_ev': 0.0, 'wb_temp': 0, 'tint': 0.0, 'push_pull_ev': 0.0}
 
     def _refresh_all_thumbnails(self):
         """Re-render every cached thumbnail — used after vibe/global-effect changes."""

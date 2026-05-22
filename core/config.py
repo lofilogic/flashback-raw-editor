@@ -53,7 +53,7 @@ POST_AE_EXPOSURE_BOOST_EV = 2.0
 # while keeping brightness close to the camera-metered original.
 REVERSE_AE_STRENGTH = 0.3
 
-# processor_v2 "Push / Pull" slider extent, in EV (each direction). Pulling
+# "Push / Pull" slider extent, in EV (each direction). Pulling
 # left scales the pre-LUT exposure down by 2^pp and counteracts it post-LUT
 # (brightness ~unchanged, film toe more pronounced); pushing right does the
 # opposite. Also drives grain highlight-bias.

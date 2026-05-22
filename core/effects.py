@@ -116,27 +116,59 @@ def apply_chromatic_aberration(image, strength=CHROMATIC_ABERRATION_STRENGTH, st
     return final_result
 
 
+# ACEScg (AP1, D60) <-> XYZ_D60 matrices for Lab CNR round-trip.
+_ACESCG_TO_XYZ_D60 = np.array([
+    [ 0.6624541811,  0.1340042065,  0.1561876744],
+    [ 0.2722287168,  0.6740817658,  0.0536895174],
+    [-0.0055746495,  0.0040607335,  1.0103391685],
+], dtype=np.float32)
+_XYZ_D60_TO_ACESCG = np.array([
+    [ 1.6410233797, -0.3248032942, -0.2364246952],
+    [-0.6636628587,  1.6153315917,  0.0167563477],
+    [ 0.0117218943, -0.0082844420,  0.9883948585],
+], dtype=np.float32)
+_D60_WHITE_XYZ = np.array([0.95265, 1.0, 1.00883], dtype=np.float32)
+_LAB_DELTA3 = (6.0 / 29.0) ** 3
+_LAB_SLOPE  = (29.0 / 6.0) ** 2 / 3.0
+
+
+def _f_lab(t):
+    return np.where(t > _LAB_DELTA3, np.cbrt(np.maximum(t, 0.0)),
+                    _LAB_SLOPE * t + 4.0 / 29.0)
+
+
+def _f_lab_inv(t):
+    delta = 6.0 / 29.0
+    return np.where(t > delta, t ** 3, (t - 4.0 / 29.0) / _LAB_SLOPE)
+
+
+def _acescg_to_lab(img):
+    h, w = img.shape[:2]
+    xyz = (img.reshape(-1, 3) @ _ACESCG_TO_XYZ_D60.T).reshape(h, w, 3)
+    xyz = np.maximum(xyz, 0.0) / _D60_WHITE_XYZ
+    fx, fy, fz = _f_lab(xyz[:,:,0]), _f_lab(xyz[:,:,1]), _f_lab(xyz[:,:,2])
+    return np.stack([116.0*fy - 16.0, 500.0*(fx - fy), 200.0*(fy - fz)], axis=2)
+
+
+def _lab_to_acescg(lab):
+    L, a, b = lab[:,:,0], lab[:,:,1], lab[:,:,2]
+    fy = (L + 16.0) / 116.0
+    xyz = np.stack([_f_lab_inv(a/500.0 + fy), _f_lab_inv(fy),
+                    _f_lab_inv(fy - b/200.0)], axis=2) * _D60_WHITE_XYZ
+    h, w = lab.shape[:2]
+    return (xyz.reshape(-1, 3) @ _XYZ_D60_TO_ACESCG.T).reshape(h, w, 3)
+
+
 def reduce_color_noise_chroma(image, sigma=0.7):
-    """Blur chroma channels while preserving luma detail."""
-    r, g, b = image[:, :, 0], image[:, :, 1], image[:, :, 2]
+    """Chroma noise reduction in CIE Lab space (linear ACEScg in/out).
 
-    # Rec. 2020 coefficients
-    kr = 0.2627
-    kg = 0.6780
-    kb = 0.0593
-
-    luma = kr * r + kg * g + kb * b
-    cb = b - luma
-    cr = r - luma
-
-    cb_blur = gaussian_blur(cb, sigma)
-    cr_blur = gaussian_blur(cr, sigma)
-
-    r_out = cr_blur + luma
-    g_out = luma - (kr / kg) * cr_blur - (kb / kg) * cb_blur
-    b_out = cb_blur + luma
-
-    return np.stack([r_out, g_out, b_out], axis=2)
+    Blurs a* and b* while leaving L* untouched. Lab's perceptual
+    luma/chroma separation avoids color shift and highlight fringing.
+    """
+    lab = _acescg_to_lab(image)
+    lab[:, :, 1] = gaussian_blur(lab[:, :, 1], sigma)
+    lab[:, :, 2] = gaussian_blur(lab[:, :, 2], sigma)
+    return _lab_to_acescg(lab)
 
 
 def _halation_glow(img_f, gray, threshold, blur_radius, k=20.0):
