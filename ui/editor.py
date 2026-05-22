@@ -233,7 +233,7 @@ class FlashbackEditor(QMainWindow):
 
     SUPPORTED_EXTENSIONS = (
         '.dng', '.raf', '.cr2', '.cr3', '.nef',
-        '.arw', '.orf', '.rw2', '.tif', '.tiff'
+        '.arw', '.orf', '.rw2',
     )
 
     def __init__(self):
@@ -1126,24 +1126,20 @@ class FlashbackEditor(QMainWindow):
 
         v.addWidget(self._section_header("EXPORT"))
 
-        # Format pills (JPEG / TIFF / DNG)
+        # Format pills (JPEG / DNG)
         pills_row = QHBoxLayout()
         pills_row.setSpacing(6)
         self.btn_export_jpeg = QPushButton("JPEG")
-        self.btn_export_tiff = QPushButton("TIFF")
         self.btn_export_dng  = QPushButton("DNG")
-        for b in (self.btn_export_jpeg, self.btn_export_tiff, self.btn_export_dng):
+        for b in (self.btn_export_jpeg, self.btn_export_dng):
             b.setCheckable(True)
             b.setCursor(Qt.PointingHandCursor)
             b.setFixedHeight(28)
         self.btn_export_jpeg.setToolTip("Final film look (JPEG)")
-        self.btn_export_tiff.setToolTip("Intermediate ACEScct log (TIFF for Resolve)")
         self.btn_export_dng.setToolTip("Clean RAW DNG for Camera Raw / Lightroom")
         self.btn_export_jpeg.clicked.connect(lambda: self.set_export_mode('jpeg'))
-        self.btn_export_tiff.clicked.connect(lambda: self.set_export_mode('tiff'))
         self.btn_export_dng.clicked.connect(lambda: self.set_export_mode('dng'))
         pills_row.addWidget(self.btn_export_jpeg, 1)
-        pills_row.addWidget(self.btn_export_tiff, 1)
         pills_row.addWidget(self.btn_export_dng,  1)
         v.addLayout(pills_row)
 
@@ -1287,10 +1283,6 @@ class FlashbackEditor(QMainWindow):
         act_export_jpg.triggered.connect(self.export_as_jpeg)
         file_menu.addAction(act_export_jpg)
 
-        act_export_tif = QAction("Export TIFs", self)
-        act_export_tif.triggered.connect(self.export_as_tiff)
-        file_menu.addAction(act_export_tif)
-
         act_export_dng = QAction("Export DNGs", self)
         act_export_dng.triggered.connect(self.export_as_dng)
         file_menu.addAction(act_export_dng)
@@ -1403,10 +1395,6 @@ class FlashbackEditor(QMainWindow):
 
     def export_as_jpeg(self):
         self.set_export_mode('jpeg')
-        self.process_all_images()
-
-    def export_as_tiff(self):
-        self.set_export_mode('tiff')
         self.process_all_images()
 
     def export_as_dng(self):
@@ -1782,6 +1770,14 @@ class FlashbackEditor(QMainWindow):
             self.update_current_thumbnail(img_array)
             self.update_mode_label()
         else:
+            if Path(file_path).suffix.lower() in ('.tif', '.tiff'):
+                QMessageBox.information(
+                    self, "TIFF Not Supported",
+                    "TIFF intermediates cannot be imported in this version.\n\n"
+                    "Open the original DNG instead, or use Flashback v1.1.1 "
+                    "to continue working with existing TIFF intermediates."
+                )
+                return
             print(f"[Load] Image not in cache, loading from disk...")
             img_array = self.processor.load_image(file_path)
             if img_array is not None:
@@ -1981,7 +1977,7 @@ class FlashbackEditor(QMainWindow):
         """True if an export file exists in output_dir for this source image."""
         try:
             base = Path(file_path).stem
-            for suffix in ("_processed.jpg", "_intermediate.tif", "_clean.dng"):
+            for suffix in ("_processed.jpg", "_clean.dng"):
                 if os.path.exists(os.path.join(self.output_dir, base + suffix)):
                     return True
         except Exception:
@@ -2089,18 +2085,15 @@ class FlashbackEditor(QMainWindow):
             self.label_output.setToolTip(directory)
 
     def set_export_mode(self, mode):
-        """Select JPEG / TIFF / DNG export; sync all three pills."""
-        # Accept legacy bool calls from any saved state
-        if mode is True:
-            mode = 'tiff'
+        """Select JPEG / DNG export; sync pills."""
+        if mode in (True, 'tiff'):  # legacy: redirect old TIFF mode to JPEG
+            mode = 'jpeg'
         elif mode is False:
             mode = 'jpeg'
         self.export_mode = mode
         self.btn_export_jpeg.setChecked(mode == 'jpeg')
-        self.btn_export_tiff.setChecked(mode == 'tiff')
         self.btn_export_dng.setChecked(mode == 'dng')
         self.btn_export_jpeg.setStyleSheet(format_pill_qss(mode == 'jpeg'))
-        self.btn_export_tiff.setStyleSheet(format_pill_qss(mode == 'tiff'))
         self.btn_export_dng.setStyleSheet(format_pill_qss(mode == 'dng'))
         if hasattr(self, "btn_process_all") and hasattr(self, "thumbnail_strip"):
             self.update_process_button_text()
@@ -2120,7 +2113,7 @@ class FlashbackEditor(QMainWindow):
             indices_to_process = list(range(len(self.image_files)))
 
         # Low disk space: inline warning in the status bar, no modal.
-        mb_per_image = {'jpeg': 5, 'tiff': 50, 'dng': 17}.get(self.export_mode, 5)
+        mb_per_image = {'jpeg': 5, 'dng': 17}.get(self.export_mode, 5)
         required_mb = len(indices_to_process) * mb_per_image
         try:
             free_mb = shutil.disk_usage(self.output_dir).free // (1024 * 1024)
@@ -2161,9 +2154,7 @@ class FlashbackEditor(QMainWindow):
                         self.processor.set_settings(self.image_settings[file_path])
 
                 base_name = Path(file_path).stem
-                if self.export_mode == 'tiff':
-                    output_path = os.path.join(self.output_dir, f"{base_name}_intermediate.tif")
-                elif self.export_mode == 'dng':
+                if self.export_mode == 'dng':
                     output_path = os.path.join(self.output_dir, f"{base_name}_clean.dng")
                 else:
                     output_path = os.path.join(self.output_dir, f"{base_name}_processed.jpg")
@@ -2193,7 +2184,7 @@ class FlashbackEditor(QMainWindow):
                         th = max(1, int(thumb.shape[0] * tw / thumb.shape[1]))
                         thumb = cv2.resize(thumb, (tw, th), interpolation=cv2.INTER_LINEAR)
                     ok = export_dng(file_path, output_path, thumb, DebugConfig.dng_profile_name)
-                elif export_image(self.processor, output_path, as_tiff=(self.export_mode == 'tiff')):
+                elif export_image(self.processor, output_path):
                     ok = True
                 else:
                     ok = False

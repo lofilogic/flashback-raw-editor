@@ -39,7 +39,6 @@ from .effects import (
     apply_sharpen,
     apply_vignette,
     apply_bloom,
-    add_blue_noise_dither,
     reduce_color_noise_chroma,
 )
 
@@ -375,6 +374,10 @@ class FlashbackProcessor:
 
         self.current_file = dng_path
 
+        if os.path.splitext(dng_path)[1].lower() in ('.tif', '.tiff'):
+            print("[processor] TIFF import is not supported. Open the original DNG instead.")
+            return None
+
         if not _is_flashback_dng(dng_path):
             print("[processor] Non-Flashback DNG — generic pipeline not yet implemented.")
             return None
@@ -490,9 +493,6 @@ class FlashbackProcessor:
             if cfg.enable_chromatic_aberration and cfg.ca_strength > 0:
                 img_display = apply_chromatic_aberration(
                     img_display, cfg.ca_strength, cfg.ca_steps, cfg.ca_blue_blur)
-            if cfg.enable_pre_lut_dither and cfg.pre_lut_dither_strength > 0:
-                img_display = add_blue_noise_dither(
-                    img_display, cfg.pre_lut_dither_strength)
             if cfg.enable_softness and cfg.softness_sigma > 0:
                 img_display = apply_softness(img_display, cfg.softness_sigma)
             if cfg.enable_grain and cfg.grain_strength > 0:

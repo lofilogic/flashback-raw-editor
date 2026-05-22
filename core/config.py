@@ -87,10 +87,6 @@ GRAIN_HIGHLIGHT_BIAS = 0.3 # 1.0 = grain biased to highlights (matches scanned n
 SHARPEN_STRENGTH = 0.5
 SHARPEN_RADIUS = 1.0
 CNR_SIGMA = 2.0
-HIGHLIGHT_DESAT_THRESHOLD_L = 58.0   # Lab L* at which desaturation begins (0-100)
-HIGHLIGHT_DESAT_ROLLOFF_L   = 10.0   # width of ramp in L* units
-HIGHLIGHT_DESAT_SIGMA       = 10.0    # spatial Gaussian blur on the mask
-DITHER_STRENGTH = 0.005
 VIGNETTE_STRENGTH = 0.5
 VIGNETTE_COLOR_SHIFT = 0.05
 VIGNETTE_FEATHER = 1.0
@@ -138,7 +134,6 @@ class DebugConfig:
     enable_sharpen = True
     enable_cnr = True
     enable_lut = True
-    enable_pre_lut_dither = True
     enable_vignette = True
     enable_bloom = True
     enable_reverse_autoexposure = False
@@ -170,11 +165,6 @@ class DebugConfig:
     sharpen_strength = SHARPEN_STRENGTH
     sharpen_radius = SHARPEN_RADIUS
     cnr_sigma = CNR_SIGMA
-    enable_highlight_desat = False
-    highlight_desat_threshold_L = HIGHLIGHT_DESAT_THRESHOLD_L
-    highlight_desat_rolloff_L   = HIGHLIGHT_DESAT_ROLLOFF_L
-    highlight_desat_sigma       = HIGHLIGHT_DESAT_SIGMA
-    pre_lut_dither_strength = DITHER_STRENGTH
     vignette_strength = VIGNETTE_STRENGTH
     vignette_color_shift = VIGNETTE_COLOR_SHIFT
     vignette_feather = VIGNETTE_FEATHER
@@ -204,7 +194,6 @@ class DebugConfig:
         cls.enable_sharpen = True
         cls.enable_cnr = True
         cls.enable_lut = True
-        cls.enable_pre_lut_dither = True
         cls.enable_vignette = True
         cls.enable_bloom = True
         cls.enable_reverse_autoexposure = False
@@ -224,11 +213,6 @@ class DebugConfig:
         cls.sharpen_strength = SHARPEN_STRENGTH
         cls.sharpen_radius = SHARPEN_RADIUS
         cls.cnr_sigma = CNR_SIGMA
-        cls.enable_highlight_desat = False
-        cls.highlight_desat_threshold_L = HIGHLIGHT_DESAT_THRESHOLD_L
-        cls.highlight_desat_rolloff_L   = HIGHLIGHT_DESAT_ROLLOFF_L
-        cls.highlight_desat_sigma       = HIGHLIGHT_DESAT_SIGMA
-        cls.pre_lut_dither_strength = DITHER_STRENGTH
         cls.vignette_strength = VIGNETTE_STRENGTH
         cls.vignette_color_shift = VIGNETTE_COLOR_SHIFT
         cls.vignette_feather = VIGNETTE_FEATHER
@@ -251,8 +235,6 @@ VIBE_FIELDS = [
     ('enable_sharpen', bool),
     ('enable_cnr', bool),
     ('enable_lut', bool),
-    ('enable_pre_lut_dither', bool),
-    ('enable_highlight_desat', bool),
     ('enable_vignette', bool),
     ('enable_bloom', bool),
     ('halation_threshold', float),
@@ -266,10 +248,6 @@ VIBE_FIELDS = [
     ('sharpen_strength', float),
     ('sharpen_radius', float),
     ('cnr_sigma', float),
-    ('highlight_desat_threshold_L', float),
-    ('highlight_desat_rolloff_L', float),
-    ('highlight_desat_sigma', float),
-    ('pre_lut_dither_strength', float),
     ('vignette_strength', float),
     ('vignette_color_shift', float),
     ('vignette_feather', float),

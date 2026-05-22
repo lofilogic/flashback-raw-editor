@@ -14,9 +14,8 @@ from core.config import (
     HALATION_THRESHOLD, HALATION_BLUR_RADIUS, HALATION_STRENGTH,
     CHROMATIC_ABERRATION_STRENGTH, CHROMATIC_ABERRATION_STEPS,
     SOFTNESS_SIGMA, GRAIN_STRENGTH, SHARPEN_STRENGTH, SHARPEN_RADIUS,
-    CNR_SIGMA, HIGHLIGHT_DESAT_THRESHOLD_L, HIGHLIGHT_DESAT_ROLLOFF_L,
-    HIGHLIGHT_DESAT_SIGMA, DITHER_STRENGTH,
-    VIGNETTE_STRENGTH, VIGNETTE_COLOR_SHIFT, BLOOM_STRENGTH, BLOOM_THRESHOLD,
+    CNR_SIGMA, VIGNETTE_STRENGTH, VIGNETTE_COLOR_SHIFT,
+    BLOOM_STRENGTH, BLOOM_THRESHOLD,
 )
 
 
@@ -136,26 +135,6 @@ class DebugPanel(QWidget):
         self.spin_cnr.valueChanged.connect(self.update_config)
         baked_layout.addRow("CNR Sigma:", self.spin_cnr)
 
-        baked_layout.addRow(self._create_separator())
-
-        # Highlight Desaturation (Lab)
-        self.chk_highlight_desat = QCheckBox("Enable Highlight Desaturation (Lab)")
-        self.chk_highlight_desat.setChecked(True)
-        self.chk_highlight_desat.stateChanged.connect(self.update_config)
-        baked_layout.addRow(self.chk_highlight_desat)
-
-        self.spin_hd_thresh = self._create_double_spin(0.0, 100.0, HIGHLIGHT_DESAT_THRESHOLD_L, 1.0)
-        self.spin_hd_thresh.valueChanged.connect(self.update_config)
-        baked_layout.addRow("HD Threshold L*:", self.spin_hd_thresh)
-
-        self.spin_hd_rolloff = self._create_double_spin(1.0, 50.0, HIGHLIGHT_DESAT_ROLLOFF_L, 1.0)
-        self.spin_hd_rolloff.valueChanged.connect(self.update_config)
-        baked_layout.addRow("HD Rolloff L*:", self.spin_hd_rolloff)
-
-        self.spin_hd_sigma = self._create_double_spin(0.0, 20.0, HIGHLIGHT_DESAT_SIGMA, 0.5)
-        self.spin_hd_sigma.valueChanged.connect(self.update_config)
-        baked_layout.addRow("HD Mask Sigma:", self.spin_hd_sigma)
-
         form_layout.addWidget(baked_group)
 
         # --- Real-time Effects Group ---
@@ -163,16 +142,6 @@ class DebugPanel(QWidget):
         live_group.setStyleSheet("QGroupBox { color: #7aa8d9; font-weight: bold; border: 1px solid #555; border-radius: 6px; margin-top: 8px; padding-top: 8px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }")
         live_layout = QFormLayout(live_group)
         live_layout.setSpacing(8)
-
-        # Pre-LUT Dither
-        self.chk_dither = QCheckBox("Enable Pre-LUT Dither (Anti-Banding)")
-        self.chk_dither.setChecked(True)
-        self.chk_dither.stateChanged.connect(self.update_preview)
-        live_layout.addRow(self.chk_dither)
-
-        self.spin_dither = self._create_double_spin(0.0, 0.01, DITHER_STRENGTH, 0.0005)
-        self.spin_dither.valueChanged.connect(self.update_preview)
-        live_layout.addRow("Dither Strength:", self.spin_dither)
 
         # LUT
         self.chk_lut = QCheckBox("Enable LUT")
@@ -298,6 +267,27 @@ class DebugPanel(QWidget):
 
         form_layout.addWidget(dng_group)
 
+        # --- LUT Profiling Group ---
+        lut_prof_group = QGroupBox("LUT Profiling")
+        lut_prof_group.setStyleSheet("QGroupBox { color: #d0d0d0; font-weight: bold; border: 1px solid #555; border-radius: 6px; margin-top: 8px; padding-top: 8px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }")
+        lut_prof_layout = QVBoxLayout(lut_prof_group)
+        lut_prof_layout.setSpacing(6)
+
+        lut_prof_info = QLabel(
+            "Exports the current image as a 16-bit ACEScct TIFF with full\n"
+            "reverse-AE and exposure boost applied — for use as training\n"
+            "input in DaVinci Resolve LUT creation."
+        )
+        lut_prof_info.setStyleSheet("color: #888; font-size: 11px;")
+        lut_prof_layout.addWidget(lut_prof_info)
+
+        self.btn_export_lut_tiff = QPushButton("Export LUT Profile TIFF…")
+        self.btn_export_lut_tiff.setStyleSheet(btn_style)
+        self.btn_export_lut_tiff.clicked.connect(self._on_export_lut_tiff)
+        lut_prof_layout.addWidget(self.btn_export_lut_tiff)
+
+        form_layout.addWidget(lut_prof_group)
+
         form_layout.addStretch()
 
         scroll.setWidget(container)
@@ -318,8 +308,6 @@ class DebugPanel(QWidget):
             'enable_sharpen': self.chk_sharpen,
             'enable_cnr': self.chk_cnr,
             'enable_lut': self.chk_lut,
-            'enable_pre_lut_dither': self.chk_dither,
-            'enable_highlight_desat': self.chk_highlight_desat,
             'enable_vignette': self.chk_vignette,
             'enable_bloom': self.chk_bloom,
         }
@@ -335,10 +323,6 @@ class DebugPanel(QWidget):
             'sharpen_strength': self.spin_sharpen_str,
             'sharpen_radius': self.spin_sharpen_rad,
             'cnr_sigma': self.spin_cnr,
-            'highlight_desat_threshold_L': self.spin_hd_thresh,
-            'highlight_desat_rolloff_L': self.spin_hd_rolloff,
-            'highlight_desat_sigma': self.spin_hd_sigma,
-            'pre_lut_dither_strength': self.spin_dither,
             'vignette_strength': self.spin_vignette_str,
             'vignette_color_shift': self.spin_vignette_color,
             'vignette_feather': self.spin_vignette_feather,
@@ -392,11 +376,6 @@ class DebugPanel(QWidget):
 
         DebugConfig.cnr_sigma = self.spin_cnr.value()
 
-        DebugConfig.enable_highlight_desat = self.chk_highlight_desat.isChecked()
-        DebugConfig.highlight_desat_threshold_L = self.spin_hd_thresh.value()
-        DebugConfig.highlight_desat_rolloff_L   = self.spin_hd_rolloff.value()
-        DebugConfig.highlight_desat_sigma       = self.spin_hd_sigma.value()
-
         DebugConfig.enable_lut = self.chk_lut.isChecked()
         DebugConfig.enable_softness = self.chk_softness.isChecked()
         DebugConfig.enable_grain = self.chk_grain.isChecked()
@@ -405,8 +384,6 @@ class DebugPanel(QWidget):
         DebugConfig.grain_strength = self.spin_grain.value()
         DebugConfig.sharpen_strength = self.spin_sharpen_str.value()
         DebugConfig.sharpen_radius = self.spin_sharpen_rad.value()
-        DebugConfig.enable_pre_lut_dither = self.chk_dither.isChecked()
-        DebugConfig.pre_lut_dither_strength = self.spin_dither.value()
         DebugConfig.enable_vignette = self.chk_vignette.isChecked()
         DebugConfig.vignette_strength = self.spin_vignette_str.value()
         DebugConfig.vignette_color_shift = self.spin_vignette_color.value()
@@ -455,6 +432,21 @@ class DebugPanel(QWidget):
         if self.parent_editor:
             self.parent_editor.set_dng_profile_name(name)
         self.status_label.setText(f"DNG profile name set to '{name}'.")
+
+    def _on_export_lut_tiff(self):
+        from PySide6.QtWidgets import QFileDialog
+        from core.processor import export_image
+        if not self.processor or self.processor.intermediate_acescg is None:
+            self.status_label.setText("No image loaded.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export LUT Profile TIFF", "", "TIFF (*.tif)")
+        if not path:
+            return
+        ok = export_image(self.processor, path, as_tiff=True, lut_profiling=True)
+        self.status_label.setText(
+            f"Exported: {path}" if ok else "Export failed."
+        )
 
     def _on_save_vibe(self):
         if self.parent_editor:

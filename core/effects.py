@@ -21,7 +21,7 @@ from .config import (
     _timing_print,
     CHROMATIC_ABERRATION_STRENGTH, CHROMATIC_ABERRATION_STEPS,
     HALATION_THRESHOLD, HALATION_BLUR_RADIUS, HALATION_STRENGTH,
-    SOFTNESS_SIGMA, SHARPEN_STRENGTH, SHARPEN_RADIUS, DITHER_STRENGTH,
+    SOFTNESS_SIGMA, SHARPEN_STRENGTH, SHARPEN_RADIUS,
 )
 
 # =============================================================================
@@ -279,7 +279,7 @@ def apply_bloom(image, strength=0.3, threshold=0.6, linear=False):
         return np.clip(result, 0.0, 1.0).astype(np.float32)
 
 
-def add_blue_noise_dither(image, strength=DITHER_STRENGTH):
+def add_blue_noise_dither(image, strength=0.005):
     """
     Add dithering noise to reduce LUT banding artifacts.
     Uses white noise with a slight blur as a blue noise approximation —
