@@ -75,7 +75,7 @@ class ThumbnailWorker(QThread):
             file_path_str = str(self.image_files[i])
 
             try:
-                img_display = processor.load_image(file_path_str, fast_mode=True)
+                img_display = processor.load_image(file_path_str)
 
                 if img_display is not None and self._is_running:
                     intermediate = processor.intermediate_acescct.copy()
@@ -171,6 +171,67 @@ class RenderWorker(QThread):
 
             if img is not None:
                 self.render_done.emit(img, downscale)
+
+
+# =============================================================================
+# VIBE REFRESH WORKER
+# =============================================================================
+
+class VibeRefreshWorker(QThread):
+    """
+    Background worker that re-renders thumbnails after a vibe switch.
+
+    Takes a snapshot of the image cache at construction time (main thread)
+    so the worker never races against cache mutations during initial load.
+    """
+
+    thumbnail_ready = Signal(int, object)  # index, thumb_array
+    finished = Signal()
+
+    def __init__(self, image_files, cache_snapshot, image_settings,
+                 current_index, lut, grain_tiles, default_settings):
+        super().__init__()
+        self.image_files = image_files
+        self.cache_snapshot = cache_snapshot      # {path_str: acescg_array}
+        self.image_settings = image_settings      # {path_str: settings_dict}
+        self.current_index = current_index
+        self.lut = lut
+        self.grain_tiles = grain_tiles
+        self.default_settings = default_settings
+        self._is_running = True
+
+    def run(self):
+        processor = FlashbackProcessor(None)
+        processor.lut = self.lut
+        processor.grain_tiles = self.grain_tiles
+
+        for idx, path in enumerate(self.image_files):
+            if not self._is_running:
+                break
+            if idx == self.current_index:
+                continue
+            file_path = str(path)
+            cached = self.cache_snapshot.get(file_path)
+            if cached is None:
+                continue
+            settings = self.image_settings.get(file_path, self.default_settings)
+            try:
+                processor.intermediate_acescg = cached.copy()
+                processor.current_file = file_path
+                processor.user_settings = settings.copy()
+                img_display = processor._render_fast(downscale=True)
+                if img_display is not None:
+                    h, w = img_display.shape[:2]
+                    new_w = int(w * 70 / h)
+                    thumb = cv2.resize(img_display, (new_w, 70), interpolation=cv2.INTER_LINEAR)
+                    self.thumbnail_ready.emit(idx, thumb)
+            except Exception as e:
+                print(f"  ✗ Vibe refresh thumbnail {idx}: {e}")
+
+        self.finished.emit()
+
+    def stop(self):
+        self._is_running = False
 
 
 # =============================================================================

@@ -47,7 +47,7 @@ from core import vibe_state
 from .widgets import (
     ThumbnailWorker, ThumbnailWidget, ThumbnailStrip,
     FadeOverlayWidget, LoaderOverlay, ZoomableImageWidget, VibePicker,
-    RenderWorker,
+    RenderWorker, VibeRefreshWorker,
 )
 from .debug_panel import DebugPanel
 from .scrub_slider import ScrubSlider
@@ -279,6 +279,7 @@ class FlashbackEditor(QMainWindow):
         self.thumbnails_loading = False
         self.thumbnail_worker = None
         self.add_thumbnail_worker = None
+        self._vibe_refresh_worker = None
         self._thumbnails_dirty = set()
         self._lut_cache: dict = {}
 
@@ -982,21 +983,34 @@ class FlashbackEditor(QMainWindow):
     _DEFAULT_USER_SETTINGS = {'exposure_ev': 0.0, 'wb_temp': 0, 'tint': 0.0, 'push_pull_ev': 0.0}
 
     def _refresh_all_thumbnails(self):
-        """Re-render every cached thumbnail — used after vibe/global-effect changes."""
+        """Re-render every cached thumbnail in the background after a vibe change."""
         if not self.image_files:
             return
-        # One shared temp processor for the whole batch — avoids reloading grain
-        # tiles and the LUT on every iteration (both happen in __init__).
-        batch_processor = FlashbackProcessor(None)
-        batch_processor.grain_tiles = self.processor.grain_tiles
-        batch_processor.lut = self.processor.lut
-        for idx, path in enumerate(self.image_files):
-            if idx == self.current_index:
-                continue
-            settings = self.image_settings.get(str(path), self._DEFAULT_USER_SETTINGS)
-            self.update_thumbnail_for_settings(idx, settings, _processor=batch_processor)
-            if idx % 5 == 0:
-                QApplication.processEvents()
+
+        # Stop any in-flight refresh before starting a new one.
+        if self._vibe_refresh_worker and self._vibe_refresh_worker.isRunning():
+            self._vibe_refresh_worker.stop()
+            self._vibe_refresh_worker.wait()
+
+        # Snapshot cache on the main thread so the worker never touches the live dict.
+        cache_snapshot = {k: v.copy() for k, v in self.image_cache.items()}
+
+        self._vibe_refresh_worker = VibeRefreshWorker(
+            image_files=self.image_files,
+            cache_snapshot=cache_snapshot,
+            image_settings=self.image_settings.copy(),
+            current_index=self.current_index,
+            lut=self.processor.lut,
+            grain_tiles=self.processor.grain_tiles,
+            default_settings=self._DEFAULT_USER_SETTINGS.copy(),
+        )
+        self._vibe_refresh_worker.thumbnail_ready.connect(self._on_vibe_refresh_thumbnail)
+        self._vibe_refresh_worker.start()
+
+    def _on_vibe_refresh_thumbnail(self, index, thumb_array):
+        file_path = str(self.image_files[index])
+        self.thumbnail_cache[file_path] = thumb_array
+        self.thumbnail_strip.update_thumbnail(index, thumb_array)
 
     def _build_tone_section(self) -> QWidget:
         sec = QWidget()
@@ -1401,6 +1415,51 @@ class FlashbackEditor(QMainWindow):
         self.set_export_mode('dng')
         self.process_all_images()
 
+    def export_lut_tiffs(self, output_dir):
+        """Export LUT profile TIFFs for all selected (or all) images."""
+        if not self.image_files:
+            return 0, 0
+
+        selected_indices = self.thumbnail_strip.get_process_selected_indices()
+        indices_to_process = sorted(selected_indices) if selected_indices else list(range(len(self.image_files)))
+        total = len(indices_to_process)
+
+        self.progress_bar.setMaximum(total)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(True)
+        self.btn_process_all.setEnabled(False)
+
+        success_count = 0
+        for i, idx in enumerate(indices_to_process):
+            file_path = str(self.image_files[idx])
+            try:
+                self.progress_bar.setValue(i)
+                self.mode_label.setText(f"Exporting TIFF {i+1}/{total}…")
+                QApplication.processEvents()
+
+                # Always re-load from DNG: needed so _rev_gain_unconditional is
+                # computed from this file's EXIF, not a previously cached image.
+                self.processor.load_image(file_path)
+
+                if file_path in self.image_settings:
+                    self.processor.set_settings(self.image_settings[file_path])
+
+                base_name = Path(file_path).stem
+                output_path = os.path.join(output_dir, f"{base_name}_lut_profile.tif")
+                if export_image(self.processor, output_path, as_tiff=True, lut_profiling=True):
+                    success_count += 1
+            except Exception as e:
+                print(f"Error exporting TIFF for {file_path}: {e}")
+                traceback.print_exc()
+            self.progress_bar.setValue(i + 1)
+            QApplication.processEvents()
+
+        self.progress_bar.setVisible(False)
+        self.btn_process_all.setEnabled(True)
+        self.load_current_image()
+        self.update_mode_label()
+        return success_count, total
+
     def center_window(self):
         frame_geo = self.frameGeometry()
         screen_geo = QApplication.primaryScreen().availableGeometry()
@@ -1488,6 +1547,10 @@ class FlashbackEditor(QMainWindow):
     def load_image_files(self, image_files):
         if not image_files:
             return
+
+        if self._vibe_refresh_worker and self._vibe_refresh_worker.isRunning():
+            self._vibe_refresh_worker.stop()
+            self._vibe_refresh_worker.wait()
 
         self.image_files = image_files
         self.current_index = 0
@@ -1765,10 +1828,11 @@ class FlashbackEditor(QMainWindow):
         if file_path in self.image_cache:
             self.processor.intermediate_acescct = self.image_cache[file_path]
             self.processor.current_file = file_path
-            img_array = self.processor.render_preview()
-            self.display_image(img_array)
+            img_array = self.processor.render_preview(downscale=True)
+            self.display_image(img_array, is_scrub=True)
             self.update_current_thumbnail(img_array)
             self.update_mode_label()
+            self._render_worker.request(downscale=False)
         else:
             if Path(file_path).suffix.lower() in ('.tif', '.tiff'):
                 QMessageBox.information(
@@ -1783,9 +1847,10 @@ class FlashbackEditor(QMainWindow):
             if img_array is not None:
                 self.image_cache[file_path] = self.processor.intermediate_acescct.copy()
                 self.update_current_thumbnail(img_array)
-                self.display_image(img_array)
+                self.display_image(img_array, is_scrub=True)
                 self.save_current_settings()
                 self.update_mode_label()
+                self._render_worker.request(downscale=False)
             else:
                 QMessageBox.critical(self, "Error", f"Failed to load image:\n{file_path}")
 
@@ -1800,13 +1865,22 @@ class FlashbackEditor(QMainWindow):
             h, w, c = img_8bit.shape
             q_image = QImage(img_8bit.data, w, h, c * w, QImage.Format_RGB888)
             pixmap = QPixmap.fromImage(q_image)
-            ref = self.image_label._original_pixmap
-            if is_scrub and ref and not ref.isNull():
-                # Scrub frame (downscaled) — scale up to full-res size so the zen
-                # overlay's 1:1 layout sees a consistently-sized pixmap. Don't
-                # update the reference: the next scrub still needs to scale to it.
-                pixmap = pixmap.scaled(ref.width(), ref.height(),
-                                       Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            if is_scrub:
+                # Scale the scrub frame up to the full render's pixel dimensions so
+                # the zen overlay layout is stable throughout the nav→render lifecycle.
+                # Using processor.intermediate_acescg (not _original_pixmap) as the
+                # target means rotated images and navigated images always match what
+                # the background render will produce — no snap when it arrives.
+                if (self.processor is not None and
+                        self.processor.intermediate_acescg is not None):
+                    full_h, full_w = self.processor.intermediate_acescg.shape[:2]
+                    pixmap = pixmap.scaled(full_w, full_h,
+                                           Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                else:
+                    ref = self.image_label._original_pixmap
+                    if ref and not ref.isNull():
+                        pixmap = pixmap.scaled(ref.width(), ref.height(),
+                                               Qt.KeepAspectRatio, Qt.SmoothTransformation)
             else:
                 self.image_label._original_pixmap = pixmap  # full-res — update reference
             self.zen_overlay.update_preview(pixmap)

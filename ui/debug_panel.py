@@ -435,18 +435,21 @@ class DebugPanel(QWidget):
 
     def _on_export_lut_tiff(self):
         from PySide6.QtWidgets import QFileDialog
-        from core.processor import export_image
         if not self.processor or self.processor.intermediate_acescg is None:
             self.status_label.setText("No image loaded.")
             return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export LUT Profile TIFF", "", "TIFF (*.tif)")
-        if not path:
+        if not self.parent_editor:
+            self.status_label.setText("No editor context.")
             return
-        ok = export_image(self.processor, path, as_tiff=True, lut_profiling=True)
-        self.status_label.setText(
-            f"Exported: {path}" if ok else "Export failed."
-        )
+        output_dir = QFileDialog.getExistingDirectory(
+            self, "Export LUT Profile TIFFs — Choose Output Folder")
+        if not output_dir:
+            return
+        success, total = self.parent_editor.export_lut_tiffs(output_dir)
+        if total == 0:
+            self.status_label.setText("No images to export.")
+        else:
+            self.status_label.setText(f"Exported {success}/{total} TIFFs to {output_dir}")
 
     def _on_save_vibe(self):
         if self.parent_editor:

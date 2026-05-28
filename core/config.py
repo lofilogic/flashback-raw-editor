@@ -75,8 +75,8 @@ REC2020_FROM_SRGB = colour.RGB_to_RGB(
 CHROMATIC_ABERRATION_STRENGTH = 0.005
 CHROMATIC_ABERRATION_STEPS = 4
 CHROMATIC_ABERRATION_BLUE_BLUR = 0.3
-HALATION_THRESHOLD = 0.55
-HALATION_THRESHOLD_FUJI = 0.7
+HALATION_THRESHOLD = 0.60
+HALATION_THRESHOLD_FUJI = 0.70
 HALATION_BLUR_RADIUS = 4
 HALATION_STRENGTH = 0.5
 SOFTNESS_SIGMA = 0.5
@@ -91,14 +91,14 @@ VIGNETTE_STRENGTH = 0.5
 VIGNETTE_COLOR_SHIFT = 0.05
 VIGNETTE_FEATHER = 1.0
 BLOOM_STRENGTH = 0.3
-BLOOM_THRESHOLD = 0.05
+BLOOM_THRESHOLD = 0.65
 
 # =============================================================================
 # VIBE PRESETS
 # =============================================================================
 
 VIBE_PRESETS = {
-    'disposable':           {'enable_ca': True,  'ca_strength': 0.010, 'softness': 0.3, 'sharpness': 2.0, 'sharpen_radius': 0.5, 'grain': 1.2, 'vignette': 0.10, 'vignette_feather': 0.4, 'bloom': 0.10, 'lut': 'assets/luts/disposable_ap1.cube'},
+    'disposable':           {'enable_ca': True,  'ca_strength': 0.010, 'softness': 0.3, 'sharpness': 2.0, 'sharpen_radius': 0.5, 'grain': 1.2, 'vignette': 0.10, 'vignette_feather': 0.4, 'bloom': 0.10, 'lut': 'assets/luts/disposable.cube'},
     'flashback_classic_v1': {'enable_ca': True,  'ca_strength': 0.010, 'softness': 0.5, 'sharpness': 1.0, 'sharpen_radius': 0.5, 'grain': 2.0, 'vignette': 0.10, 'vignette_feather': 0.4, 'bloom': 0.10, 'lut': 'assets/luts/V1.cube', 'base_exposure_offset_v2': 0.0},
     'point_shoot': {'enable_ca': True,  'ca_strength': 0.002, 'softness': 0.3, 'sharpness': 0.5, 'sharpen_radius':  1.0, 'grain': 0.8, 'vignette': 0.10, 'vignette_feather': 1.0, 'bloom': 0.10, 'lut': 'assets/luts/pointandshoot.cube'},
     'rangefinder': {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.1, 'sharpness': 0.8, 'sharpen_radius':  1.0, 'grain': 0.5, 'vignette': 0.05, 'vignette_feather': 1.0, 'bloom': 0.05, 'lut': 'assets/luts/rangefinder.cube'},

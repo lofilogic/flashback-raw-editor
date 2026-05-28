@@ -30,7 +30,7 @@ from .config import (
 )
 from .dng_export import _PROFILE_TONE_CURVE
 from .kernels import acescct_encode, apply_grain
-from .auto_exposure_reverse import extract_exposure_seconds, compute_reverse_gain
+from .auto_exposure_reverse import compute_reverse_gain
 from .effects import (
     apply_lut_fast,
     apply_chromatic_aberration,
@@ -87,6 +87,11 @@ XYZ_D50_TO_ACESCG = (XYZ_D60_TO_ACESCG @ BRADFORD_D50_TO_D60).astype(np.float32)
 
 # Fused: raw -> ACEScg (fast path, no highlight recovery).
 RAW_TO_ACESCG = (XYZ_D50_TO_ACESCG @ FM1_RAW_TO_XYZ_D50).astype(np.float32)
+
+# Fused: wb-normalised camera RGB (= raw / ASN) -> ACEScg.
+# Used in the highlight-recovery path to replace the two-step
+# rgb_wb -> XYZ -> ACEScg chain with a single matmul.
+FM1_WB_TO_ACESCG = (XYZ_D50_TO_ACESCG @ FM1).astype(np.float32)
 
 # ACEScg -> linear sRGB.
 ACESCG_TO_LINSRGB = np.array([
@@ -222,13 +227,26 @@ def _recover_highlights(rgb_raw: np.ndarray, asn: np.ndarray,
 # UTILITIES
 # =============================================================================
 
-def _is_flashback_dng(path: str) -> bool:
+def _read_dng_exif(path: str) -> tuple:
+    """Single exifread pass — returns (is_flashback, exposure_seconds).
+
+    Replaces the previous pattern of calling _is_flashback_dng and
+    extract_exposure_seconds separately (2-3 file opens → 1).
+    """
     try:
         with open(path, 'rb') as f:
-            tags = exifread.process_file(f, details=False, stop_tag='Image Make')
-        return str(tags.get('Image Make', '')).strip().lower() == 'flashback'
+            tags = exifread.process_file(f, details=False)
+        make = str(tags.get('Image Make', '')).strip().lower()
+        is_flashback = (make == 'flashback')
+        exp_s = None
+        tag = tags.get('Image ExposureTime')
+        if tag is not None:
+            from fractions import Fraction
+            val = tag.values[0]
+            exp_s = float(Fraction(val.num, val.den))
+        return is_flashback, exp_s
     except Exception:
-        return False
+        return False, None
 
 
 # =============================================================================
@@ -242,6 +260,7 @@ class FlashbackProcessor:
         self.intermediate_acescg = None
         self.current_file = None
         self._rev_gain = 1.0
+        self._rev_gain_unconditional = 1.0
         self.rotation = 0
         self.user_settings = {
             'exposure_ev': 0.0,
@@ -348,14 +367,6 @@ class FlashbackProcessor:
 
     # ---- pipeline -------------------------------------------------------------
 
-    @staticmethod
-    def _reverse_ae_gain_for(path):
-        if not (path and DebugConfig.enable_reverse_autoexposure):
-            return 1.0
-        exp_s = extract_exposure_seconds(path)
-        return float(compute_reverse_gain(
-            exp_s, DebugConfig.reverse_autoexposure_t_ref))
-
     def _bake_halation(self, acescg):
         if not (DebugConfig.enable_halation and DebugConfig.halation_strength > 0):
             return acescg
@@ -366,10 +377,10 @@ class FlashbackProcessor:
             DebugConfig.halation_strength,
         )
 
-    def load_image(self, dng_path, for_export=False, fast_mode=False):
+    def load_image(self, dng_path):
         total_start = time.time()
         _timing_print(f"\n{'='*60}")
-        _timing_print(f"[processor] Loading: {os.path.basename(dng_path)} (fast={fast_mode})")
+        _timing_print(f"[processor] Loading: {os.path.basename(dng_path)}")
         _timing_print(f"{'='*60}")
 
         self.current_file = dng_path
@@ -378,17 +389,18 @@ class FlashbackProcessor:
             print("[processor] TIFF import is not supported. Open the original DNG instead.")
             return None
 
-        if not _is_flashback_dng(dng_path):
+        is_flashback, exp_s = _read_dng_exif(dng_path)
+        if not is_flashback:
             print("[processor] Non-Flashback DNG — generic pipeline not yet implemented.")
             return None
 
         try:
             t0 = time.time()
             with rawpy.imread(dng_path) as raw:
-                demosaic = (rawpy.DemosaicAlgorithm.LINEAR if fast_mode
-                            else rawpy.DemosaicAlgorithm.AHD)
+                # half_size=True performs 2x2 binning and skips demosaicing entirely,
+                # so demosaic_algorithm has no effect — always pass LINEAR as a no-op.
                 rgb = raw.postprocess(
-                    demosaic_algorithm=demosaic,
+                    demosaic_algorithm=rawpy.DemosaicAlgorithm.LINEAR,
                     user_wb=[1.0, 1.0, 1.0, 1.0],
                     use_camera_wb=False,
                     use_auto_wb=False,
@@ -407,23 +419,24 @@ class FlashbackProcessor:
             t0 = time.time()
             if self.enable_highlight_recovery:
                 rgb_wb = _recover_highlights(rgb, ASN_D50)
-                flat   = rgb_wb.reshape(-1, 3)
-                xyz    = (flat @ FM1.T).reshape(rgb_wb.shape)
-                acescg = (xyz.reshape(-1, 3) @ XYZ_D50_TO_ACESCG.T).reshape(xyz.shape)
+                acescg = (rgb_wb.reshape(-1, 3) @ FM1_WB_TO_ACESCG.T).reshape(rgb_wb.shape)
             else:
-                flat   = rgb.reshape(-1, 3)
-                acescg = (flat @ RAW_TO_ACESCG.T).reshape(rgb.shape)
+                acescg = (rgb.reshape(-1, 3) @ RAW_TO_ACESCG.T).reshape(rgb.shape)
             _timing_print(f"  raw->ACEScg: {(time.time()-t0)*1000:6.2f} ms  "
                           f"range=[{acescg.min():.4f},{acescg.max():.4f}]")
 
-            self._rev_gain = self._reverse_ae_gain_for(dng_path)
+            # exp_s already read from the single EXIF pass above
+            self._rev_gain = (float(compute_reverse_gain(exp_s, DebugConfig.reverse_autoexposure_t_ref))
+                              if (exp_s and DebugConfig.enable_reverse_autoexposure) else 1.0)
+            self._rev_gain_unconditional = float(compute_reverse_gain(exp_s, DebugConfig.reverse_autoexposure_t_ref)) if exp_s else 1.0
 
-            if for_export:
-                acescg = self._bake_halation(acescg)
-
+            acescg = self._bake_halation(acescg)
             self.intermediate_acescg = np.ascontiguousarray(acescg, dtype=np.float32)
 
-            result = self.render_preview(downscale=fast_mode)
+            # Always return a fast downscaled preview so the UI is responsive
+            # immediately. The caller is responsible for queuing a full-quality
+            # background render via RenderWorker.
+            result = self.render_preview(downscale=True)
             _timing_print(f"  TOTAL load: {(time.time()-total_start)*1000:6.2f} ms\n")
             return result
 
@@ -554,11 +567,12 @@ def export_image(processor, output_path, quality=95, as_tiff=False,
         if img is None:
             return False
         if lut_profiling:
-            rev_gain = processor._rev_gain if DebugConfig.enable_reverse_autoexposure else 1.0
+            rev_gain = processor._rev_gain_unconditional
             if not np.isclose(rev_gain, 1.0):
                 img = img * rev_gain
-            if DebugConfig.enable_post_ae_exposure_boost:
-                img = img * (2.0 ** DebugConfig.post_ae_exposure_boost_ev)
+            base_ev = DebugConfig.base_exposure_offset_v2
+            if not np.isclose(base_ev, 0.0):
+                img = img * (2.0 ** base_ev)
         if DebugConfig.enable_cnr and DebugConfig.cnr_sigma > 0:
             img = reduce_color_noise_chroma(img, sigma=DebugConfig.cnr_sigma)
         img_acescct = acescct_encode(np.maximum(img, 1e-10))

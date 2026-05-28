@@ -16,6 +16,7 @@ from .kernels import (
     screen_blend,
     unsharp_mask,
     gaussian_blur,
+    acescct_encode,
 )
 from .config import (
     _timing_print,
@@ -162,18 +163,29 @@ def _lab_to_acescg(lab):
 def reduce_color_noise_chroma(image, sigma=0.7):
     """Chroma noise reduction in CIE Lab space (linear ACEScg in/out).
 
-    Blurs a* and b* while leaving L* untouched. Lab's perceptual
-    luma/chroma separation avoids color shift and highlight fringing.
+    Blurs a* and b* with a bilateral filter while leaving L* untouched.
+    Bilateral filtering stops at color edges (unlike Gaussian), preventing
+    chroma from bleeding across sharp luma boundaries which causes moiré on
+    fine periodic patterns like textiles.
     """
     lab = _acescg_to_lab(image)
-    lab[:, :, 1] = gaussian_blur(lab[:, :, 1], sigma)
-    lab[:, :, 2] = gaussian_blur(lab[:, :, 2], sigma)
+    # d must be a positive odd integer; keep it small so the filter stays fast.
+    # sigma=0.7→5, sigma=2→7, sigma=4→11
+    d = max(5, int(sigma) * 2 + 3)
+    if d % 2 == 0:
+        d += 1
+    # sigmaColor in Lab units (a*/b* range ~±80): smooths noise-level variation
+    # (typically < 8 Lab units) while stopping at real colour edges (> 20 units).
+    sigma_color = 15.0
+    lab[:, :, 1] = cv2.bilateralFilter(lab[:, :, 1], d, sigma_color, sigma)
+    lab[:, :, 2] = cv2.bilateralFilter(lab[:, :, 2], d, sigma_color, sigma)
     return _lab_to_acescg(lab)
 
 
 def _halation_glow(img_f, gray, threshold, blur_radius, k=20.0):
     """Compute one halation glow layer for a given threshold and radius."""
-    mask = 1.0 / (1.0 + np.exp(-k * (gray - threshold)))
+    gray_log = acescct_encode(gray)
+    mask = 1.0 / (1.0 + np.exp(-k * (gray_log - threshold)))
     mask = gaussian_blur(mask, 2.0)
     mask_3d = np.stack([mask, mask, mask], axis=2)
     highlights = img_f * mask_3d
@@ -255,21 +267,23 @@ def apply_vignette(image, strength=0.5, color_shift=0.05, feather=1.0):
 def apply_bloom(image, strength=0.3, threshold=0.6, linear=False):
     """
     Fast large-radius bloom via 4x downsample → heavy Gaussian → upsample → blend.
-    threshold: soft highlight extraction cutoff (0–1).
+    threshold: ACEScct-space highlight cutoff (0–1); ~0.555 = scene white, 0.65 = overbright only.
     linear: when True, uses additive blend (correct for HDR linear-light space);
             when False, uses screen blend (correct for display/LUT-output [0,1] space).
+    Luma, ACEScct encoding, masking, and blur all happen at 1/4 resolution.
     """
     if strength <= 0:
         return image
     h, w = image.shape[:2]
-    luma = (0.2126 * image[:, :, 0] + 0.7152 * image[:, :, 1] + 0.0722 * image[:, :, 2]).astype(np.float32)
-    soft_mask = np.clip((luma - threshold) / max(0.01, 1.0 - threshold), 0.0, 1.0)
-    bloom_src = (image * soft_mask[:, :, np.newaxis]).astype(np.float32)
     scale = 4
     bh, bw = max(4, h // scale), max(4, w // scale)
-    small = cv2.resize(bloom_src, (bw, bh), interpolation=cv2.INTER_AREA)
+    small = cv2.resize(image, (bw, bh), interpolation=cv2.INTER_AREA).astype(np.float32)
+    luma_small = (0.2126 * small[:, :, 0] + 0.7152 * small[:, :, 1] + 0.0722 * small[:, :, 2])
+    luma_log = acescct_encode(luma_small)
+    soft_mask = np.clip((luma_log - threshold) / max(0.01, 1.0 - threshold), 0.0, 1.0)
+    bloom_src = small * soft_mask[:, :, np.newaxis]
     sigma = max(2, bw // 5)
-    blurred = gaussian_blur(small, sigma)
+    blurred = gaussian_blur(bloom_src, sigma)
     bloom_layer = cv2.resize(blurred, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
     if linear:
         result = image + bloom_layer * strength
