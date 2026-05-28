@@ -252,6 +252,7 @@ class FlashbackEditor(QMainWindow):
         self.export_mode = 'jpeg'  # 'jpeg' | 'tiff' | 'dng'
         self.thumbnail_cache = {}
         self.thumbnail_settings = {}
+        self._file_is_flashback: dict = {}  # path_str -> bool
 
         pictures_loc = QStandardPaths.writableLocation(QStandardPaths.PicturesLocation)
         base_dir = pictures_loc if pictures_loc else str(Path.home())
@@ -1555,6 +1556,7 @@ class FlashbackEditor(QMainWindow):
         self.image_files = image_files
         self.current_index = 0
         self.image_cache.clear()
+        self._file_is_flashback.clear()
         self.thumbnail_strip.clear()
 
         self.btn_process_all.setEnabled(True)
@@ -1828,6 +1830,9 @@ class FlashbackEditor(QMainWindow):
         if file_path in self.image_cache:
             self.processor.intermediate_acescct = self.image_cache[file_path]
             self.processor.current_file = file_path
+            # Restore Flashback status so DNG button reflects the correct state
+            self.processor.is_flashback_file = self._file_is_flashback.get(file_path, False)
+            self._update_dng_button_state()
             img_array = self.processor.render_preview(downscale=True)
             self.display_image(img_array, is_scrub=True)
             self.update_current_thumbnail(img_array)
@@ -1845,6 +1850,8 @@ class FlashbackEditor(QMainWindow):
             print(f"[Load] Image not in cache, loading from disk...")
             img_array = self.processor.load_image(file_path)
             if img_array is not None:
+                self._file_is_flashback[file_path] = self.processor.is_flashback_file
+                self._update_dng_button_state()
                 self.image_cache[file_path] = self.processor.intermediate_acescct.copy()
                 self.update_current_thumbnail(img_array)
                 self.display_image(img_array, is_scrub=True)
@@ -2158,6 +2165,26 @@ class FlashbackEditor(QMainWindow):
             self.label_output.setText(directory)
             self.label_output.setToolTip(directory)
 
+    def _update_dng_button_state(self):
+        """Enable or disable the DNG export pill based on the current file's type.
+
+        DNG export uses Flashback-specific color science and is only meaningful
+        for files shot on a Flashback camera. For all other raws the button is
+        visible but greyed out, and the mode is silently redirected to JPEG.
+        """
+        if not hasattr(self, 'btn_export_dng'):
+            return
+        file_path = str(self.image_files[self.current_index]) if self.image_files else None
+        is_flashback = self._file_is_flashback.get(file_path, False) if file_path else False
+
+        self.btn_export_dng.setEnabled(is_flashback)
+        if is_flashback:
+            self.btn_export_dng.setToolTip("Clean RAW DNG for Camera Raw / Lightroom")
+        else:
+            self.btn_export_dng.setToolTip("DNG export is only available for Flashback camera files")
+            if self.export_mode == 'dng':
+                self.set_export_mode('jpeg')
+
     def set_export_mode(self, mode):
         """Select JPEG / DNG export; sync pills."""
         if mode in (True, 'tiff'):  # legacy: redirect old TIFF mode to JPEG
@@ -2205,6 +2232,7 @@ class FlashbackEditor(QMainWindow):
         self.btn_process_all.setEnabled(False)
 
         success_count = 0
+        skip_count = 0
         total = len(indices_to_process)
 
         for i, idx in enumerate(indices_to_process):
@@ -2215,6 +2243,16 @@ class FlashbackEditor(QMainWindow):
                 self.btn_process_all.setText(f"Processing {i + 1} / {total}")
                 self.mode_label.setText(f"Processing {i+1}/{total}...")
                 QApplication.processEvents()
+
+                if self.export_mode == 'dng':
+                    is_flashback = self._file_is_flashback.get(file_path)
+                    if is_flashback is None:
+                        from core.processor import _read_dng_exif
+                        is_flashback, _ = _read_dng_exif(file_path)
+                        self._file_is_flashback[file_path] = is_flashback
+                    if not is_flashback:
+                        skip_count += 1
+                        continue
 
                 if self.export_mode != 'dng':
                     if file_path in self.image_cache:
@@ -2279,7 +2317,15 @@ class FlashbackEditor(QMainWindow):
         self.load_current_image()
         self.update_mode_label()
 
-        if success_count == total and total > 0:
+        processed_total = total - skip_count
+        if skip_count > 0:
+            self.mode_label.setText(
+                f"✓ {success_count} processed · {skip_count} skipped (non-Flashback, DNG only)"
+            )
+            self.mode_label.setStyleSheet(f"color: {C['text_dim']};")
+            QTimer.singleShot(4000, self.update_mode_label)
+
+        if success_count == processed_total and processed_total > 0:
             self._set_process_button_done(success_count)
         else:
             self.update_process_button_text()

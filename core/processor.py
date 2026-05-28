@@ -13,6 +13,13 @@ Pipeline (Flashback DNG):
     bloom / vignette (linear ACEScg)
     CNR in Lab space
     ACEScct encode -> LUT -> post-LUT effects -> display sRGB
+
+Pipeline (generic raw — non-Flashback):
+    rawpy.postprocess(user_wb=daylight_whitebalance, output_color=sRGB,
+                      gamma=(1,1), half_size=True, output_bps=16)
+      -> linear sRGB (libraw applies camera matrix + daylight WB)
+    linear sRGB -> ACEScg via LINSRGB_TO_ACESCG    <- cached intermediate
+    same render pipeline from here (LUT, sliders, grain, etc.)
 """
 import os
 import time
@@ -99,6 +106,12 @@ ACESCG_TO_LINSRGB = np.array([
     [-0.13026,  1.14080, -0.01055],
     [-0.02400, -0.12897,  1.15297],
 ], dtype=np.float32)
+
+# linear sRGB -> ACEScg (for generic raw files developed via rawpy sRGB output).
+LINSRGB_TO_ACESCG = np.linalg.inv(ACESCG_TO_LINSRGB).astype(np.float32)
+
+# D65 daylight WB fallback for generic raws missing daylight_whitebalance.
+_GENERIC_DAYLIGHT_WB_FALLBACK = [2.0, 1.0, 1.6, 1.0]
 
 _CS_PROPHOTO = colour.RGB_COLOURSPACES['ProPhoto RGB']
 _CS_ACESCG   = colour.RGB_COLOURSPACES['ACEScg']
@@ -254,11 +267,12 @@ def _read_dng_exif(path: str) -> tuple:
 # =============================================================================
 
 class FlashbackProcessor:
-    """Raw processor for Flashback DNGs."""
+    """Raw processor for Flashback DNGs and generic camera raws."""
 
     def __init__(self, lut_path=None):
         self.intermediate_acescg = None
         self.current_file = None
+        self.is_flashback_file = False
         self._rev_gain = 1.0
         self._rev_gain_unconditional = 1.0
         self.rotation = 0
@@ -335,6 +349,45 @@ class FlashbackProcessor:
         return apply_grain(image, grain, intensity=strength,
                            highlight_bias=highlight_bias)
 
+    # ---- generic raw pipeline ------------------------------------------------
+
+    def _develop_generic_raw(self, path: str) -> np.ndarray:
+        """Develop a non-Flashback raw file to ACEScg using libraw's camera matrix.
+
+        Uses rawpy's built-in camera profile (from DNG metadata or libraw database)
+        with fixed daylight WB, producing linear sRGB which is then converted to
+        ACEScg. All subsequent processing (LUT, sliders, grain, etc.) is identical
+        to the Flashback path.
+        """
+        t0 = time.time()
+        with rawpy.imread(path) as raw:
+            daylight_wb = list(raw.daylight_whitebalance or [])
+            if not daylight_wb or all(v == 0.0 for v in daylight_wb):
+                daylight_wb = list(_GENERIC_DAYLIGHT_WB_FALLBACK)
+                _timing_print(f"  [generic] daylight_whitebalance missing — using D65 fallback")
+
+            rgb = raw.postprocess(
+                demosaic_algorithm=rawpy.DemosaicAlgorithm.LINEAR,
+                user_wb=daylight_wb,
+                use_camera_wb=False,
+                use_auto_wb=False,
+                half_size=True,
+                no_auto_bright=True,
+                bright=self.rawpy_bright,
+                highlight_mode=1,
+                gamma=(1, 1),
+                output_bps=16,
+                output_color=rawpy.ColorSpace.sRGB,
+            ).astype(np.float32) / 65535.0
+        _timing_print(f"  raw_develop (generic): {(time.time()-t0)*1000:6.2f} ms  "
+                      f"shape={rgb.shape}  range=[{rgb.min():.4f},{rgb.max():.4f}]")
+
+        t0 = time.time()
+        acescg = (rgb.reshape(-1, 3) @ LINSRGB_TO_ACESCG.T).reshape(rgb.shape)
+        _timing_print(f"  linSRGB->ACEScg: {(time.time()-t0)*1000:6.2f} ms  "
+                      f"range=[{acescg.min():.4f},{acescg.max():.4f}]")
+        return acescg
+
     # ---- public surface -------------------------------------------------------
 
     def get_settings(self):
@@ -390,47 +443,51 @@ class FlashbackProcessor:
             return None
 
         is_flashback, exp_s = _read_dng_exif(dng_path)
-        if not is_flashback:
-            print("[processor] Non-Flashback DNG — generic pipeline not yet implemented.")
-            return None
+        self.is_flashback_file = is_flashback
 
         try:
-            t0 = time.time()
-            with rawpy.imread(dng_path) as raw:
-                # half_size=True performs 2x2 binning and skips demosaicing entirely,
-                # so demosaic_algorithm has no effect — always pass LINEAR as a no-op.
-                rgb = raw.postprocess(
-                    demosaic_algorithm=rawpy.DemosaicAlgorithm.LINEAR,
-                    user_wb=[1.0, 1.0, 1.0, 1.0],
-                    use_camera_wb=False,
-                    use_auto_wb=False,
-                    user_black=SENSOR_BLACK,
-                    half_size=True,
-                    no_auto_bright=True,
-                    bright=self.rawpy_bright,
-                    highlight_mode=self.highlight_mode,
-                    gamma=(1, 1),
-                    output_bps=16,
-                    output_color=rawpy.ColorSpace.raw,
-                ).astype(np.float32) / 65535.0
-            _timing_print(f"  raw_develop: {(time.time()-t0)*1000:6.2f} ms  "
-                          f"shape={rgb.shape}  range=[{rgb.min():.4f},{rgb.max():.4f}]")
+            if is_flashback:
+                t0 = time.time()
+                with rawpy.imread(dng_path) as raw:
+                    # half_size=True performs 2x2 binning and skips demosaicing entirely,
+                    # so demosaic_algorithm has no effect — always pass LINEAR as a no-op.
+                    rgb = raw.postprocess(
+                        demosaic_algorithm=rawpy.DemosaicAlgorithm.LINEAR,
+                        user_wb=[1.0, 1.0, 1.0, 1.0],
+                        use_camera_wb=False,
+                        use_auto_wb=False,
+                        user_black=SENSOR_BLACK,
+                        half_size=True,
+                        no_auto_bright=True,
+                        bright=self.rawpy_bright,
+                        highlight_mode=self.highlight_mode,
+                        gamma=(1, 1),
+                        output_bps=16,
+                        output_color=rawpy.ColorSpace.raw,
+                    ).astype(np.float32) / 65535.0
+                _timing_print(f"  raw_develop: {(time.time()-t0)*1000:6.2f} ms  "
+                              f"shape={rgb.shape}  range=[{rgb.min():.4f},{rgb.max():.4f}]")
 
-            t0 = time.time()
-            if self.enable_highlight_recovery:
-                rgb_wb = _recover_highlights(rgb, ASN_D50)
-                acescg = (rgb_wb.reshape(-1, 3) @ FM1_WB_TO_ACESCG.T).reshape(rgb_wb.shape)
+                t0 = time.time()
+                if self.enable_highlight_recovery:
+                    rgb_wb = _recover_highlights(rgb, ASN_D50)
+                    acescg = (rgb_wb.reshape(-1, 3) @ FM1_WB_TO_ACESCG.T).reshape(rgb_wb.shape)
+                else:
+                    acescg = (rgb.reshape(-1, 3) @ RAW_TO_ACESCG.T).reshape(rgb.shape)
+                _timing_print(f"  raw->ACEScg: {(time.time()-t0)*1000:6.2f} ms  "
+                              f"range=[{acescg.min():.4f},{acescg.max():.4f}]")
+
+                # exp_s already read from the single EXIF pass above
+                self._rev_gain = (float(compute_reverse_gain(exp_s, DebugConfig.reverse_autoexposure_t_ref))
+                                  if (exp_s and DebugConfig.enable_reverse_autoexposure) else 1.0)
+                self._rev_gain_unconditional = float(compute_reverse_gain(exp_s, DebugConfig.reverse_autoexposure_t_ref)) if exp_s else 1.0
+
+                acescg = self._bake_halation(acescg)
             else:
-                acescg = (rgb.reshape(-1, 3) @ RAW_TO_ACESCG.T).reshape(rgb.shape)
-            _timing_print(f"  raw->ACEScg: {(time.time()-t0)*1000:6.2f} ms  "
-                          f"range=[{acescg.min():.4f},{acescg.max():.4f}]")
+                acescg = self._develop_generic_raw(dng_path)
+                self._rev_gain = 1.0
+                self._rev_gain_unconditional = 1.0
 
-            # exp_s already read from the single EXIF pass above
-            self._rev_gain = (float(compute_reverse_gain(exp_s, DebugConfig.reverse_autoexposure_t_ref))
-                              if (exp_s and DebugConfig.enable_reverse_autoexposure) else 1.0)
-            self._rev_gain_unconditional = float(compute_reverse_gain(exp_s, DebugConfig.reverse_autoexposure_t_ref)) if exp_s else 1.0
-
-            acescg = self._bake_halation(acescg)
             self.intermediate_acescg = np.ascontiguousarray(acescg, dtype=np.float32)
 
             # Always return a fast downscaled preview so the UI is responsive
