@@ -109,8 +109,10 @@ VIBE_PRESETS = {
 # DEBUG / TIMING
 # =============================================================================
 
-# Set to True to print per-effect timing to console (development only)
-DEBUG_TIMING = True
+# Per-effect timing prints. Off by default; opt in via the FLASHBACK_DEBUG_TIMING
+# env var ("1" / "true" / "yes") so user installs stay quiet.
+import os as _os
+DEBUG_TIMING = _os.environ.get('FLASHBACK_DEBUG_TIMING', '').lower() in ('1', 'true', 'yes')
 
 def _timing_print(msg):
     """Print timing/debug messages. Controlled by DEBUG_TIMING flag."""
