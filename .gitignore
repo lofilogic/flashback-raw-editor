@@ -19,3 +19,9 @@ output/
 
 # Cache
 *.cache
+
+# Editor — keep shared debug configs, ignore personal prefs
+.vscode/*
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
