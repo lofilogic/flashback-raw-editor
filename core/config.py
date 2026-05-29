@@ -1,38 +1,12 @@
 """
 Application-wide constants, effect defaults, and runtime configuration.
 """
-import numpy as np
-import colour
 
 # =============================================================================
 # COLOR PIPELINE CONSTANTS
 # =============================================================================
 
-FLASHBACK_CCM = np.array([
-    [ 3.8045148 , -0.40716213,  0.03187762],
-    [-0.45492041,  0.73636414,  0.02067507],
-    [ 0.11892583, -0.55000283,  2.91999937]
-])
-
-FLASHBACK_CCM2 = np.array([
-    [0.706563, 0.061847, 0.231589],
-    [-0.186467, 1.036193, 0.150275],
-    [-0.167809, -0.001273, 1.169082],
-])
-
-# Fitted via tools/match_camera.py against a ColorChecker shot, mapping
-# iPhone raw (with daylight_whitebalance pre-applied) to Flashback-style
-# linear sRGB so the same LUT lands in roughly the same place.
-IPHONE_CCM = np.array([
-    [ 0.59425110, -0.27924676,  0.02515316],
-    [-0.03373678,  0.50158660,  0.05856543],
-    [ 0.03639984, -0.34033317,  0.89340804],
-])
-
 SENSOR_BLACK = 64
-BASE_WB_SETTINGS = [0.5, 1.0, 0.61, 1.0]
-BASE_WB_SETTINGS2 = [2.0333, 1.0000, 1.6796, 1.0000]
-BASE_EXPOSURE_OFFSET = 1
 
 # v2 pipeline: constant render-time exposure lift (EV). Applied alongside
 # user exposure_ev and NOT counteracted post-LUT, so it genuinely raises
@@ -59,15 +33,6 @@ REVERSE_AE_STRENGTH = 0.3
 # opposite. Also drives grain highlight-bias.
 PUSH_PULL_RANGE_EV = 2.0
 
-# Color spaces (initialized once at import time)
-CS_SRGB = colour.RGB_COLOURSPACES['sRGB']
-CS_REC2020 = colour.RGB_COLOURSPACES['ITU-R BT.2020']
-
-# Precomputed sRGB → Rec.2020 3×3 matrix (avoids colour-science on every load)
-REC2020_FROM_SRGB = colour.RGB_to_RGB(
-    np.eye(3, dtype=np.float32), CS_SRGB, CS_REC2020
-).astype(np.float32)
-
 # =============================================================================
 # EFFECT DEFAULTS
 # =============================================================================
@@ -76,7 +41,6 @@ CHROMATIC_ABERRATION_STRENGTH = 0.005
 CHROMATIC_ABERRATION_STEPS = 4
 CHROMATIC_ABERRATION_BLUE_BLUR = 0.3
 HALATION_THRESHOLD = 0.60
-HALATION_THRESHOLD_FUJI = 0.70
 HALATION_BLUR_RADIUS = 4
 HALATION_STRENGTH = 0.5
 SOFTNESS_SIGMA = 0.5

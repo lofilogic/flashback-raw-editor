@@ -3,7 +3,7 @@ Standalone image effect functions.
 
 Each function takes and returns a float32 numpy array in [0, 1].
 Effects are applied in the order defined in the render pipeline:
-  chromatic aberration → ACEScct encode → dither → LUT → softness → grain → sharpen
+  chromatic aberration → ACEScct encode → LUT → softness → grain → sharpen
 Halation is baked into the intermediate during load (export path only).
 """
 import numpy as np
@@ -293,13 +293,3 @@ def apply_bloom(image, strength=0.3, threshold=0.6, linear=False):
         return np.clip(result, 0.0, 1.0).astype(np.float32)
 
 
-def add_blue_noise_dither(image, strength=0.005):
-    """
-    Add dithering noise to reduce LUT banding artifacts.
-    Uses white noise with a slight blur as a blue noise approximation —
-    less visually intrusive than pure white noise.
-    """
-    h, w = image.shape[:2]
-    noise = np.random.normal(0, strength, (h, w, 3)).astype(np.float32)
-    noise = gaussian_blur(noise, 0.5)
-    return np.clip(image + noise, 0, 1)
