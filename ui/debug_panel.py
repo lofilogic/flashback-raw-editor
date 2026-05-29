@@ -104,7 +104,7 @@ class DebugPanel(QWidget):
         lut_layout.addWidget(self.btn_load_lut)
         form_layout.addLayout(lut_layout)
 
-        # --- Baked Effects Group ---
+        # --- Baked Effects Group (only halation truly bakes into the intermediate) ---
         baked_group = QGroupBox("Baked Effects (Require Image Reload)")
         baked_group.setStyleSheet("QGroupBox { color: #FF8A35; font-weight: bold; border: 1px solid #555; border-radius: 6px; margin-top: 8px; padding-top: 8px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }")
         baked_layout = QFormLayout(baked_group)
@@ -128,18 +128,6 @@ class DebugPanel(QWidget):
         self.spin_halation_str.valueChanged.connect(self.update_config)
         baked_layout.addRow("Strength:", self.spin_halation_str)
 
-        baked_layout.addRow(self._create_separator())
-
-        # CNR
-        self.chk_cnr = QCheckBox("Enable Color Noise Reduction")
-        self.chk_cnr.setChecked(True)
-        self.chk_cnr.stateChanged.connect(self.update_config)
-        baked_layout.addRow(self.chk_cnr)
-
-        self.spin_cnr = self._create_double_spin(0.0, 5.0, CNR_SIGMA, 0.1)
-        self.spin_cnr.valueChanged.connect(self.update_config)
-        baked_layout.addRow("CNR Sigma:", self.spin_cnr)
-
         form_layout.addWidget(baked_group)
 
         # --- Real-time Effects Group ---
@@ -147,6 +135,18 @@ class DebugPanel(QWidget):
         live_group.setStyleSheet("QGroupBox { color: #7aa8d9; font-weight: bold; border: 1px solid #555; border-radius: 6px; margin-top: 8px; padding-top: 8px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }")
         live_layout = QFormLayout(live_group)
         live_layout.setSpacing(8)
+
+        # CNR — applied per-render in core/processor._render(), not baked.
+        self.chk_cnr = QCheckBox("Enable Color Noise Reduction")
+        self.chk_cnr.setChecked(True)
+        self.chk_cnr.stateChanged.connect(self.update_preview)
+        live_layout.addRow(self.chk_cnr)
+
+        self.spin_cnr = self._create_double_spin(0.0, 5.0, CNR_SIGMA, 0.1)
+        self.spin_cnr.valueChanged.connect(self.update_preview)
+        live_layout.addRow("CNR Sigma:", self.spin_cnr)
+
+        live_layout.addRow(self._create_separator())
 
         # LUT
         self.chk_lut = QCheckBox("Enable LUT")
