@@ -78,7 +78,7 @@ class ThumbnailWorker(QThread):
                 img_display = processor.load_image(file_path_str)
 
                 if img_display is not None and self._is_running:
-                    intermediate = processor.intermediate_acescct.copy()
+                    intermediate = processor.intermediate_acescg.copy()
                     h, w = img_display.shape[:2]
                     scale = 70 / h
                     new_w = int(w * scale)

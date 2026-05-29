@@ -407,14 +407,6 @@ class FlashbackProcessor:
     def get_rotation(self):
         return self.rotation
 
-    @property
-    def intermediate_acescct(self):
-        return self.intermediate_acescg
-
-    @intermediate_acescct.setter
-    def intermediate_acescct(self, value):
-        self.intermediate_acescg = value
-
     def _render_fast(self, downscale=False):
         return self._render(downscale=downscale)
 

@@ -361,7 +361,7 @@ class FlashbackEditor(QMainWindow):
         self.display_image(img_array)
         self.update_current_thumbnail(img_array)
         file_path = str(self.image_files[self.current_index])
-        self.image_cache[file_path] = self.processor.intermediate_acescct.copy()
+        self.image_cache[file_path] = self.processor.intermediate_acescg.copy()
 
     def rotate_counterclockwise(self):
         if not self.image_files:
@@ -372,7 +372,7 @@ class FlashbackEditor(QMainWindow):
         self.display_image(img_array)
         self.update_current_thumbnail(img_array)
         file_path = str(self.image_files[self.current_index])
-        self.image_cache[file_path] = self.processor.intermediate_acescct.copy()
+        self.image_cache[file_path] = self.processor.intermediate_acescg.copy()
 
     # ===================================================================
     # LUT LOADING
@@ -1691,7 +1691,7 @@ class FlashbackEditor(QMainWindow):
                     temp_processor = _processor or FlashbackProcessor(None)
                     if _processor is None:
                         temp_processor.lut = self.processor.lut
-                    temp_processor.intermediate_acescct = self.image_cache[file_path].copy()
+                    temp_processor.intermediate_acescg = self.image_cache[file_path].copy()
                     temp_processor.current_file = file_path
                     temp_processor.user_settings = settings.copy()
                     img_display = temp_processor._render_fast(downscale=True)
@@ -1828,7 +1828,7 @@ class FlashbackEditor(QMainWindow):
 
 
         if file_path in self.image_cache:
-            self.processor.intermediate_acescct = self.image_cache[file_path]
+            self.processor.intermediate_acescg = self.image_cache[file_path]
             self.processor.current_file = file_path
             # Restore Flashback status so DNG button reflects the correct state
             self.processor.is_flashback_file = self._file_is_flashback.get(file_path, False)
@@ -1852,7 +1852,7 @@ class FlashbackEditor(QMainWindow):
             if img_array is not None:
                 self._file_is_flashback[file_path] = self.processor.is_flashback_file
                 self._update_dng_button_state()
-                self.image_cache[file_path] = self.processor.intermediate_acescct.copy()
+                self.image_cache[file_path] = self.processor.intermediate_acescg.copy()
                 self.update_current_thumbnail(img_array)
                 self.display_image(img_array, is_scrub=True)
                 self.save_current_settings()
@@ -2256,11 +2256,11 @@ class FlashbackEditor(QMainWindow):
 
                 if self.export_mode != 'dng':
                     if file_path in self.image_cache:
-                        self.processor.intermediate_acescct = self.image_cache[file_path].copy()
+                        self.processor.intermediate_acescg = self.image_cache[file_path].copy()
                         self.processor.current_file = file_path
                     else:
                         self.processor.load_image(file_path)
-                        self.image_cache[file_path] = self.processor.intermediate_acescct.copy()
+                        self.image_cache[file_path] = self.processor.intermediate_acescg.copy()
 
                     if file_path in self.image_settings:
                         self.processor.set_settings(self.image_settings[file_path])
@@ -2336,7 +2336,7 @@ class FlashbackEditor(QMainWindow):
 
     def refresh_from_debug(self):
         print("Refreshing...")
-        if self.processor and self.processor.intermediate_acescct is not None:
+        if self.processor and self.processor.intermediate_acescg is not None:
             img_array = self.processor.render_preview()
             self.display_image(img_array)
             self.update_current_thumbnail(img_array)
