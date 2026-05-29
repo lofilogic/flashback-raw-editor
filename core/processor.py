@@ -110,7 +110,19 @@ ACESCG_TO_LINSRGB = np.array([
 # linear sRGB -> ACEScg (for generic raw files developed via rawpy sRGB output).
 LINSRGB_TO_ACESCG = np.linalg.inv(ACESCG_TO_LINSRGB).astype(np.float32)
 
-# D65 daylight WB fallback for generic raws missing daylight_whitebalance.
+# XYZ -> linear sRGB (IEC 61966-2-1 / D65 primaries).
+_XYZ_TO_LINSRGB = np.array([
+    [ 3.2404542, -1.5371385, -0.4985314],
+    [-0.9692660,  1.8760108,  0.0415560],
+    [ 0.0556434, -0.2040259,  1.0572252],
+], dtype=np.float32)
+
+# Generic raw WB target — matches Flashback's BASE_KELVIN so both paths share
+# the same neutral point before the WB slider.
+_GENERIC_RAW_TARGET_K = 5500.0
+_GENERIC_DAYLIGHT_K   = 6504.0  # CIE D65 standard
+
+# Approximate D65 Bayer WB for cameras whose raw file lacks daylight_whitebalance.
 _GENERIC_DAYLIGHT_WB_FALLBACK = [2.0, 1.0, 1.6, 1.0]
 
 _CS_PROPHOTO = colour.RGB_COLOURSPACES['ProPhoto RGB']
@@ -143,6 +155,26 @@ def _planckian_xyz(cct: float) -> np.ndarray:
     else:
         xy = np.asarray(colour.temperature.CCT_to_xy_Kang2002(cct))
     return np.asarray(colour.xy_to_XYZ(xy), dtype=np.float32)
+
+
+def _wb_shift_to_kelvin(daylight_wb: list, target_k: float,
+                         daylight_k: float = _GENERIC_DAYLIGHT_K) -> list:
+    """Shift Bayer WB multipliers from daylight_k to target_k.
+
+    Uses Planckian XYZ ratios in linear sRGB space as a sensor-agnostic proxy.
+    The camera's own daylight_whitebalance stays the ground truth; only the CCT
+    delta is applied on top.
+    """
+    rgb_dl = np.clip(_XYZ_TO_LINSRGB @ _planckian_xyz(daylight_k), 1e-6, None)
+    rgb_tg = np.clip(_XYZ_TO_LINSRGB @ _planckian_xyz(target_k),   1e-6, None)
+    scale  = rgb_dl / rgb_tg
+    scale /= scale[1]                   # G is the Bayer reference channel
+    wb     = list(daylight_wb)
+    wb[0]  = float(wb[0] * scale[0])   # R
+    wb[2]  = float(wb[2] * scale[2])   # B
+    if len(wb) > 3:
+        wb[3] = wb[1]                  # G2 tracks G
+    return wb
 
 
 def _kelvin_to_acescg_gain(target_k: float,
@@ -365,10 +397,13 @@ class FlashbackProcessor:
             if not daylight_wb or all(v == 0.0 for v in daylight_wb):
                 daylight_wb = list(_GENERIC_DAYLIGHT_WB_FALLBACK)
                 _timing_print(f"  [generic] daylight_whitebalance missing — using D65 fallback")
+            fixed_wb = _wb_shift_to_kelvin(daylight_wb, _GENERIC_RAW_TARGET_K)
+            _timing_print(f"  [generic] WB shifted D65->{_GENERIC_RAW_TARGET_K:.0f}K: "
+                          f"[{fixed_wb[0]:.4f}, {fixed_wb[1]:.4f}, {fixed_wb[2]:.4f}]")
 
             rgb = raw.postprocess(
                 demosaic_algorithm=rawpy.DemosaicAlgorithm.LINEAR,
-                user_wb=daylight_wb,
+                user_wb=fixed_wb,
                 use_camera_wb=False,
                 use_auto_wb=False,
                 half_size=True,
