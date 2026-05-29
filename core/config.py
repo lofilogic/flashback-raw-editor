@@ -41,7 +41,7 @@ CHROMATIC_ABERRATION_STRENGTH = 0.005
 CHROMATIC_ABERRATION_STEPS = 4
 CHROMATIC_ABERRATION_BLUE_BLUR = 0.3
 HALATION_THRESHOLD = 0.60
-HALATION_BLUR_RADIUS = 4
+HALATION_BLUR_RADIUS = 4.0
 HALATION_STRENGTH = 0.5
 SOFTNESS_SIGMA = 0.5
 GRAIN_STRENGTH = 0.01
@@ -184,6 +184,7 @@ class DebugConfig:
         cls.vignette_feather = VIGNETTE_FEATHER
         cls.bloom_strength = BLOOM_STRENGTH
         cls.bloom_threshold = BLOOM_THRESHOLD
+        cls.base_exposure_offset_v2 = BASE_EXPOSURE_OFFSET_V2
         cls.lut_path = ''
 
 
