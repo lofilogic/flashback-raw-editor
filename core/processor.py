@@ -33,9 +33,11 @@ import colour
 from . import resource_path
 from .config import (
     SENSOR_BLACK, GRAIN_TILE_SCALE, GRAIN_HIGHLIGHT_BIAS, PUSH_PULL_RANGE_EV,
-    _timing_print, DebugConfig,
+    BASE_KELVIN, GENERIC_DAYLIGHT_K, GENERIC_DAYLIGHT_WB_FALLBACK,
+    PROFILE_TONE_CURVE,
+    VibeConfig, ImageAdjustments,
+    _timing_print,
 )
-from .dng_export import _PROFILE_TONE_CURVE
 from .kernels import acescct_encode, apply_grain
 from .auto_exposure_reverse import compute_reverse_gain
 from .effects import (
@@ -117,14 +119,6 @@ _XYZ_TO_LINSRGB = np.array([
     [ 0.0556434, -0.2040259,  1.0572252],
 ], dtype=np.float32)
 
-# Generic raw WB target — matches Flashback's BASE_KELVIN so both paths share
-# the same neutral point before the WB slider.
-_GENERIC_RAW_TARGET_K = 5500.0
-_GENERIC_DAYLIGHT_K   = 6504.0  # CIE D65 standard
-
-# Approximate D65 Bayer WB for cameras whose raw file lacks daylight_whitebalance.
-_GENERIC_DAYLIGHT_WB_FALLBACK = [2.0, 1.0, 1.6, 1.0]
-
 _CS_PROPHOTO = colour.RGB_COLOURSPACES['ProPhoto RGB']
 _CS_ACESCG   = colour.RGB_COLOURSPACES['ACEScg']
 _CS_SRGB     = colour.RGB_COLOURSPACES['sRGB']
@@ -143,9 +137,6 @@ PROPHOTO_TO_LINSRGB = colour.RGB_to_RGB(
 # USER WB + EXPOSURE
 # =============================================================================
 
-# Slider zero = D55, matching FM1's calibration illuminant.
-BASE_KELVIN = 5500.0
-
 _XYZ_TO_AP1_PURE = XYZ_D60_TO_ACESCG.astype(np.float32)
 
 
@@ -158,7 +149,7 @@ def _planckian_xyz(cct: float) -> np.ndarray:
 
 
 def _wb_shift_to_kelvin(daylight_wb: list, target_k: float,
-                         daylight_k: float = _GENERIC_DAYLIGHT_K) -> list:
+                         daylight_k: float = GENERIC_DAYLIGHT_K) -> list:
     """Shift Bayer WB multipliers from daylight_k to target_k.
 
     Uses Planckian XYZ ratios in linear sRGB space as a sensor-agnostic proxy.
@@ -215,7 +206,7 @@ def _build_tone_curve_lut(curve_pairs: list, size: int = 1024) -> np.ndarray:
     return np.interp(domain, xs, ys).astype(np.float32)
 
 
-_TONE_CURVE_LUT = _build_tone_curve_lut(_PROFILE_TONE_CURVE, size=4096)
+_TONE_CURVE_LUT = _build_tone_curve_lut(PROFILE_TONE_CURVE, size=4096)
 
 
 def _apply_tone_curve(x: np.ndarray) -> np.ndarray:
@@ -299,27 +290,33 @@ def _read_dng_exif(path: str) -> tuple:
 # =============================================================================
 
 class FlashbackProcessor:
-    """Raw processor for Flashback DNGs and generic camera raws."""
+    """Raw processor for Flashback DNGs and generic camera raws.
 
-    def __init__(self, lut_path=None):
+    Owns:
+      * vibe         — the active VibeConfig (film-stock settings)
+      * adjustments  — the per-image ImageAdjustments (sliders + rotation)
+
+    Both are passed by reference; the UI mutates them directly and the
+    next render picks up the new values. The processor never reads
+    global state.
+    """
+
+    def __init__(self, vibe: VibeConfig = None, adjustments: ImageAdjustments = None,
+                 lut_path: str = None):
+        self.vibe = vibe if vibe is not None else VibeConfig()
+        self.adjustments = adjustments if adjustments is not None else ImageAdjustments()
+
         self.intermediate_acescg = None
         self.current_file = None
         self.is_flashback_file = False
         self._rev_gain = 1.0
         self._rev_gain_unconditional = 1.0
-        self.rotation = 0
-        self.user_settings = {
-            'exposure_ev': 0.0,
-            'wb_temp': 0,
-            'tint': 0.0,
-            'push_pull_ev': 0.0,
-        }
         self.highlight_mode = 1
         self.rawpy_bright = 1.0
         self.enable_highlight_recovery = True
 
         self.lut = None
-        path = lut_path or DebugConfig.lut_path
+        path = lut_path or self.vibe.lut_path
         if path and os.path.exists(path):
             try:
                 self.lut = colour.read_LUT(path)
@@ -395,10 +392,12 @@ class FlashbackProcessor:
         with rawpy.imread(path) as raw:
             daylight_wb = list(raw.daylight_whitebalance or [])
             if not daylight_wb or all(v == 0.0 for v in daylight_wb):
-                daylight_wb = list(_GENERIC_DAYLIGHT_WB_FALLBACK)
+                daylight_wb = list(GENERIC_DAYLIGHT_WB_FALLBACK)
                 _timing_print(f"  [generic] daylight_whitebalance missing — using D65 fallback")
-            fixed_wb = _wb_shift_to_kelvin(daylight_wb, _GENERIC_RAW_TARGET_K)
-            _timing_print(f"  [generic] WB shifted D65->{_GENERIC_RAW_TARGET_K:.0f}K: "
+            # Target BASE_KELVIN so the generic path lands at the same neutral
+            # point as the Flashback path before the WB slider takes over.
+            fixed_wb = _wb_shift_to_kelvin(daylight_wb, BASE_KELVIN)
+            _timing_print(f"  [generic] WB shifted D65->{BASE_KELVIN:.0f}K: "
                           f"[{fixed_wb[0]:.4f}, {fixed_wb[1]:.4f}, {fixed_wb[2]:.4f}]")
 
             rgb = raw.postprocess(
@@ -425,22 +424,35 @@ class FlashbackProcessor:
 
     # ---- public surface -------------------------------------------------------
 
-    def get_settings(self):
-        return self.user_settings.copy()
+    def get_settings(self) -> dict:
+        """Return a dict copy of the current per-image adjustments.
 
-    def set_settings(self, settings):
-        self.user_settings.update(settings)
+        Returns a dict (not the ImageAdjustments instance) so the UI can
+        merge in extra fields like 'auto_tint' without touching the
+        canonical dataclass.
+        """
+        return self.adjustments.to_dict()
+
+    def set_settings(self, adjustments):
+        """Update adjustments. Accepts either an ImageAdjustments instance or
+        a partial dict; unknown keys ignored."""
+        if isinstance(adjustments, ImageAdjustments):
+            self.adjustments = adjustments
+        elif isinstance(adjustments, dict):
+            for k, v in adjustments.items():
+                if hasattr(self.adjustments, k):
+                    setattr(self.adjustments, k, v)
 
     def rotate_clockwise(self):
-        self.rotation = (self.rotation + 90) % 360
+        self.adjustments.rotation = (self.adjustments.rotation + 90) % 360
         return self._apply_rotation_and_render()
 
     def rotate_counterclockwise(self):
-        self.rotation = (self.rotation - 90) % 360
+        self.adjustments.rotation = (self.adjustments.rotation - 90) % 360
         return self._apply_rotation_and_render()
 
     def get_rotation(self):
-        return self.rotation
+        return self.adjustments.rotation
 
     def _render_fast(self, downscale=False):
         return self._render(downscale=downscale)
@@ -448,13 +460,13 @@ class FlashbackProcessor:
     # ---- pipeline -------------------------------------------------------------
 
     def _bake_halation(self, acescg):
-        if not (DebugConfig.enable_halation and DebugConfig.halation_strength > 0):
+        if not (self.vibe.enable_halation and self.vibe.halation_strength > 0):
             return acescg
         return apply_halation(
             acescg,
-            DebugConfig.halation_threshold,
-            DebugConfig.halation_blur_radius,
-            DebugConfig.halation_strength,
+            self.vibe.halation_threshold,
+            self.vibe.halation_blur_radius,
+            self.vibe.halation_strength,
         )
 
     def load_image(self, dng_path):
@@ -505,9 +517,9 @@ class FlashbackProcessor:
                               f"range=[{acescg.min():.4f},{acescg.max():.4f}]")
 
                 # exp_s already read from the single EXIF pass above
-                self._rev_gain = (float(compute_reverse_gain(exp_s, DebugConfig.reverse_autoexposure_t_ref))
-                                  if (exp_s and DebugConfig.enable_reverse_autoexposure) else 1.0)
-                self._rev_gain_unconditional = float(compute_reverse_gain(exp_s, DebugConfig.reverse_autoexposure_t_ref)) if exp_s else 1.0
+                self._rev_gain = (float(compute_reverse_gain(exp_s, self.vibe.reverse_autoexposure_t_ref))
+                                  if (exp_s and self.vibe.enable_reverse_autoexposure) else 1.0)
+                self._rev_gain_unconditional = float(compute_reverse_gain(exp_s, self.vibe.reverse_autoexposure_t_ref)) if exp_s else 1.0
 
                 acescg = self._bake_halation(acescg)
             else:
@@ -540,39 +552,40 @@ class FlashbackProcessor:
 
     def _render(self, downscale=False):
         t0  = time.time()
-        cfg = DebugConfig
+        v   = self.vibe          # film-stock parameters
+        a   = self.adjustments   # per-image sliders
         img = self.intermediate_acescg
         if downscale:
             h, w = img.shape[:2]
             img = cv2.resize(img, (w // 3, h // 3), interpolation=cv2.INTER_LINEAR)
 
-        push_pull_ev = float(self.user_settings.get('push_pull_ev', 0.0))
+        push_pull_ev = float(a.push_pull_ev)
 
-        f        = float(cfg.reverse_ae_strength)
-        rev_gain = self._rev_gain if cfg.enable_reverse_autoexposure else 1.0
+        f        = float(v.reverse_ae_strength)
+        rev_gain = self._rev_gain if v.enable_reverse_autoexposure else 1.0
         rev_ev   = float(np.log2(rev_gain)) if rev_gain > 0 else 0.0
-        boost_ev = float(cfg.post_ae_exposure_boost_ev) if cfg.enable_post_ae_exposure_boost else 0.0
+        boost_ev = float(v.post_ae_exposure_boost_ev) if v.enable_post_ae_exposure_boost else 0.0
         pre_lut_ev = f * rev_ev + f * boost_ev + push_pull_ev
 
-        wb   = _kelvin_to_acescg_gain(BASE_KELVIN + self.user_settings['wb_temp'])
-        tint = _tint_to_acescg_gain(self.user_settings['tint'])
-        ev   = float(2.0 ** (self.user_settings['exposure_ev'] + cfg.base_exposure_offset_v2 + pre_lut_ev))
+        wb   = _kelvin_to_acescg_gain(BASE_KELVIN + a.wb_temp)
+        tint = _tint_to_acescg_gain(a.tint)
+        ev   = float(2.0 ** (a.exposure_ev + v.base_exposure_offset_v2 + pre_lut_ev))
         gain = (wb * tint * ev).astype(np.float32)
         if not np.allclose(gain, 1.0):
             img = img * gain
 
         if not downscale:
-            if cfg.enable_bloom and cfg.bloom_strength > 0:
-                img = apply_bloom(img, cfg.bloom_strength,
-                                  cfg.bloom_threshold, linear=True)
-            if cfg.enable_vignette and cfg.vignette_strength > 0:
-                img = apply_vignette(img, cfg.vignette_strength,
-                                     cfg.vignette_color_shift,
-                                     cfg.vignette_feather)
+            if v.enable_bloom and v.bloom_strength > 0:
+                img = apply_bloom(img, v.bloom_strength,
+                                  v.bloom_threshold, linear=True)
+            if v.enable_vignette and v.vignette_strength > 0:
+                img = apply_vignette(img, v.vignette_strength,
+                                     v.vignette_color_shift,
+                                     v.vignette_feather)
 
-        if cfg.enable_lut and self.lut is not None:
-            if cfg.enable_cnr and cfg.cnr_sigma > 0:
-                img = reduce_color_noise_chroma(img, sigma=cfg.cnr_sigma)
+        if v.enable_lut and self.lut is not None:
+            if v.enable_cnr and v.cnr_sigma > 0:
+                img = reduce_color_noise_chroma(img, sigma=v.cnr_sigma)
             img_acescct = acescct_encode(np.maximum(img, 1e-10))
             try:
                 img_display = apply_lut_fast(img_acescct, self.lut)
@@ -587,19 +600,19 @@ class FlashbackProcessor:
             img_display = _srgb_oetf(np.clip(lin_srgb, 0.0, 1.0))
 
         if not downscale:
-            if cfg.enable_chromatic_aberration and cfg.ca_strength > 0:
+            if v.enable_chromatic_aberration and v.ca_strength > 0:
                 img_display = apply_chromatic_aberration(
-                    img_display, cfg.ca_strength, cfg.ca_steps, cfg.ca_blue_blur)
-            if cfg.enable_softness and cfg.softness_sigma > 0:
-                img_display = apply_softness(img_display, cfg.softness_sigma)
-            if cfg.enable_grain and cfg.grain_strength > 0:
+                    img_display, v.ca_strength, v.ca_steps, v.ca_blue_blur)
+            if v.enable_softness and v.softness_sigma > 0:
+                img_display = apply_softness(img_display, v.softness_sigma)
+            if v.enable_grain and v.grain_strength > 0:
                 grain_driver = f * rev_ev + push_pull_ev
                 img_display  = self._apply_grain(
-                    img_display, cfg.grain_strength,
+                    img_display, v.grain_strength,
                     highlight_bias=self._grain_highlight_bias(grain_driver))
-            if cfg.enable_sharpen and cfg.sharpen_strength > 0:
+            if v.enable_sharpen and v.sharpen_strength > 0:
                 img_display = apply_sharpen(
-                    img_display, cfg.sharpen_strength, cfg.sharpen_radius)
+                    img_display, v.sharpen_strength, v.sharpen_radius)
 
         post_gain = 2.0 ** (-pre_lut_ev)
         if not np.isclose(post_gain, 1.0):
@@ -614,16 +627,17 @@ class FlashbackProcessor:
     def _apply_rotation_and_render(self):
         if self.intermediate_acescg is None:
             return None
-        if self.rotation == 90:
+        rot = self.adjustments.rotation
+        if rot == 90:
             self.intermediate_acescg = np.ascontiguousarray(
                 np.rot90(self.intermediate_acescg, k=-1))
-        elif self.rotation == 180:
+        elif rot == 180:
             self.intermediate_acescg = np.ascontiguousarray(
                 np.rot90(self.intermediate_acescg, k=2))
-        elif self.rotation == 270:
+        elif rot == 270:
             self.intermediate_acescg = np.ascontiguousarray(
                 np.rot90(self.intermediate_acescg, k=1))
-        self.rotation = 0
+        self.adjustments.rotation = 0
         return self.render_preview()
 
 
@@ -650,15 +664,16 @@ def export_image(processor, output_path, quality=95, as_tiff=False,
         img = processor.intermediate_acescg
         if img is None:
             return False
+        vibe = processor.vibe
         if lut_profiling:
             rev_gain = processor._rev_gain_unconditional
             if not np.isclose(rev_gain, 1.0):
                 img = img * rev_gain
-            base_ev = DebugConfig.base_exposure_offset_v2
+            base_ev = vibe.base_exposure_offset_v2
             if not np.isclose(base_ev, 0.0):
                 img = img * (2.0 ** base_ev)
-        if DebugConfig.enable_cnr and DebugConfig.cnr_sigma > 0:
-            img = reduce_color_noise_chroma(img, sigma=DebugConfig.cnr_sigma)
+        if vibe.enable_cnr and vibe.cnr_sigma > 0:
+            img = reduce_color_noise_chroma(img, sigma=vibe.cnr_sigma)
         img_acescct = acescct_encode(np.maximum(img, 1e-10))
         img16 = np.clip(img_acescct * 65535.0, 0, 65535).astype(np.uint16)
         bgr   = cv2.cvtColor(img16, cv2.COLOR_RGB2BGR)

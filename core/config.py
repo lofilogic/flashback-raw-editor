@@ -1,18 +1,55 @@
 """
-Application-wide constants, effect defaults, and runtime configuration.
+Application-wide constants, dataclasses, and runtime configuration.
+
+Two dataclasses model the two layers of user-mutable state:
+
+  VibeConfig         — the "film stock" layer. Effect parameters that
+                       define a vibe (halation, grain, LUT, etc.).
+                       One instance per active vibe. Persisted via
+                       core.vibe_state. Edited only in the debug panel.
+
+  ImageAdjustments   — the per-image layer. Exposure, WB, tint,
+                       push/pull, rotation, plus the id of the vibe
+                       this image was last edited under. Travels with
+                       the image; gets saved in a project.
+
+Everything that used to be DebugConfig.X is now a field on VibeConfig.
 """
+from dataclasses import dataclass, asdict, fields, replace
+import os as _os
 
 # =============================================================================
-# COLOR PIPELINE CONSTANTS
+# RAW PIPELINE CONSTANTS
 # =============================================================================
 
 SENSOR_BLACK = 64
+
+# Slider zero for the WB knob. Matches the Flashback ForwardMatrix1's
+# calibration illuminant (D55). The generic-raw path also targets this
+# Kelvin so both paths land at the same neutral point.
+BASE_KELVIN = 5500.0
+
+# CIE D65 — the reference illuminant for libraw's daylight_whitebalance.
+GENERIC_DAYLIGHT_K = 6504.0
+
+# Fallback Bayer WB for cameras whose raw file lacks daylight_whitebalance.
+GENERIC_DAYLIGHT_WB_FALLBACK = [2.0, 1.0, 1.6, 1.0]
+
+# v2 profile tone curve, used by the DNG exporter (tag 50940) AND by the
+# fallback render path when no LUT is active. Pairs of (input, output).
+PROFILE_TONE_CURVE = [
+    0.0, 0.0, 0.02, 0.02, 0.06, 0.10, 0.20, 0.42,
+    0.40, 0.70, 0.78, 0.95, 1.0, 1.0,
+]
+
+# =============================================================================
+# EXPOSURE PIPELINE TUNING
+# =============================================================================
 
 # v2 pipeline: constant render-time exposure lift (EV). Applied alongside
 # user exposure_ev and NOT counteracted post-LUT, so it genuinely raises
 # output brightness. Tune to compensate for the gap between the LUT's
 # training input level and the clean camera-metered intermediate.
-# Does not affect the intermediate or TIFF exports.
 BASE_EXPOSURE_OFFSET_V2 = 2.0
 
 # Static linear-space boost applied AFTER reverse-AE and BEFORE ACEScct encode.
@@ -45,9 +82,8 @@ HALATION_BLUR_RADIUS = 4.0
 HALATION_STRENGTH = 0.5
 SOFTNESS_SIGMA = 0.5
 GRAIN_STRENGTH = 0.01
-GRAIN_BLUR_SIGMA = 0.1
-GRAIN_TILE_SCALE = 0.8 # <1.0 makes grain finer (tiles render denser); >1.0 makes it chunkier.
-GRAIN_HIGHLIGHT_BIAS = 0.3 # 1.0 = grain biased to highlights (matches scanned negative film density), 0.0 = biased to shadows (noise-floor look), 0.5 = flat.
+GRAIN_TILE_SCALE = 0.8     # <1.0 makes grain finer (tiles render denser); >1.0 makes it chunkier.
+GRAIN_HIGHLIGHT_BIAS = 0.3 # 1.0 = grain biased to highlights, 0.0 = shadows, 0.5 = flat.
 SHARPEN_STRENGTH = 0.5
 SHARPEN_RADIUS = 1.0
 CNR_SIGMA = 2.0
@@ -58,209 +94,172 @@ BLOOM_STRENGTH = 0.3
 BLOOM_THRESHOLD = 0.65
 
 # =============================================================================
-# VIBE PRESETS
-# =============================================================================
-
-VIBE_PRESETS = {
-    'disposable':           {'enable_ca': True,  'ca_strength': 0.010, 'softness': 0.3, 'sharpness': 2.0, 'sharpen_radius': 0.5, 'grain': 1.2, 'vignette': 0.10, 'vignette_feather': 0.4, 'bloom': 0.10, 'lut': 'assets/luts/disposable.cube'},
-    'flashback_classic_v1': {'enable_ca': True,  'ca_strength': 0.010, 'softness': 0.5, 'sharpness': 1.0, 'sharpen_radius': 0.5, 'grain': 2.0, 'vignette': 0.10, 'vignette_feather': 0.4, 'bloom': 0.10, 'lut': 'assets/luts/V1.cube', 'base_exposure_offset_v2': 0.0},
-    'point_shoot': {'enable_ca': True,  'ca_strength': 0.002, 'softness': 0.3, 'sharpness': 0.5, 'sharpen_radius':  1.0, 'grain': 0.8, 'vignette': 0.10, 'vignette_feather': 1.0, 'bloom': 0.10, 'lut': 'assets/luts/pointandshoot.cube'},
-    'rangefinder': {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.1, 'sharpness': 0.8, 'sharpen_radius':  1.0, 'grain': 0.5, 'vignette': 0.05, 'vignette_feather': 1.0, 'bloom': 0.05, 'lut': 'assets/luts/rangefinder.cube'},
-    'monochrome':  {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.1, 'sharpness': 0.8, 'sharpen_radius':  1.0, 'grain': 1.5, 'vignette': 0.20, 'vignette_feather': 1.0, 'bloom': 0.05, 'lut': 'assets/luts/monochrome.cube'},
-}
-
-# =============================================================================
 # DEBUG / TIMING
 # =============================================================================
 
 # Per-effect timing prints. Off by default; opt in via the FLASHBACK_DEBUG_TIMING
 # env var ("1" / "true" / "yes") so user installs stay quiet.
-import os as _os
 DEBUG_TIMING = _os.environ.get('FLASHBACK_DEBUG_TIMING', '').lower() in ('1', 'true', 'yes')
+
 
 def _timing_print(msg):
     """Print timing/debug messages. Controlled by DEBUG_TIMING flag."""
     if DEBUG_TIMING:
         print(msg)
 
+
 # =============================================================================
-# RUNTIME DEBUG CONFIGURATION
+# VIBE CONFIG (the "film stock" layer)
 # =============================================================================
 
-class DebugConfig:
+@dataclass
+class VibeConfig:
+    """All effect parameters that define a vibe.
+
+    One instance per active vibe. Persisted via core.vibe_state.
+    Constructed empty (all factory defaults) and then either tweaked by
+    the user or seeded from a VIBE_PRESETS recipe via vibe_config_for().
     """
-    Runtime configuration for the debug panel.
-    Class-level attributes act as global toggles and tunable parameters.
-    """
-    # Toggles
-    enable_halation = True
-    enable_chromatic_aberration = True
-    enable_softness = True
-    enable_grain = True
-    enable_sharpen = True
-    enable_cnr = True
-    enable_lut = True
-    enable_vignette = True
-    enable_bloom = True
-    enable_reverse_autoexposure = False
+    # ---- effect toggles ----
+    enable_halation: bool = True
+    enable_chromatic_aberration: bool = True
+    enable_softness: bool = True
+    enable_grain: bool = True
+    enable_sharpen: bool = True
+    enable_cnr: bool = True
+    enable_lut: bool = True
+    enable_vignette: bool = True
+    enable_bloom: bool = True
 
-    # Reference exposure time in seconds — the "middleground". Shots with a
-    # shorter ExposureTime get boosted; longer get cut. Tune empirically
-    # against your film scans.
-    reverse_autoexposure_t_ref = 1e-3
+    # ---- effect parameters ----
+    halation_threshold: float = HALATION_THRESHOLD
+    halation_blur_radius: float = HALATION_BLUR_RADIUS
+    halation_strength: float = HALATION_STRENGTH
+    ca_strength: float = CHROMATIC_ABERRATION_STRENGTH
+    ca_steps: int = CHROMATIC_ABERRATION_STEPS
+    ca_blue_blur: float = CHROMATIC_ABERRATION_BLUE_BLUR
+    softness_sigma: float = SOFTNESS_SIGMA
+    grain_strength: float = GRAIN_STRENGTH
+    sharpen_strength: float = SHARPEN_STRENGTH
+    sharpen_radius: float = SHARPEN_RADIUS
+    cnr_sigma: float = CNR_SIGMA
+    vignette_strength: float = VIGNETTE_STRENGTH
+    vignette_color_shift: float = VIGNETTE_COLOR_SHIFT
+    vignette_feather: float = VIGNETTE_FEATHER
+    bloom_strength: float = BLOOM_STRENGTH
+    bloom_threshold: float = BLOOM_THRESHOLD
 
-    # Static post-AE exposure boost (linear gain in EV). Must match the value
-    # used to build the LUT — see POST_AE_EXPOSURE_BOOST_EV above.
-    enable_post_ae_exposure_boost = False
-    post_ae_exposure_boost_ev = POST_AE_EXPOSURE_BOOST_EV
+    # ---- reverse-AE (advanced) ----
+    enable_reverse_autoexposure: bool = False
+    reverse_autoexposure_t_ref: float = 1e-3
+    enable_post_ae_exposure_boost: bool = False
+    post_ae_exposure_boost_ev: float = POST_AE_EXPOSURE_BOOST_EV
+    reverse_ae_strength: float = REVERSE_AE_STRENGTH
 
-    # Fraction of the full (reverse-AE + boost) effect applied at slider zero.
-    # 0.0 = camera-metered look, 1.0 = full LUT-trained character. The post-LUT
-    # reapply always counteracts exactly this fraction, so brightness is preserved.
-    reverse_ae_strength = REVERSE_AE_STRENGTH
+    # ---- pipeline tuning ----
+    base_exposure_offset_v2: float = BASE_EXPOSURE_OFFSET_V2
 
-    # Parameters (initialized from constants above)
-    halation_threshold = HALATION_THRESHOLD
-    halation_blur_radius = HALATION_BLUR_RADIUS
-    halation_strength = HALATION_STRENGTH
-    ca_strength = CHROMATIC_ABERRATION_STRENGTH
-    ca_steps = CHROMATIC_ABERRATION_STEPS
-    ca_blue_blur = CHROMATIC_ABERRATION_BLUE_BLUR
-    softness_sigma = SOFTNESS_SIGMA
-    grain_strength = GRAIN_STRENGTH
-    sharpen_strength = SHARPEN_STRENGTH
-    sharpen_radius = SHARPEN_RADIUS
-    cnr_sigma = CNR_SIGMA
-    vignette_strength = VIGNETTE_STRENGTH
-    vignette_color_shift = VIGNETTE_COLOR_SHIFT
-    vignette_feather = VIGNETTE_FEATHER
-    bloom_strength = BLOOM_STRENGTH
-    bloom_threshold = BLOOM_THRESHOLD
+    # ---- LUT + DNG metadata ----
+    lut_path: str = ''
+    dng_profile_name: str = 'Flashback Standard'
 
-    # Render-time EV lift applied to the v2 pipeline on top of user exposure_ev.
-    # Tune per-vibe to compensate for the LUT's training input level.
-    base_exposure_offset_v2 = BASE_EXPOSURE_OFFSET_V2
-
-    # Path to the active LUT (relative for bundled, absolute for user-loaded).
-    # Empty means: fall back to whatever the processor loaded at construction.
-    lut_path = ''
-
-    # ProfileName string embedded in exported DNGs (tag 50936).
-    dng_profile_name = 'Flashback Standard'
+    # ---- serialization ----
+    def to_dict(self) -> dict:
+        return asdict(self)
 
     @classmethod
-    def reset(cls):
-        """Reset all parameters to module defaults.
-        Note: if new parameters are added, this method must also be updated.
-        """
-        cls.enable_halation = True
-        cls.enable_chromatic_aberration = True
-        cls.enable_softness = True
-        cls.enable_grain = True
-        cls.enable_sharpen = True
-        cls.enable_cnr = True
-        cls.enable_lut = True
-        cls.enable_vignette = True
-        cls.enable_bloom = True
-        cls.enable_reverse_autoexposure = False
-        cls.reverse_autoexposure_t_ref = 1e-3
-        cls.enable_post_ae_exposure_boost = False
-        cls.post_ae_exposure_boost_ev = POST_AE_EXPOSURE_BOOST_EV
-        cls.reverse_ae_strength = REVERSE_AE_STRENGTH
+    def from_dict(cls, d: dict) -> 'VibeConfig':
+        """Build a VibeConfig from a dict; unknown keys ignored, types coerced."""
+        kwargs = {}
+        known = {f.name: f.type for f in fields(cls)}
+        for name, t in known.items():
+            if name in d:
+                try:
+                    kwargs[name] = t(d[name]) if t is not bool else bool(d[name])
+                except (TypeError, ValueError):
+                    pass  # leave default
+        return cls(**kwargs)
 
-        cls.halation_threshold = HALATION_THRESHOLD
-        cls.halation_blur_radius = HALATION_BLUR_RADIUS
-        cls.halation_strength = HALATION_STRENGTH
-        cls.ca_strength = CHROMATIC_ABERRATION_STRENGTH
-        cls.ca_steps = CHROMATIC_ABERRATION_STEPS
-        cls.ca_blue_blur = CHROMATIC_ABERRATION_BLUE_BLUR
-        cls.softness_sigma = SOFTNESS_SIGMA
-        cls.grain_strength = GRAIN_STRENGTH
-        cls.sharpen_strength = SHARPEN_STRENGTH
-        cls.sharpen_radius = SHARPEN_RADIUS
-        cls.cnr_sigma = CNR_SIGMA
-        cls.vignette_strength = VIGNETTE_STRENGTH
-        cls.vignette_color_shift = VIGNETTE_COLOR_SHIFT
-        cls.vignette_feather = VIGNETTE_FEATHER
-        cls.bloom_strength = BLOOM_STRENGTH
-        cls.bloom_threshold = BLOOM_THRESHOLD
-        cls.base_exposure_offset_v2 = BASE_EXPOSURE_OFFSET_V2
-        cls.lut_path = ''
+    def copy(self) -> 'VibeConfig':
+        return replace(self)
 
 
 # =============================================================================
-# VIBE STATE SCHEMA
+# IMAGE ADJUSTMENTS (the per-image layer)
 # =============================================================================
 
-# Ordered list of (field_name, type) tuples — every field that participates
-# in vibe state. Used by serialization, factory_state_for, and the panel sync.
-VIBE_FIELDS = [
-    ('enable_halation', bool),
-    ('enable_chromatic_aberration', bool),
-    ('enable_softness', bool),
-    ('enable_grain', bool),
-    ('enable_sharpen', bool),
-    ('enable_cnr', bool),
-    ('enable_lut', bool),
-    ('enable_vignette', bool),
-    ('enable_bloom', bool),
-    ('halation_threshold', float),
-    ('halation_blur_radius', float),
-    ('halation_strength', float),
-    ('ca_strength', float),
-    ('ca_steps', int),
-    ('ca_blue_blur', float),
-    ('softness_sigma', float),
-    ('grain_strength', float),
-    ('sharpen_strength', float),
-    ('sharpen_radius', float),
-    ('cnr_sigma', float),
-    ('vignette_strength', float),
-    ('vignette_color_shift', float),
-    ('vignette_feather', float),
-    ('bloom_strength', float),
-    ('bloom_threshold', float),
-    ('lut_path', str),
-    ('base_exposure_offset_v2', float),
-]
+@dataclass
+class ImageAdjustments:
+    """Per-image user adjustments: the four main-window sliders + rotation.
 
-# Captured at import time, before any user code mutates DebugConfig — this is
-# the "fresh-install" baseline shared across all vibes for non-vibe-specific
-# fields (halation, CNR, dither, etc.).
-_FACTORY_BASE = {name: getattr(DebugConfig, name) for name, _ in VIBE_FIELDS}
-
-
-def factory_state_for(vibe_id: str) -> dict:
-    """Return the bundled factory state for `vibe_id` — all VIBE_FIELDS values
-    the app would use on a fresh install. Vibe-specific fields come from
-    VIBE_PRESETS; everything else is the global baseline.
+    Travels with the image and is persisted in projects. active_vibe_id
+    records which vibe the image was last edited under; for now the UI
+    keeps a single global active vibe, but every image stores its own id
+    so future per-image vibes (or project reloading) work without a
+    schema change.
     """
-    state = dict(_FACTORY_BASE)
+    exposure_ev: float = 0.0
+    wb_temp: float = 0.0
+    tint: float = 0.0
+    push_pull_ev: float = 0.0
+    rotation: int = 0
+    active_vibe_id: str = ''   # filled in by the editor when an image loads
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> 'ImageAdjustments':
+        kwargs = {}
+        known = {f.name: f.type for f in fields(cls)}
+        for name, t in known.items():
+            if name in d:
+                try:
+                    kwargs[name] = t(d[name])
+                except (TypeError, ValueError):
+                    pass
+        return cls(**kwargs)
+
+    def copy(self) -> 'ImageAdjustments':
+        return replace(self)
+
+
+# =============================================================================
+# VIBE PRESETS — recipes that seed a VibeConfig
+# =============================================================================
+
+VIBE_PRESETS = {
+    'disposable':           {'enable_ca': True,  'ca_strength': 0.010, 'softness': 0.3, 'sharpness': 2.0, 'sharpen_radius': 0.5, 'grain': 1.2, 'vignette': 0.10, 'vignette_feather': 0.4, 'bloom': 0.10, 'lut': 'assets/luts/disposable.cube'},
+    'flashback_classic_v1': {'enable_ca': True,  'ca_strength': 0.010, 'softness': 0.5, 'sharpness': 1.0, 'sharpen_radius': 0.5, 'grain': 2.0, 'vignette': 0.10, 'vignette_feather': 0.4, 'bloom': 0.10, 'lut': 'assets/luts/V1.cube', 'base_exposure_offset_v2': 0.0},
+    'point_shoot':          {'enable_ca': True,  'ca_strength': 0.002, 'softness': 0.3, 'sharpness': 0.5, 'sharpen_radius': 1.0, 'grain': 0.8, 'vignette': 0.10, 'vignette_feather': 1.0, 'bloom': 0.10, 'lut': 'assets/luts/pointandshoot.cube'},
+    'rangefinder':          {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.1, 'sharpness': 0.8, 'sharpen_radius': 1.0, 'grain': 0.5, 'vignette': 0.05, 'vignette_feather': 1.0, 'bloom': 0.05, 'lut': 'assets/luts/rangefinder.cube'},
+    'monochrome':           {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.1, 'sharpness': 0.8, 'sharpen_radius': 1.0, 'grain': 1.5, 'vignette': 0.20, 'vignette_feather': 1.0, 'bloom': 0.05, 'lut': 'assets/luts/monochrome.cube'},
+}
+
+
+def vibe_config_for(vibe_id: str) -> VibeConfig:
+    """Construct a fresh VibeConfig from a preset recipe.
+
+    All non-preset fields keep their factory defaults. The preset
+    dictionary uses short keys (enable_ca, ca_strength, softness, ...);
+    we map those onto the dataclass field names.
+    """
+    cfg = VibeConfig()  # all factory defaults
     preset = VIBE_PRESETS[vibe_id]
-    state['enable_chromatic_aberration'] = preset['enable_ca']
-    state['ca_strength'] = preset['ca_strength']
-    state['softness_sigma'] = preset['softness']
-    state['sharpen_strength'] = preset['sharpness']
-    state['sharpen_radius'] = preset['sharpen_radius']
-    state['grain_strength'] = preset['grain']
-    state['vignette_strength'] = preset['vignette']
-    state['vignette_feather'] = preset.get('vignette_feather', 1.0)
-    state['bloom_strength'] = preset['bloom']
-    state['lut_path'] = preset['lut']
-    state['base_exposure_offset_v2'] = preset.get('base_exposure_offset_v2', BASE_EXPOSURE_OFFSET_V2)
-    return state
+    cfg.enable_chromatic_aberration = preset['enable_ca']
+    cfg.ca_strength                 = preset['ca_strength']
+    cfg.softness_sigma              = preset['softness']
+    cfg.sharpen_strength            = preset['sharpness']
+    cfg.sharpen_radius              = preset['sharpen_radius']
+    cfg.grain_strength              = preset['grain']
+    cfg.vignette_strength           = preset['vignette']
+    cfg.vignette_feather            = preset.get('vignette_feather', 1.0)
+    cfg.bloom_strength              = preset['bloom']
+    cfg.lut_path                    = preset['lut']
+    cfg.base_exposure_offset_v2     = preset.get('base_exposure_offset_v2', BASE_EXPOSURE_OFFSET_V2)
+    return cfg
 
 
-def snapshot_debug_config() -> dict:
-    """Capture the current DebugConfig as a vibe-state dict (only VIBE_FIELDS)."""
-    return {name: getattr(DebugConfig, name) for name, _ in VIBE_FIELDS}
-
-
-def apply_state_to_debug_config(state: dict) -> None:
-    """Write a vibe-state dict into DebugConfig, coercing types and ignoring unknown keys."""
-    for name, t in VIBE_FIELDS:
-        if name in state:
-            try:
-                setattr(DebugConfig, name, t(state[name]))
-            except (TypeError, ValueError):
-                pass
+# Names of every VibeConfig field — used by the debug panel to detect
+# "modified from factory" state.
+VIBE_FIELD_NAMES = tuple(f.name for f in fields(VibeConfig))

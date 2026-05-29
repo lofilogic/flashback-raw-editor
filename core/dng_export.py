@@ -3,6 +3,8 @@ import numpy as np
 import exifread
 from pathlib import Path
 
+from .config import PROFILE_TONE_CURVE
+
 # TIFF / DNG Tag Typen
 _BYTE, _ASCII, _SHORT, _LONG, _RATIONAL, _SRATIONAL, _FLOAT = 1, 2, 3, 4, 5, 10, 11
 
@@ -42,10 +44,6 @@ def _pack_ifd(tags: list, current_offset: int, next_ifd_offset: int = 0) -> byte
                 
     entries += struct.pack('<I', next_ifd_offset)
     return entries + extra
-
-# --- Custom Tone Curve ---
-_PROFILE_TONE_CURVE = [0.0, 0.0, 0.02, 0.02, 0.06, 0.10, 0.20, 0.42, 0.40, 0.70, 0.78, 0.95, 1.0, 1.0]
-
 
 def export_dng(source_path: str, output_path: str, thumbnail_rgb: np.ndarray, profile_name: str = 'Flashback Standard') -> bool:
     try:
@@ -95,7 +93,7 @@ def export_dng(source_path: str, output_path: str, thumbnail_rgb: np.ndarray, pr
             model_str = b'Flashback ONE35\x00'
             unique_model_str = b'Flashback ONE35 V2\x00'
             profile_name_str = profile_name.encode() + b'\x00'
-            tone_curve_bytes = _pack_float_array(_PROFILE_TONE_CURVE)
+            tone_curve_bytes = _pack_float_array(PROFILE_TONE_CURVE)
 
             ifd0 = [
                 (254, _LONG, 1, struct.pack('<I', 1)),                                    
@@ -134,7 +132,7 @@ def export_dng(source_path: str, output_path: str, thumbnail_rgb: np.ndarray, pr
 
                 # --- EMBEDDED PROFILE ---
                 (50936, _ASCII, len(profile_name_str), profile_name_str),
-                (50940, _FLOAT, len(_PROFILE_TONE_CURVE), tone_curve_bytes),
+                (50940, _FLOAT, len(PROFILE_TONE_CURVE), tone_curve_bytes),
                 (50941, _LONG, 1, struct.pack('<I', 0)),     # ProfileEmbedPolicy: allow copying
             ]
             

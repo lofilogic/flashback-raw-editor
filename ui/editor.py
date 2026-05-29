@@ -39,8 +39,8 @@ from core import resource_path
 from core.gpu import gpu
 from core.processor import FlashbackProcessor, export_image
 from core.config import (
-    _timing_print, DebugConfig, VIBE_PRESETS,
-    factory_state_for, snapshot_debug_config, apply_state_to_debug_config,
+    _timing_print, VIBE_PRESETS,
+    VibeConfig, ImageAdjustments, vibe_config_for,
 )
 from core import vibe_state
 
@@ -263,9 +263,13 @@ class FlashbackEditor(QMainWindow):
         self.app_settings = QSettings("Flashback", "Editor")
         self.pending_file_path = None
 
-        # Restore persisted DNG profile name
-        from core.config import DebugConfig as _DC
-        _DC.dng_profile_name = self.app_settings.value("dng_profile_name", "Flashback Standard")
+        # The active vibe — replaces the old global DebugConfig. Initialized
+        # to factory disposable here; the real vibe is loaded in
+        # _on_vibe_selected() once the picker exists.
+        self.current_vibe = VibeConfig()
+        self.current_vibe.dng_profile_name = self.app_settings.value(
+            "dng_profile_name", "Flashback Standard"
+        )
 
         # Theme: load persisted choice (default: light) and register listener
         # so every setStyleSheet()/icon registered below can be re-applied.
@@ -291,7 +295,11 @@ class FlashbackEditor(QMainWindow):
         lut_path = resource_path("assets/luts/look.cube")
         if not os.path.exists(lut_path):
             lut_path = None
-        self.processor = FlashbackProcessor(lut_path)
+        self.processor = FlashbackProcessor(
+            vibe=self.current_vibe,
+            adjustments=ImageAdjustments(),
+            lut_path=lut_path,
+        )
 
         self._render_worker = RenderWorker(self.processor)
         self._render_worker.render_done.connect(self._on_render_done)
@@ -379,7 +387,7 @@ class FlashbackEditor(QMainWindow):
     # ===================================================================
 
     def _load_custom_lut(self):
-        """Prompt for a .cube file. Path is stored in DebugConfig.lut_path so it
+        """Prompt for a .cube file. Path is stored on the current vibe so it
         becomes part of the active vibe's session state and can be saved with it."""
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Select LUT", "", "LUT Files (*.cube)"
@@ -391,7 +399,7 @@ class FlashbackEditor(QMainWindow):
             self._lut_cache[file_path] = custom_lut
             self.processor.lut = custom_lut
             gpu.upload_lut(custom_lut.table)
-            DebugConfig.lut_path = file_path
+            self.current_vibe.lut_path = file_path
             self.debug_panel.refresh_lut_label()
             self.debug_panel.update_modified_indicator()
             self.refresh_from_debug()
@@ -446,7 +454,7 @@ class FlashbackEditor(QMainWindow):
         self.slider_exposure.setValue(0)
         self.slider_exposure.blockSignals(False)
         self.label_exposure.setText("0.0 EV")
-        self.processor.user_settings['exposure_ev'] = 0.0
+        self.processor.adjustments.exposure_ev = 0.0
         self.save_current_settings()
         self._render_needs_commit = True
         self._render_worker.request(downscale=False)
@@ -456,14 +464,14 @@ class FlashbackEditor(QMainWindow):
         self.slider_wb.setValue(0)
         self.slider_wb.blockSignals(False)
         self.label_wb.setText("5600 K")
-        self.processor.user_settings['wb_temp'] = 0.0
+        self.processor.adjustments.wb_temp = 0.0
         if self.chk_wb_link.isChecked():
             self._tint_manual_offset = 0.0
             self.slider_tint.blockSignals(True)
             self.slider_tint.setValue(0)
             self.slider_tint.blockSignals(False)
             self.label_tint.setText("+0")
-            self.processor.user_settings['tint'] = 0.0
+            self.processor.adjustments.tint = 0.0
         self.save_current_settings()
         self._render_needs_commit = True
         self._render_worker.request(downscale=False)
@@ -474,7 +482,7 @@ class FlashbackEditor(QMainWindow):
         self.slider_tint.setValue(0)
         self.slider_tint.blockSignals(False)
         self.label_tint.setText("+0")
-        self.processor.user_settings['tint'] = 0.0
+        self.processor.adjustments.tint = 0.0
         self.save_current_settings()
         self._render_needs_commit = True
         self._render_worker.request(downscale=False)
@@ -539,8 +547,7 @@ class FlashbackEditor(QMainWindow):
                 pass
 
     def set_dng_profile_name(self, name: str):
-        from core.config import DebugConfig
-        DebugConfig.dng_profile_name = name
+        self.current_vibe.dng_profile_name = name
         self.app_settings.setValue("dng_profile_name", name)
 
     def toggle_theme(self):
@@ -907,25 +914,31 @@ class FlashbackEditor(QMainWindow):
         return sec
 
     def _on_vibe_selected(self, vibe_id: str):
-        """Vibe changed: load saved state if any, else factory; apply to DebugConfig + LUT."""
-        state = self._state_for_vibe(vibe_id)
-        self._apply_vibe_state(vibe_id, state, refresh_thumbnails=True)
+        """Vibe changed: load saved VibeConfig if any, else factory; apply."""
+        vibe = self._vibe_for(vibe_id)
+        self._apply_vibe(vibe_id, vibe, refresh_thumbnails=True)
 
-    def _state_for_vibe(self, vibe_id: str) -> dict:
-        """Saved overrides if present for `vibe_id`, otherwise the factory state."""
+    def _vibe_for(self, vibe_id: str) -> VibeConfig:
+        """Saved VibeConfig if present for `vibe_id`, otherwise the factory recipe."""
         saved = vibe_state.load_all().get(vibe_id)
-        if saved:
-            base = factory_state_for(vibe_id)
-            base.update(saved)  # saved keys win, factory fills any missing
-            return base
-        return factory_state_for(vibe_id)
+        if saved is not None:
+            return saved
+        return vibe_config_for(vibe_id)
 
-    def _apply_vibe_state(self, vibe_id: str, state: dict, refresh_thumbnails: bool = False):
-        """Write `state` into DebugConfig, load its LUT, sync the panel, refresh preview."""
+    def _apply_vibe(self, vibe_id: str, vibe: VibeConfig, refresh_thumbnails: bool = False):
+        """Install `vibe` as the active vibe: bind it to the processor, load
+        its LUT, sync the debug panel, and refresh the preview."""
         if hasattr(self, '_render_worker'):
             self._render_worker.invalidate()
-        apply_state_to_debug_config(state)
-        self._load_lut_from_path(state.get('lut_path', ''))
+        # Preserve the persistent profile name across vibe swaps — it's an
+        # app-wide preference, not a per-vibe field.
+        profile_name = self.current_vibe.dng_profile_name
+        self.current_vibe = vibe
+        self.current_vibe.dng_profile_name = profile_name
+        self.processor.vibe = self.current_vibe
+        # Tag the per-image record with the new vibe id (for future Save Project).
+        self.processor.adjustments.active_vibe_id = vibe_id
+        self._load_lut_from_path(self.current_vibe.lut_path)
         if hasattr(self, 'debug_panel'):
             self.debug_panel.sync_from_config()
             self.debug_panel.update_modified_indicator()
@@ -945,7 +958,7 @@ class FlashbackEditor(QMainWindow):
             lut = self._lut_cache[resolved]
             self.processor.lut = lut
             gpu.upload_lut(lut.table)
-            DebugConfig.lut_path = lut_path
+            self.current_vibe.lut_path = lut_path
         except Exception as e:
             print(f"⚠ Could not load LUT '{resolved}': {e}")
 
@@ -957,9 +970,9 @@ class FlashbackEditor(QMainWindow):
         return self.vibe_picker.current_vibe()
 
     def save_current_vibe_defaults(self):
-        """Promote the live DebugConfig state to saved defaults for the active vibe."""
+        """Promote the live VibeConfig to saved defaults for the active vibe."""
         vibe_id = self.current_vibe_id()
-        vibe_state.save_one(vibe_id, snapshot_debug_config())
+        vibe_state.save_one(vibe_id, self.current_vibe)
         if hasattr(self, 'debug_panel'):
             self.debug_panel.update_modified_indicator()
             self.debug_panel.status_label.setText(f"Saved defaults for {vibe_id}.")
@@ -967,8 +980,7 @@ class FlashbackEditor(QMainWindow):
     def reset_current_vibe_to_saved(self):
         """Discard session edits, reload saved defaults (or factory if no saved)."""
         vibe_id = self.current_vibe_id()
-        state = self._state_for_vibe(vibe_id)
-        self._apply_vibe_state(vibe_id, state, refresh_thumbnails=True)
+        self._apply_vibe(vibe_id, self._vibe_for(vibe_id), refresh_thumbnails=True)
         if hasattr(self, 'debug_panel'):
             label = "saved" if vibe_state.has_saved(vibe_id) else "factory (no saved defaults)"
             self.debug_panel.status_label.setText(f"Reset {vibe_id} to {label}.")
@@ -977,7 +989,7 @@ class FlashbackEditor(QMainWindow):
         """Wipe saved defaults for the active vibe and apply factory state."""
         vibe_id = self.current_vibe_id()
         vibe_state.clear_one(vibe_id)
-        self._apply_vibe_state(vibe_id, factory_state_for(vibe_id), refresh_thumbnails=True)
+        self._apply_vibe(vibe_id, vibe_config_for(vibe_id), refresh_thumbnails=True)
         if hasattr(self, 'debug_panel'):
             self.debug_panel.status_label.setText(f"Reset {vibe_id} to factory defaults.")
 
@@ -1004,6 +1016,7 @@ class FlashbackEditor(QMainWindow):
             lut=self.processor.lut,
             grain_tiles=self.processor.grain_tiles,
             default_settings=self._DEFAULT_USER_SETTINGS.copy(),
+            vibe=self.current_vibe.copy(),
         )
         self._vibe_refresh_worker.thumbnail_ready.connect(self._on_vibe_refresh_thumbnail)
         self._vibe_refresh_worker.start()
@@ -1688,12 +1701,12 @@ class FlashbackEditor(QMainWindow):
         else:
             try:
                 if file_path in self.image_cache:
-                    temp_processor = _processor or FlashbackProcessor(None)
+                    temp_processor = _processor or FlashbackProcessor(vibe=self.current_vibe)
                     if _processor is None:
                         temp_processor.lut = self.processor.lut
                     temp_processor.intermediate_acescg = self.image_cache[file_path].copy()
                     temp_processor.current_file = file_path
-                    temp_processor.user_settings = settings.copy()
+                    temp_processor.set_settings(settings)
                     img_display = temp_processor._render_fast(downscale=True)
                     if img_display is not None:
                         h, w = img_display.shape[:2]
@@ -1820,7 +1833,7 @@ class FlashbackEditor(QMainWindow):
             self.chk_wb_link.blockSignals(False)
             self.update_sliders_from_processor()
         else:
-            self.processor.user_settings = {'exposure_ev': 0.0, 'wb_temp': 0, 'tint': 0.0}
+            self.processor.adjustments = ImageAdjustments(active_vibe_id=self.current_vibe_id())
             self.chk_wb_link.blockSignals(True)
             self.chk_wb_link.setChecked(False)
             self.chk_wb_link.blockSignals(False)
@@ -1898,20 +1911,20 @@ class FlashbackEditor(QMainWindow):
                 self.image_label.set_image(img_array)
 
     def update_sliders_from_processor(self):
-        settings = self.processor.user_settings
+        a = self.processor.adjustments
 
         self.slider_exposure.blockSignals(True)
         self.slider_wb.blockSignals(True)
         self.slider_tint.blockSignals(True)
 
-        self.slider_exposure.setValue(int(settings['exposure_ev'] * 10))
-        self.slider_wb.setValue(int(settings['wb_temp']))
-        self.slider_tint.setValue(int(round(settings['tint'] * 5)))
+        self.slider_exposure.setValue(int(a.exposure_ev * 10))
+        self.slider_wb.setValue(int(a.wb_temp))
+        self.slider_tint.setValue(int(round(a.tint * 5)))
 
-        self.label_exposure.setText(f"{settings['exposure_ev']:.1f} EV")
-        temp_absolute = 5600 + int(settings['wb_temp'])
+        self.label_exposure.setText(f"{a.exposure_ev:.1f} EV")
+        temp_absolute = 5600 + int(a.wb_temp)
         self.label_wb.setText(f"{temp_absolute} K")
-        self.label_tint.setText(f"{int(round(settings['tint'] * 5)):+d}")
+        self.label_tint.setText(f"{int(round(a.tint * 5)):+d}")
 
         self.slider_exposure.blockSignals(False)
         self.slider_wb.blockSignals(False)
@@ -1919,7 +1932,7 @@ class FlashbackEditor(QMainWindow):
 
         # Keep the manual tint offset coherent with the newly loaded settings
         if self.chk_wb_link.isChecked():
-            self._tint_manual_offset = settings['tint'] - self._coupled_tint(settings['wb_temp'])
+            self._tint_manual_offset = a.tint - self._coupled_tint(a.wb_temp)
 
     # ===================================================================
     # RENDER WORKER CALLBACK
@@ -1943,7 +1956,7 @@ class FlashbackEditor(QMainWindow):
     def on_exposure_slider_moved(self, value):
         ev = value / 10.0
         self.label_exposure.setText(f"{ev:.1f} EV")
-        self.processor.user_settings['exposure_ev'] = ev
+        self.processor.adjustments.exposure_ev = ev
         self._render_worker.request(downscale=True)
 
     def on_exposure_released(self):
@@ -1957,7 +1970,7 @@ class FlashbackEditor(QMainWindow):
     def _coupled_tint(self, wb_offset):
         """Coupled tint value for a given WB offset from neutral (5600K).
         Linear ±6: 0 → 0,  -2000 → +6,  +2000 → -6.
-        Returns tint in actual units (same as processor.user_settings['tint']).
+        Returns tint in actual units (same as processor.adjustments.tint).
         """
         return wb_offset / 2000.0 * -6.0
 
@@ -1967,7 +1980,7 @@ class FlashbackEditor(QMainWindow):
         the processor setting.  Returns the new tint value."""
         coupled = self._coupled_tint(wb_value)
         new_tint = max(-10.0, min(10.0, coupled + self._tint_manual_offset))
-        self.processor.user_settings['tint'] = new_tint
+        self.processor.adjustments.tint = new_tint
         self.slider_tint.blockSignals(True)
         self.slider_tint.setValue(int(round(new_tint * 5)))
         self.label_tint.setText(f"{int(round(new_tint * 5)):+d}")
@@ -1980,7 +1993,7 @@ class FlashbackEditor(QMainWindow):
 
         if self.chk_wb_link.isChecked():
             self._apply_wb_tint_link(value)
-        self.processor.user_settings['wb_temp'] = value
+        self.processor.adjustments.wb_temp = value
         self._render_worker.request(downscale=True)
 
     def on_wb_released(self):
@@ -1993,7 +2006,7 @@ class FlashbackEditor(QMainWindow):
         self.label_tint.setText(f"{value:+d}")
         if self.chk_wb_link.isChecked():
             self._tint_manual_offset = tint - self._coupled_tint(self.slider_wb.value())
-        self.processor.user_settings['tint'] = tint
+        self.processor.adjustments.tint = tint
         self._render_worker.request(downscale=True)
 
     def on_tint_released(self):
@@ -2033,7 +2046,7 @@ class FlashbackEditor(QMainWindow):
         self.slider_tint.blockSignals(False)
 
         self._tint_manual_offset = 0.0
-        self.processor.user_settings = {'exposure_ev': 0.0, 'wb_temp': 0, 'tint': 0.0}
+        self.processor.adjustments = ImageAdjustments(active_vibe_id=self.current_vibe_id())
         img_array = self.processor.render_preview()
         self.display_image(img_array)
         self.update_current_thumbnail(img_array)
@@ -2273,7 +2286,6 @@ class FlashbackEditor(QMainWindow):
 
                 if self.export_mode == 'dng':
                     from core.dng_export import export_dng
-                    from core.config import DebugConfig
                     thumb = None
                     strip_pixmap = None
                     if 0 <= idx < len(self.thumbnail_strip.thumbnails):
@@ -2295,7 +2307,7 @@ class FlashbackEditor(QMainWindow):
                         tw = 512
                         th = max(1, int(thumb.shape[0] * tw / thumb.shape[1]))
                         thumb = cv2.resize(thumb, (tw, th), interpolation=cv2.INTER_LINEAR)
-                    ok = export_dng(file_path, output_path, thumb, DebugConfig.dng_profile_name)
+                    ok = export_dng(file_path, output_path, thumb, self.current_vibe.dng_profile_name)
                 elif export_image(self.processor, output_path):
                     ok = True
                 else:

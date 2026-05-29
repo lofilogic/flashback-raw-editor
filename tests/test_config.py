@@ -1,93 +1,135 @@
 """
-Tests for DebugConfig serialization and vibe-state plumbing.
+Tests for VibeConfig / ImageAdjustments and the vibe preset machinery.
 
 These are the parts that will need to keep working when projects (saved
 per-image state) get added — so an explicit safety net here is worth it.
 """
-import pytest
+from dataclasses import fields
 
 from core.config import (
-    VIBE_FIELDS, VIBE_PRESETS, DebugConfig,
-    factory_state_for, snapshot_debug_config, apply_state_to_debug_config,
+    VibeConfig, ImageAdjustments, VIBE_PRESETS,
+    vibe_config_for, VIBE_FIELD_NAMES,
 )
 
 
-def test_snapshot_apply_is_roundtrip():
-    """snapshot → apply → snapshot must produce identical state.
+# =============================================================================
+# VibeConfig serialization
+# =============================================================================
 
-    This is the foundational invariant for any Save-Project feature: if
-    snapshot/apply ever drifted, projects could silently corrupt settings.
+def test_vibeconfig_to_dict_from_dict_roundtrip():
+    """to_dict / from_dict must roundtrip without information loss.
+
+    This is the foundational invariant for Save Projects: if a config
+    can't survive a JSON round-trip, projects will silently corrupt.
     """
-    snap = snapshot_debug_config()
-    apply_state_to_debug_config(snap)
-    snap2 = snapshot_debug_config()
-    assert snap == snap2
+    original = vibe_config_for('disposable')
+    restored = VibeConfig.from_dict(original.to_dict())
+    assert restored == original
 
 
-def test_every_vibe_produces_complete_factory_state():
-    """Every preset must yield a state dict containing all VIBE_FIELDS."""
+def test_vibeconfig_from_dict_ignores_unknown_keys():
+    """Loading a saved config with extra/renamed keys must not raise."""
+    d = vibe_config_for('disposable').to_dict()
+    d['this_key_does_not_exist'] = 42
+    restored = VibeConfig.from_dict(d)
+    assert restored == vibe_config_for('disposable')
+
+
+def test_vibeconfig_from_dict_coerces_types():
+    """Strings like '0.5' for a float field should be coerced, not silently dropped."""
+    cfg = VibeConfig.from_dict({'grain_strength': '0.42', 'ca_steps': '7'})
+    assert cfg.grain_strength == 0.42
+    assert cfg.ca_steps == 7
+
+
+def test_vibeconfig_copy_is_independent():
+    """copy() must return a deep-enough copy that mutations don't leak."""
+    a = vibe_config_for('disposable')
+    b = a.copy()
+    b.grain_strength = 999.0
+    assert a.grain_strength != 999.0
+
+
+# =============================================================================
+# Vibe presets
+# =============================================================================
+
+def test_every_preset_yields_complete_vibeconfig():
+    """Every preset must yield a VibeConfig containing all declared fields."""
+    expected_names = {f.name for f in fields(VibeConfig)}
     for vibe_id in VIBE_PRESETS:
-        state = factory_state_for(vibe_id)
-        for name, _ in VIBE_FIELDS:
-            assert name in state, f"vibe '{vibe_id}' missing field '{name}'"
+        cfg = vibe_config_for(vibe_id)
+        # All fields are present (dataclass guarantees) and accessible
+        for name in expected_names:
+            assert hasattr(cfg, name), f"{vibe_id} missing field {name}"
 
 
-def test_factory_state_field_types_match_schema():
-    """Factory state values must match the type declared in VIBE_FIELDS."""
+def test_preset_field_types_match_dataclass():
+    """Preset values must match the dataclass type, not just coerce."""
+    type_by_name = {f.name: f.type for f in fields(VibeConfig)}
     for vibe_id in VIBE_PRESETS:
-        state = factory_state_for(vibe_id)
-        for name, expected_type in VIBE_FIELDS:
-            value = state[name]
-            # bools are ints in Python; check bool first
+        cfg = vibe_config_for(vibe_id)
+        for name, expected_type in type_by_name.items():
+            value = getattr(cfg, name)
             if expected_type is bool:
                 assert isinstance(value, bool), \
                     f"{vibe_id}.{name} should be bool, got {type(value).__name__}"
-            else:
+            elif expected_type in (int, float, str):
                 assert isinstance(value, expected_type), \
                     f"{vibe_id}.{name} should be {expected_type.__name__}, " \
                     f"got {type(value).__name__}"
 
 
-def test_apply_state_ignores_unknown_keys():
-    """Loading a saved state with extra/renamed keys must not raise."""
-    before = snapshot_debug_config()
-    apply_state_to_debug_config({'this_key_does_not_exist': 42})
-    after = snapshot_debug_config()
-    assert before == after
+def test_default_vibeconfig_is_factory():
+    """VibeConfig() with no args must equal the documented factory baseline.
 
-
-def test_apply_state_coerces_types():
-    """Strings like '0.5' for a float field should be coerced, not crash."""
-    before = DebugConfig.grain_strength
-    apply_state_to_debug_config({'grain_strength': '0.42'})
-    assert DebugConfig.grain_strength == pytest.approx(0.42)
-    # restore so other tests aren't affected
-    DebugConfig.grain_strength = before
-
-
-def test_reset_restores_all_vibe_fields():
-    """DebugConfig.reset() must touch every field that VIBE_FIELDS exposes,
-    otherwise reset() will silently leave per-vibe overrides behind.
+    This anchors the dataclass defaults to the named module constants.
     """
-    # Mutate every field to a sentinel
-    for name, t in VIBE_FIELDS:
-        if t is bool:
-            setattr(DebugConfig, name, not getattr(DebugConfig, name))
-        elif t is int:
-            setattr(DebugConfig, name, 999)
-        elif t is float:
-            setattr(DebugConfig, name, -999.0)
-        elif t is str:
-            setattr(DebugConfig, name, '__sentinel__')
+    cfg = VibeConfig()
+    # Spot-check fields against module constants so a future drift fails loudly
+    from core.config import (
+        HALATION_THRESHOLD, GRAIN_STRENGTH, BLOOM_THRESHOLD,
+        BASE_EXPOSURE_OFFSET_V2,
+    )
+    assert cfg.halation_threshold == HALATION_THRESHOLD
+    assert cfg.grain_strength == GRAIN_STRENGTH
+    assert cfg.bloom_threshold == BLOOM_THRESHOLD
+    assert cfg.base_exposure_offset_v2 == BASE_EXPOSURE_OFFSET_V2
 
-    DebugConfig.reset()
 
-    # After reset, no field should still hold the sentinel
-    for name, t in VIBE_FIELDS:
-        value = getattr(DebugConfig, name)
-        if t is int:
-            assert value != 999, f"{name} not reset"
-        elif t is float:
-            assert value != -999.0, f"{name} not reset"
-        elif t is str:
-            assert value != '__sentinel__', f"{name} not reset"
+# =============================================================================
+# ImageAdjustments
+# =============================================================================
+
+def test_image_adjustments_roundtrip():
+    a = ImageAdjustments(exposure_ev=1.5, wb_temp=200.0, tint=-3.0,
+                         push_pull_ev=0.5, rotation=90,
+                         active_vibe_id='disposable')
+    assert ImageAdjustments.from_dict(a.to_dict()) == a
+
+
+def test_image_adjustments_default_has_all_fields():
+    a = ImageAdjustments()
+    assert a.exposure_ev == 0.0
+    assert a.wb_temp == 0.0
+    assert a.tint == 0.0
+    assert a.push_pull_ev == 0.0
+    assert a.rotation == 0
+    assert a.active_vibe_id == ''
+
+
+def test_image_adjustments_copy_is_independent():
+    a = ImageAdjustments(exposure_ev=1.0)
+    b = a.copy()
+    b.exposure_ev = 99.0
+    assert a.exposure_ev == 1.0
+
+
+# =============================================================================
+# Field schema
+# =============================================================================
+
+def test_vibe_field_names_matches_dataclass():
+    """VIBE_FIELD_NAMES must stay in sync with the VibeConfig dataclass."""
+    expected = tuple(f.name for f in fields(VibeConfig))
+    assert VIBE_FIELD_NAMES == expected

@@ -189,7 +189,7 @@ class VibeRefreshWorker(QThread):
     finished = Signal()
 
     def __init__(self, image_files, cache_snapshot, image_settings,
-                 current_index, lut, grain_tiles, default_settings):
+                 current_index, lut, grain_tiles, default_settings, vibe):
         super().__init__()
         self.image_files = image_files
         self.cache_snapshot = cache_snapshot      # {path_str: acescg_array}
@@ -198,10 +198,11 @@ class VibeRefreshWorker(QThread):
         self.lut = lut
         self.grain_tiles = grain_tiles
         self.default_settings = default_settings
+        self.vibe = vibe                          # snapshot of the active VibeConfig
         self._is_running = True
 
     def run(self):
-        processor = FlashbackProcessor(None)
+        processor = FlashbackProcessor(vibe=self.vibe)
         processor.lut = self.lut
         processor.grain_tiles = self.grain_tiles
 
@@ -218,7 +219,7 @@ class VibeRefreshWorker(QThread):
             try:
                 processor.intermediate_acescg = cached.copy()
                 processor.current_file = file_path
-                processor.user_settings = settings.copy()
+                processor.set_settings(settings)
                 img_display = processor._render_fast(downscale=True)
                 if img_display is not None:
                     h, w = img_display.shape[:2]

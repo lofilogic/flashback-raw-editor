@@ -1,19 +1,21 @@
 """
 Per-vibe state persistence.
 
-Saved overrides live in `vibe_state.json` under the platform user-data
-directory (Qt's QStandardPaths.AppDataLocation). The file maps vibe_id →
-state dict (a subset or full snapshot of VIBE_FIELDS).
+Saved vibes live in `vibe_state.json` under the platform user-data
+directory (Qt's QStandardPaths.AppDataLocation). The file maps
+vibe_id → VibeConfig (serialized as a dict).
 
 Three layers as seen by the editor:
-  - factory  — VIBE_PRESETS + module defaults  (config.factory_state_for)
+  - factory  — VIBE_PRESETS (config.vibe_config_for)
   - saved    — what's in this file, if anything (load_all / save_one)
-  - session  — live DebugConfig
+  - session  — the live VibeConfig instance the editor currently holds
 """
 import json
 from pathlib import Path
 
 from PySide6.QtCore import QStandardPaths
+
+from .config import VibeConfig
 
 _FILE_NAME = 'vibe_state.json'
 
@@ -27,8 +29,7 @@ def _state_path() -> Path:
     return p / _FILE_NAME
 
 
-def load_all() -> dict:
-    """Return {vibe_id: state_dict}. Empty dict if nothing saved or file is corrupt."""
+def _read_raw() -> dict:
     path = _state_path()
     if not path.exists():
         return {}
@@ -42,6 +43,11 @@ def load_all() -> dict:
     return {}
 
 
+def load_all() -> dict:
+    """Return {vibe_id: VibeConfig}. Empty dict if nothing saved or file is corrupt."""
+    return {vibe_id: VibeConfig.from_dict(d) for vibe_id, d in _read_raw().items()}
+
+
 def _write_all(data: dict) -> None:
     path = _state_path()
     tmp = path.with_suffix('.json.tmp')
@@ -50,20 +56,20 @@ def _write_all(data: dict) -> None:
     tmp.replace(path)
 
 
-def save_one(vibe_id: str, state: dict) -> None:
-    """Persist `state` as the saved defaults for `vibe_id`, replacing any prior entry."""
-    data = load_all()
-    data[vibe_id] = dict(state)
+def save_one(vibe_id: str, vibe: VibeConfig) -> None:
+    """Persist `vibe` as the saved defaults for `vibe_id`, replacing any prior entry."""
+    data = _read_raw()
+    data[vibe_id] = vibe.to_dict()
     _write_all(data)
 
 
 def clear_one(vibe_id: str) -> None:
     """Remove saved defaults for `vibe_id`. No-op if no entry exists."""
-    data = load_all()
+    data = _read_raw()
     if vibe_id in data:
         del data[vibe_id]
         _write_all(data)
 
 
 def has_saved(vibe_id: str) -> bool:
-    return vibe_id in load_all()
+    return vibe_id in _read_raw()

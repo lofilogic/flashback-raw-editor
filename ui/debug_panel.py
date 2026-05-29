@@ -10,13 +10,18 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 
 from core.config import (
-    DebugConfig, VIBE_FIELDS, snapshot_debug_config,
+    VibeConfig, VIBE_FIELD_NAMES,
     HALATION_THRESHOLD, HALATION_BLUR_RADIUS, HALATION_STRENGTH,
     CHROMATIC_ABERRATION_STRENGTH, CHROMATIC_ABERRATION_STEPS,
     SOFTNESS_SIGMA, GRAIN_STRENGTH, SHARPEN_STRENGTH, SHARPEN_RADIUS,
     CNR_SIGMA, VIGNETTE_STRENGTH, VIGNETTE_COLOR_SHIFT,
     BLOOM_STRENGTH, BLOOM_THRESHOLD,
 )
+
+
+def _current_vibe(parent_editor) -> VibeConfig:
+    """Tiny helper: return parent_editor.current_vibe (the active VibeConfig)."""
+    return parent_editor.current_vibe
 
 
 class DebugPanel(QWidget):
@@ -256,7 +261,10 @@ class DebugPanel(QWidget):
         dng_layout.addWidget(QLabel("Profile Name:"))
         self.dng_profile_edit = QLineEdit()
         self.dng_profile_edit.setPlaceholderText("Flashback Standard")
-        self.dng_profile_edit.setText(DebugConfig.dng_profile_name)
+        self.dng_profile_edit.setText(
+            self.parent_editor.current_vibe.dng_profile_name
+            if self.parent_editor else 'Flashback Standard'
+        )
         self.dng_profile_edit.setStyleSheet("QLineEdit { background-color: #3d3d3d; color: #d0d0d0; border: 1px solid #555; border-radius: 4px; padding: 4px; }")
         dng_layout.addWidget(self.dng_profile_edit, 1)
 
@@ -361,49 +369,30 @@ class DebugPanel(QWidget):
     # ===================================================================
 
     def update_config(self):
-        """Update DebugConfig from UI (for baked settings)."""
-        DebugConfig.enable_halation = self.chk_halation.isChecked()
-        DebugConfig.enable_chromatic_aberration = self.chk_ca.isChecked()
-        DebugConfig.enable_cnr = self.chk_cnr.isChecked()
-
-        DebugConfig.halation_threshold = self.spin_halation_thresh.value()
-        DebugConfig.halation_blur_radius = self.spin_halation_blur.value()
-        DebugConfig.halation_strength = self.spin_halation_str.value()
-
-        DebugConfig.ca_strength = self.spin_ca_str.value()
-        DebugConfig.ca_steps = self.spin_ca_steps.value()
-        DebugConfig.ca_blue_blur = self.spin_ca_blue_blur.value()
-
-        DebugConfig.cnr_sigma = self.spin_cnr.value()
-
-        DebugConfig.enable_lut = self.chk_lut.isChecked()
-        DebugConfig.enable_softness = self.chk_softness.isChecked()
-        DebugConfig.enable_grain = self.chk_grain.isChecked()
-        DebugConfig.enable_sharpen = self.chk_sharpen.isChecked()
-        DebugConfig.softness_sigma = self.spin_softness.value()
-        DebugConfig.grain_strength = self.spin_grain.value()
-        DebugConfig.sharpen_strength = self.spin_sharpen_str.value()
-        DebugConfig.sharpen_radius = self.spin_sharpen_rad.value()
-        DebugConfig.enable_vignette = self.chk_vignette.isChecked()
-        DebugConfig.vignette_strength = self.spin_vignette_str.value()
-        DebugConfig.vignette_color_shift = self.spin_vignette_color.value()
-        DebugConfig.vignette_feather = self.spin_vignette_feather.value()
-        DebugConfig.enable_bloom = self.chk_bloom.isChecked()
-        DebugConfig.bloom_strength = self.spin_bloom_str.value()
-        DebugConfig.bloom_threshold = self.spin_bloom_thresh.value()
+        """Write all widget values into the current vibe (schema-driven)."""
+        if not self.parent_editor:
+            return
+        vibe = self.parent_editor.current_vibe
+        for name, w in self._bool_widgets.items():
+            setattr(vibe, name, bool(w.isChecked()))
+        for name, w in self._numeric_widgets.items():
+            setattr(vibe, name, w.value())
 
         self.status_label.setText("Config updated. Click 'Reload Image' to apply baked effects.")
 
     def sync_from_config(self):
-        """Update all panel widgets from the current DebugConfig state."""
+        """Update all panel widgets from the current vibe."""
+        if not self.parent_editor:
+            return
+        vibe = self.parent_editor.current_vibe
         all_widgets = list(self._bool_widgets.values()) + list(self._numeric_widgets.values())
         for w in all_widgets:
             w.blockSignals(True)
         try:
             for name, w in self._bool_widgets.items():
-                w.setChecked(bool(getattr(DebugConfig, name)))
+                w.setChecked(bool(getattr(vibe, name)))
             for name, w in self._numeric_widgets.items():
-                w.setValue(getattr(DebugConfig, name))
+                w.setValue(getattr(vibe, name))
         finally:
             for w in all_widgets:
                 w.blockSignals(False)
@@ -412,7 +401,7 @@ class DebugPanel(QWidget):
     def refresh_lut_label(self):
         """Update the LUT label to show the active LUT filename."""
         from pathlib import Path as _P
-        path = getattr(DebugConfig, 'lut_path', '') or ''
+        path = self.parent_editor.current_vibe.lut_path if self.parent_editor else ''
         self.lut_label.setText(f"Current LUT: {_P(path).name}" if path else "Current LUT: Default")
 
     def update_modified_indicator(self):
@@ -420,9 +409,9 @@ class DebugPanel(QWidget):
         if not self.parent_editor or not hasattr(self.parent_editor, 'current_vibe_id'):
             return
         vibe_id = self.parent_editor.current_vibe_id()
-        live = snapshot_debug_config()
-        baseline = self.parent_editor._state_for_vibe(vibe_id)
-        modified = any(live.get(k) != baseline.get(k) for k, _ in VIBE_FIELDS)
+        live = self.parent_editor.current_vibe.to_dict()
+        baseline = self.parent_editor._vibe_for(vibe_id).to_dict()
+        modified = any(live.get(k) != baseline.get(k) for k in VIBE_FIELD_NAMES)
         suffix = "  •  modified" if modified else ""
         self.vibe_header_label.setText(f"Vibe defaults — {vibe_id}{suffix}")
 
