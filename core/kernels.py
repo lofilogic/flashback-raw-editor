@@ -26,7 +26,7 @@ def rotate_90_counterclockwise(img: np.ndarray) -> np.ndarray:
 # =============================================================================
 
 def acescct_decode(img: np.ndarray) -> np.ndarray:
-    """ACEScct log → linear Rec.2020."""
+    """ACEScct log → linear ACEScg (AP1, D60)."""
     if HAS_GPU:
         result = gpu.acescct_decode(img)
         if result is not None:
@@ -41,7 +41,7 @@ def acescct_decode(img: np.ndarray) -> np.ndarray:
     return out.reshape(img.shape)
 
 def acescct_encode(img: np.ndarray) -> np.ndarray:
-    """Linear Rec.2020 → ACEScct log."""
+    """Linear ACEScg (AP1, D60) → ACEScct log."""
     if HAS_GPU:
         result = gpu.acescct_encode(img)
         if result is not None:

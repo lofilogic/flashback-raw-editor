@@ -1,10 +1,17 @@
 """
 Standalone image effect functions.
 
-Each function takes and returns a float32 numpy array in [0, 1].
-Effects are applied in the order defined in the render pipeline:
-  chromatic aberration → ACEScct encode → LUT → softness → grain → sharpen
-Halation is baked into the intermediate during load (export path only).
+Each function takes and returns a float32 numpy array. Most stay in [0, 1],
+but linear-light effects (apply_bloom with linear=True, apply_halation) can
+return values >1 since they run before the display transform.
+
+Render-pipeline ordering (see processor._render):
+  bloom → vignette       (linear ACEScg)
+  CNR → ACEScct → LUT    (display transform)
+  CA → softness → grain → sharpen   (display sRGB, post-LUT)
+
+Halation is baked into the cached intermediate at load time (see
+processor.load_image) so it benefits both the live preview and export.
 """
 import numpy as np
 import cv2
@@ -59,8 +66,13 @@ def apply_lut_fast(image, lut):
 
 def apply_chromatic_aberration(image, strength=CHROMATIC_ABERRATION_STRENGTH, steps=CHROMATIC_ABERRATION_STEPS, blue_blur=0.0):
     """
-    Applies chromatic aberration in LINEAR Rec.2020 space.
-    Called BEFORE ACEScct encoding to prevent log-space banding.
+    Radial chromatic aberration via per-channel rotation-matrix scaling.
+
+    Runs on the post-LUT display-sRGB image (gamma-encoded), not linear.
+    Working in display space keeps the fringing visually localised to bright
+    edges the way a real lens behaves; doing it in linear would over-spread
+    highlights once the display curve is reapplied.
+
     blue_blur: optional Gaussian sigma applied to the blue channel of the final result.
     """
     start_total = time.time()
@@ -112,7 +124,7 @@ def apply_chromatic_aberration(image, strength=CHROMATIC_ABERRATION_STRENGTH, st
         final_result[:, :, 2] = gaussian_blur(final_result[:, :, 2], blue_blur)
 
     total_time = time.time() - start_total
-    _timing_print(f"    [Chromatic Aberration] Total: {total_time*1000:.2f}ms (linear Rec.2020)")
+    _timing_print(f"    [Chromatic Aberration] Total: {total_time*1000:.2f}ms (display sRGB)")
 
     return final_result
 
@@ -192,7 +204,7 @@ def _halation_glow(img_f, gray, threshold, blur_radius, k=20.0):
     glow = np.zeros_like(highlights)
     glow[:, :, 0] = gaussian_blur(highlights[:, :, 0], blur_radius)
     glow[:, :, 1] = gaussian_blur(highlights[:, :, 1] * 0.2, blur_radius)
-    # blue channel is always multiplied by 0.0, skip the blur entirely
+    # Blue stays at zero (orange/red glow only, as on real film halation).
     return glow
 
 
@@ -238,9 +250,13 @@ def apply_sharpen(image, strength=SHARPEN_STRENGTH, radius=SHARPEN_RADIUS):
 
 def apply_vignette(image, strength=0.5, color_shift=0.05, feather=1.0):
     """
-    Smooth cosine vignette with warm center / cool edges.
-    Per-channel: red is darkened more at edges, blue less — produces a
-    natural blue-shift at the periphery without adding color, just removing warmth.
+    Smooth cosine vignette with a cool-edge tint.
+
+    All channels share the same `dark` falloff; per-channel offsets shift the
+    edges cooler — red darkens a bit more than `dark` while blue darkens
+    slightly less (so blue can stay near its center value, or even gain a
+    touch, relative to red). The net effect is a mild blue cast at the
+    periphery rather than a pure neutral darkening.
     feather > 1: sharper falloff (bright center, darkness compressed to edges).
     feather < 1: softer, more gradual falloff.
     """

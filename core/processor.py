@@ -383,10 +383,12 @@ class FlashbackProcessor:
     def _develop_generic_raw(self, path: str) -> np.ndarray:
         """Develop a non-Flashback raw file to ACEScg using libraw's camera matrix.
 
-        Uses rawpy's built-in camera profile (from DNG metadata or libraw database)
-        with fixed daylight WB, producing linear sRGB which is then converted to
-        ACEScg. All subsequent processing (LUT, sliders, grain, etc.) is identical
-        to the Flashback path.
+        Uses rawpy's built-in camera profile (DNG metadata or libraw database)
+        with use_camera_wb=True so libraw applies pre_mul × cam_mul correctly
+        (see body comment); the camera WB is then undone and replaced with a
+        fixed BASE_KELVIN WB post-develop, so the downstream pipeline behaves
+        as if the file had been shot at the Flashback daylight reference.
+        Output is linear sRGB → converted to ACEScg before returning.
         """
         t0 = time.time()
         with rawpy.imread(path) as raw:

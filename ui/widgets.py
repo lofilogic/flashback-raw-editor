@@ -43,7 +43,7 @@ class ThumbnailWorker(QThread):
     """
     Background worker thread for generating thumbnails.
     Loads each RAW file in fast mode (LINEAR demosaic) and emits
-    the display image and ACEScct intermediate for each.
+    the display image and the linear ACEScg intermediate for each.
     """
 
     progress = Signal(int, int)            # current, total
