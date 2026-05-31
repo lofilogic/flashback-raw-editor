@@ -64,7 +64,7 @@ def apply_lut_fast(image, lut):
 # EFFECT FUNCTIONS
 # =============================================================================
 
-def apply_chromatic_aberration(image, strength=CHROMATIC_ABERRATION_STRENGTH, steps=CHROMATIC_ABERRATION_STEPS, blue_blur=0.0):
+def apply_chromatic_aberration(image, strength=CHROMATIC_ABERRATION_STRENGTH, steps=CHROMATIC_ABERRATION_STEPS, blue_blur=0.0, zoom_blur=1.0):
     """
     Radial chromatic aberration via per-channel rotation-matrix scaling.
 
@@ -74,6 +74,7 @@ def apply_chromatic_aberration(image, strength=CHROMATIC_ABERRATION_STRENGTH, st
     highlights once the display curve is reapplied.
 
     blue_blur: optional Gaussian sigma applied to the blue channel of the final result.
+    zoom_blur: multiplier on the global zoom-blur pass (1.0 = default).
     """
     start_total = time.time()
 
@@ -113,7 +114,7 @@ def apply_chromatic_aberration(image, strength=CHROMATIC_ABERRATION_STRENGTH, st
 
     for i in range(steps):
         factor = i / max(1, steps - 1) if steps > 1 else 1.0
-        scale_z = 1.0 + (strength/6 * factor)
+        scale_z = 1.0 + (strength/6 * zoom_blur * factor)
         M_z = cv2.getRotationMatrix2D(center, 0, scale_z)
         zoom_acc += cv2.warpAffine(ca_result, M_z, (w, h),
                                    flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)

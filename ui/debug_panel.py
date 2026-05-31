@@ -174,6 +174,10 @@ class DebugPanel(QWidget):
         self.spin_ca_blue_blur.valueChanged.connect(self.update_preview)
         live_layout.addRow("CA Blue Blur:", self.spin_ca_blue_blur)
 
+        self.spin_ca_zoom_blur = self._create_double_spin(0.0, 20.0, 1.0, 0.1)
+        self.spin_ca_zoom_blur.valueChanged.connect(self.update_preview)
+        live_layout.addRow("CA Zoom Blur:", self.spin_ca_zoom_blur)
+
         live_layout.addRow(self._create_separator())
 
         # Softness
@@ -326,6 +330,7 @@ class DebugPanel(QWidget):
             'ca_strength': self.spin_ca_str,
             'ca_steps': self.spin_ca_steps,
             'ca_blue_blur': self.spin_ca_blue_blur,
+            'ca_zoom_blur': self.spin_ca_zoom_blur,
             'softness_sigma': self.spin_softness,
             'grain_strength': self.spin_grain,
             'sharpen_strength': self.spin_sharpen_str,
