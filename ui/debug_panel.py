@@ -300,6 +300,46 @@ class DebugPanel(QWidget):
 
         form_layout.addWidget(lut_prof_group)
 
+        # --- Default Folders Group ---
+        folders_group = QGroupBox("Default Folders")
+        folders_group.setStyleSheet("QGroupBox { color: #d0d0d0; font-weight: bold; border: 1px solid #555; border-radius: 6px; margin-top: 8px; padding-top: 8px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }")
+        folders_layout = QVBoxLayout(folders_group)
+        folders_layout.setSpacing(6)
+
+        folders_info = QLabel(
+            "These are the folders the app starts each session with. The\n"
+            "export folder can be changed temporarily from the main toolbar;\n"
+            "that override is not remembered."
+        )
+        folders_info.setStyleSheet("color: #888; font-size: 11px;")
+        folders_layout.addWidget(folders_info)
+
+        self.lbl_default_import = QLabel()
+        self.lbl_default_import.setStyleSheet("color: #d0d0d0; font-size: 11px;")
+        self.lbl_default_import.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.lbl_default_import.setWordWrap(True)
+        self.btn_default_import = QPushButton("Set Camera Import Folder…")
+        self.btn_default_import.setStyleSheet(btn_style)
+        self.btn_default_import.clicked.connect(self._on_set_default_import_dir)
+        folders_layout.addWidget(QLabel("Camera import folder:"))
+        folders_layout.addWidget(self.lbl_default_import)
+        folders_layout.addWidget(self.btn_default_import)
+
+        self.lbl_default_export = QLabel()
+        self.lbl_default_export.setStyleSheet("color: #d0d0d0; font-size: 11px;")
+        self.lbl_default_export.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.lbl_default_export.setWordWrap(True)
+        self.btn_default_export = QPushButton("Set Export Folder…")
+        self.btn_default_export.setStyleSheet(btn_style)
+        self.btn_default_export.clicked.connect(self._on_set_default_export_dir)
+        folders_layout.addWidget(QLabel("Export folder:"))
+        folders_layout.addWidget(self.lbl_default_export)
+        folders_layout.addWidget(self.btn_default_export)
+
+        self._refresh_default_folder_labels()
+
+        form_layout.addWidget(folders_group)
+
         form_layout.addStretch()
 
         scroll.setWidget(container)
@@ -426,6 +466,43 @@ class DebugPanel(QWidget):
         if self.parent_editor:
             self.parent_editor.set_dng_profile_name(name)
         self.status_label.setText(f"DNG profile name set to '{name}'.")
+
+    def _refresh_default_folder_labels(self):
+        if not self.parent_editor:
+            return
+        s = self.parent_editor.app_settings
+        self.lbl_default_import.setText(str(s.value("default_camera_import_dir", "—")))
+        self.lbl_default_export.setText(str(s.value("default_export_dir", "—")))
+
+    def _on_set_default_import_dir(self):
+        from PySide6.QtWidgets import QFileDialog
+        if not self.parent_editor:
+            return
+        start = str(self.parent_editor.app_settings.value(
+            "default_camera_import_dir", self.parent_editor.camera_import_dir))
+        directory = QFileDialog.getExistingDirectory(
+            self, "Set Default Camera Import Folder", start)
+        if not directory:
+            return
+        self.parent_editor.app_settings.setValue("default_camera_import_dir", directory)
+        self._refresh_default_folder_labels()
+        self.status_label.setText(
+            f"Default camera import folder set. Applies on next launch (currently: {self.parent_editor.camera_import_dir}).")
+
+    def _on_set_default_export_dir(self):
+        from PySide6.QtWidgets import QFileDialog
+        if not self.parent_editor:
+            return
+        start = str(self.parent_editor.app_settings.value(
+            "default_export_dir", self.parent_editor.output_dir))
+        directory = QFileDialog.getExistingDirectory(
+            self, "Set Default Export Folder", start)
+        if not directory:
+            return
+        self.parent_editor.app_settings.setValue("default_export_dir", directory)
+        self._refresh_default_folder_labels()
+        self.status_label.setText(
+            f"Default export folder set. Applies on next launch (currently: {self.parent_editor.output_dir}).")
 
     def _on_export_lut_tiff(self):
         from PySide6.QtWidgets import QFileDialog

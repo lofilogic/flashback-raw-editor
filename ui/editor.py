@@ -44,7 +44,7 @@ from core import resource_path
 from core.gpu import gpu
 from core.processor import FlashbackProcessor, export_image
 from core.config import (
-    _timing_print, VIBE_PRESETS,
+    _timing_print, VIBE_PRESETS, VIBE_EXPORT_SUFFIX,
     VibeConfig, ImageAdjustments, vibe_config_for,
 )
 from core import vibe_state
@@ -104,13 +104,30 @@ class FlashbackEditor(QMainWindow):
         # Save As always prompts.
         self.current_project_path = None  # type: ignore[assignment]
 
+        self.app_settings = QSettings("Flashback", "Editor")
+
+        # Two folders, two responsibilities:
+        #   camera_import_dir — where the camera-import worker archives rolls
+        #                       (creates YYYY-MM-DD/_RAW/<name>.dng subfolders)
+        #   output_dir        — where regular exports go (DNG / JPG)
+        # Each has a *default* persisted in QSettings (set from the advanced
+        # panel). The runtime value is initialized from that default on every
+        # launch; mid-session changes to output_dir are intentionally not
+        # written back, so a one-off export to elsewhere can't nest the next
+        # camera import inside it.
         pictures_loc = QStandardPaths.writableLocation(QStandardPaths.PicturesLocation)
         base_dir = pictures_loc if pictures_loc else str(Path.home())
+        fallback = os.path.join(base_dir, "Flashback_Output")
 
-        self.output_dir = os.path.join(base_dir, "Flashback_Output")
+        def _resolve(key: str) -> str:
+            v = self.app_settings.value(key, fallback)
+            return v if isinstance(v, str) and v else fallback
+
+        self.camera_import_dir = _resolve("default_camera_import_dir")
+        self.output_dir = _resolve("default_export_dir")
+        os.makedirs(self.camera_import_dir, exist_ok=True)
         os.makedirs(self.output_dir, exist_ok=True)
 
-        self.app_settings = QSettings("Flashback", "Editor")
         self.pending_file_path = None
 
         # The active vibe — replaces the old global DebugConfig. Initialized
@@ -1460,21 +1477,21 @@ class FlashbackEditor(QMainWindow):
                 continue
             if dng_files:
                 from core.camera_import import plan_imports
-                to_import, skipped, _ = plan_imports(dng_files, Path(self.output_dir))
+                to_import, skipped, _ = plan_imports(dng_files, Path(self.camera_import_dir))
                 new_n = len(to_import)
                 skip_n = len(skipped)
                 if new_n == 0:
                     reply = QMessageBox.question(
                         self, "Camera Detected",
                         f"{vol_name}: all {skip_n} DNGs already imported.\n\n"
-                        f"Open the existing copies from {self.output_dir}?",
+                        f"Open the existing copies from {self.camera_import_dir}?",
                         QMessageBox.Yes | QMessageBox.No
                     )
                     if reply == QMessageBox.Yes:
                         self.load_image_files(skipped)
                     return
                 msg = f"Found {len(dng_files)} DNG files on {vol_name}.\n\n"
-                msg += f"Import {new_n} new file(s) into {self.output_dir}?"
+                msg += f"Import {new_n} new file(s) into {self.camera_import_dir}?"
                 if skip_n:
                     msg += f"\n({skip_n} already imported and will be skipped.)"
                 reply = QMessageBox.question(
@@ -2038,7 +2055,7 @@ class FlashbackEditor(QMainWindow):
                 QMessageBox.information(
                     self, "TIFF Not Supported",
                     "TIFF intermediates cannot be imported in this version.\n\n"
-                    "Open the original DNG instead, or use Flashback v1.1.1 "
+                    "Open the original DNG instead, or use Flashback v1.1.2 "
                     "to continue working with existing TIFF intermediates."
                 )
                 return
@@ -2258,7 +2275,9 @@ class FlashbackEditor(QMainWindow):
         """True if an export file exists in output_dir for this source image."""
         try:
             base = Path(file_path).stem
-            for suffix in ("_processed.jpg", "_clean.dng"):
+            candidates = ["_clean.dng", "_edit.jpg"]
+            candidates += [f"_{s}.jpg" for s in VIBE_EXPORT_SUFFIX.values()]
+            for suffix in candidates:
                 if os.path.exists(os.path.join(self.output_dir, base + suffix)):
                     return True
         except Exception:
@@ -2361,6 +2380,8 @@ class FlashbackEditor(QMainWindow):
     def select_output_dir(self):
         directory = QFileDialog.getExistingDirectory(self, "Select Output Directory", self.output_dir)
         if directory:
+            # Session-only override. The default lives in QSettings under
+            # "default_export_dir" and is changed from the advanced panel.
             self.output_dir = directory
             self.label_output.setText(directory)
             self.label_output.setToolTip(directory)
@@ -2469,7 +2490,9 @@ class FlashbackEditor(QMainWindow):
                 if self.export_mode == 'dng':
                     output_path = os.path.join(self.output_dir, f"{base_name}_clean.dng")
                 else:
-                    output_path = os.path.join(self.output_dir, f"{base_name}_processed.jpg")
+                    vibe_id = self.processor.adjustments.active_vibe_id
+                    suffix = VIBE_EXPORT_SUFFIX.get(vibe_id, 'edit')
+                    output_path = os.path.join(self.output_dir, f"{base_name}_{suffix}.jpg")
 
                 if self.export_mode == 'dng':
                     from core.dng_export import export_dng
