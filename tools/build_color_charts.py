@@ -6,11 +6,11 @@ For each pair (matched by filename stem):
   2. Average each surviving patch over a wide window for noise/parallax tolerance.
   3. Farthest-point-sample in CIELAB on the film side to spread across the gamut.
   4. Sort by L (rows) then hue (within row) and render two charts with an
-     identical grid layout — both as 16-bit TIFFs (film in sRGB, digital
-     preserving raw ACEScct/Rec.2020 values).
+     identical grid layout — both as 16-bit TIFFs preserving raw
+     ACEScct/AP1 values (matches processor_v2 TIFF export).
 
-The digital TIFFs are written with raw values preserved, so colormatch sees
-exactly the ACEScct/Rec.2020 numbers your runtime LUT would receive.
+The TIFFs are written with raw values preserved, so colormatch sees
+exactly the ACEScct/AP1 numbers your runtime LUT would receive.
 
 Usage:
   python tools/build_color_charts.py \
@@ -82,10 +82,10 @@ def _acescct_encode(linear: np.ndarray) -> np.ndarray:
 
 
 def load_digital(path: Path, boost_ev: float = 0.0) -> np.ndarray:
-    """Load 16-bit ACEScct/Rec.2020 TIFF as float32 in [0,1].
+    """Load 16-bit ACEScct/AP1 TIFF as float32 in [0,1].
     If boost_ev != 0, applies a linear-space exposure gain (decode → mul → encode)
     so the saved chart contains boosted ACEScct values that match what the
-    runtime app produces when DebugConfig.enable_post_ae_exposure_boost is on.
+    runtime app produces when VibeConfig.enable_post_ae_exposure_boost is on.
     """
     img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
     if img is None:
@@ -249,6 +249,7 @@ def collect_candidates(film: np.ndarray, digital: np.ndarray,
                        max_hue_diff_deg: float = 25.0,
                        hue_chroma_min: float = 8.0,
                        max_delta_mad: float = 3.0,
+                       delta_knn: int = 15,
                        border_px: int = 0,
                        film_colorspace: str = 'srgb',
                        digital_colorspace: str = 'acescct_ap1',
@@ -349,21 +350,29 @@ def collect_candidates(film: np.ndarray, digital: np.ndarray,
         stats['hue_rejected'] = int((~keep).sum())
         out = [o for o, k in zip(out, keep) if k]
 
-    # Delta-consistency filter: within a pair, film/digital color deltas should
-    # cluster around a single relationship (the LUT mapping). Patches whose
-    # delta is far from the median are likely parallax-induced foreground/
-    # background mismatches — flat in both, but on different objects.
-    if out and len(out) >= 6 and max_delta_mad > 0:
+    # Local delta-consistency filter: the film→digital LUT is locally smooth,
+    # so a patch's delta should agree with its neighbors in film-Lab space.
+    # Parallax errors are isolated — their delta disagrees with nearby
+    # candidates of similar source color. A global-median consensus would
+    # force everything toward the dominant (often neutral) cluster; using
+    # K-NN local consensus respects the LUT's nonlinearity.
+    if out and len(out) >= max(delta_knn + 1, 6) and max_delta_mad > 0:
+        from scipy.spatial import cKDTree
         film_arr = np.stack([o[0] for o in out])
         dig_arr = np.stack([o[1] for o in out])
-        delta_lab = (rgb_to_lab(film_arr, film_colorspace)
-                     - rgb_to_lab(dig_arr, digital_colorspace))
-        center = np.median(delta_lab, axis=0)
-        residual = np.linalg.norm(delta_lab - center, axis=1)
+        film_lab = rgb_to_lab(film_arr, film_colorspace)
+        delta_lab = film_lab - rgb_to_lab(dig_arr, digital_colorspace)
+        k = min(delta_knn, len(out) - 1)
+        tree = cKDTree(film_lab)
+        # Query k+1 — first hit is the point itself.
+        _, idx = tree.query(film_lab, k=k + 1)
+        neighbor_deltas = delta_lab[idx[:, 1:]]              # (N, k, 3)
+        local_center = np.median(neighbor_deltas, axis=1)    # (N, 3)
+        residual = np.linalg.norm(delta_lab - local_center, axis=1)
         mad = np.median(np.abs(residual - np.median(residual))) + 1e-6
         keep = residual <= max_delta_mad * 1.4826 * mad + np.median(residual)
         stats['delta_outlier_rejected'] = int((~keep).sum())
-        out = [o for o, k in zip(out, keep) if k]
+        out = [o for o, k_ in zip(out, keep) if k_]
 
     stats['kept'] = len(out)
     return out, stats
@@ -500,13 +509,13 @@ _TIFF_PARAMS = [int(cv2.IMWRITE_TIFF_COMPRESSION), 1]
 
 
 def save_film_chart(chart: np.ndarray, path: Path) -> None:
-    """Save as 16-bit sRGB TIFF, uncompressed."""
+    """Save as 16-bit TIFF preserving raw values, uncompressed."""
     u16 = np.clip(chart * 65535.0 + 0.5, 0, 65535).astype(np.uint16)
     cv2.imwrite(str(path), cv2.cvtColor(u16, cv2.COLOR_RGB2BGR), _TIFF_PARAMS)
 
 
 def save_digital_chart(chart: np.ndarray, path: Path) -> None:
-    """Save as 16-bit TIFF preserving raw ACEScct/Rec.2020 values, uncompressed."""
+    """Save as 16-bit TIFF preserving raw ACEScct/AP1 values, uncompressed."""
     u16 = np.clip(chart * 65535.0 + 0.5, 0, 65535).astype(np.uint16)
     cv2.imwrite(str(path), cv2.cvtColor(u16, cv2.COLOR_RGB2BGR), _TIFF_PARAMS)
 
@@ -585,10 +594,14 @@ def main():
     ap.add_argument('--hue-chroma-min', type=float, default=8.0,
                     help='hue check is skipped below this Lab chroma '
                          '(default 8.0 — neutrals have no meaningful hue)')
-    ap.add_argument('--max-delta-mad', type=float, default=3.0,
+    ap.add_argument('--max-delta-mad', type=float, default=2.5,
                     help='per-pair: reject candidates whose film/digital Lab '
-                         'delta is more than N robust-MADs from the pair '
-                         'median (catches parallax-swap outliers; default 3)')
+                         'delta is more than N robust-MADs from the local '
+                         '(K-NN) delta consensus — catches parallax outliers '
+                         'while respecting the LUT\'s nonlinearity (default 2.5)')
+    ap.add_argument('--delta-knn', type=int, default=15,
+                    help='K for the local delta-consensus neighborhood in '
+                         'film-Lab space (default 15)')
     ap.add_argument('--report', action='store_true',
                     help='print per-pair candidate funnel (kept vs rejected)')
     ap.add_argument('--only', type=str, default='',
@@ -642,6 +655,7 @@ def main():
             max_hue_diff_deg=args.max_hue_diff_deg,
             hue_chroma_min=args.hue_chroma_min,
             max_delta_mad=args.max_delta_mad,
+            delta_knn=args.delta_knn,
             border_px=args.border_px,
             film_colorspace=args.film_colorspace,
             digital_colorspace=args.digital_colorspace,
