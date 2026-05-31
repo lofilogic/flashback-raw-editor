@@ -284,7 +284,8 @@ def apply_bloom(image, strength=0.3, threshold=0.6, linear=False):
     """
     Fast large-radius bloom via 4x downsample → heavy Gaussian → upsample → blend.
     threshold: ACEScct-space highlight cutoff (0–1); ~0.555 = scene white, 0.65 = overbright only.
-    linear: when True, uses additive blend (correct for HDR linear-light space);
+    linear: when True, uses additive blend (correct for HDR linear-light space —
+            this is the path the render pipeline calls with ACEScg input);
             when False, uses screen blend (correct for display/LUT-output [0,1] space).
     Luma, ACEScct encoding, masking, and blur all happen at 1/4 resolution.
     """
@@ -294,7 +295,13 @@ def apply_bloom(image, strength=0.3, threshold=0.6, linear=False):
     scale = 4
     bh, bw = max(4, h // scale), max(4, w // scale)
     small = cv2.resize(image, (bw, bh), interpolation=cv2.INTER_AREA).astype(np.float32)
-    luma_small = (0.2126 * small[:, :, 0] + 0.7152 * small[:, :, 1] + 0.0722 * small[:, :, 2])
+    # Luminance weights: ACEScg (AP1, D60) when called on linear scene-referred
+    # input, Rec.709 otherwise. The render pipeline takes the linear branch, so
+    # the AP1 weights are what matter in practice.
+    if linear:
+        luma_small = (0.2722 * small[:, :, 0] + 0.6741 * small[:, :, 1] + 0.0537 * small[:, :, 2])
+    else:
+        luma_small = (0.2126 * small[:, :, 0] + 0.7152 * small[:, :, 1] + 0.0722 * small[:, :, 2])
     luma_log = acescct_encode(luma_small)
     soft_mask = np.clip((luma_log - threshold) / max(0.01, 1.0 - threshold), 0.0, 1.0)
     bloom_src = small * soft_mask[:, :, np.newaxis]
