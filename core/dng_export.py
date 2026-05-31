@@ -3,9 +3,12 @@ import numpy as np
 import exifread
 from pathlib import Path
 
-from .config import PROFILE_TONE_CURVE
+from .config import (
+    PROFILE_TONE_CURVE,
+    SENSOR_WIDTH, SENSOR_HEIGHT, SENSOR_RAW_STRIP_BYTES,
+)
 
-# TIFF / DNG Tag Typen
+# TIFF / DNG tag type codes (TIFF 6.0 spec § Image File Directory).
 _BYTE, _ASCII, _SHORT, _LONG, _RATIONAL, _SRATIONAL, _FLOAT = 1, 2, 3, 4, 5, 10, 11
 
 def _pack_rational_array(vals: list) -> bytes:
@@ -52,7 +55,7 @@ def export_dng(source_path: str, output_path: str, thumbnail_rgb: np.ndarray, pr
             tags = exifread.process_file(f, details=False)
             
         raw_off = int(tags['Image StripOffsets'].values[0]) if 'Image StripOffsets' in tags else 2048
-        raw_len = int(tags['Image StripByteCounts'].values[0]) if 'Image StripByteCounts' in tags else 15995840
+        raw_len = int(tags['Image StripByteCounts'].values[0]) if 'Image StripByteCounts' in tags else SENSOR_RAW_STRIP_BYTES
         
         with open(source_path, 'rb') as f:
             f.seek(raw_off)
@@ -135,14 +138,14 @@ def export_dng(source_path: str, output_path: str, thumbnail_rgb: np.ndarray, pr
             
             subifd = [
                 (254, _LONG, 1, struct.pack('<I', 0)),                                    
-                (256, _LONG, 1, struct.pack('<I', 4144)),                                 
-                (257, _LONG, 1, struct.pack('<I', 3088)),                                 
-                (258, _SHORT, 1, struct.pack('<H', 10)),                                  
-                (259, _SHORT, 1, struct.pack('<H', 1)),                                   
-                (262, _SHORT, 1, struct.pack('<H', 32803)),                               
-                (273, _LONG, 1, struct.pack('<I', raw_off)),                              
-                (277, _SHORT, 1, struct.pack('<H', 1)),                                   
-                (278, _LONG, 1, struct.pack('<I', 3088)),                                 
+                (256, _LONG, 1, struct.pack('<I', SENSOR_WIDTH)),
+                (257, _LONG, 1, struct.pack('<I', SENSOR_HEIGHT)),
+                (258, _SHORT, 1, struct.pack('<H', 10)),
+                (259, _SHORT, 1, struct.pack('<H', 1)),
+                (262, _SHORT, 1, struct.pack('<H', 32803)),
+                (273, _LONG, 1, struct.pack('<I', raw_off)),
+                (277, _SHORT, 1, struct.pack('<H', 1)),
+                (278, _LONG, 1, struct.pack('<I', SENSOR_HEIGHT)),
                 (279, _LONG, 1, struct.pack('<I', len(raw_bytes))),
                 (282, _RATIONAL, 1, _pack_rational_array([300.0])),                       
                 (283, _RATIONAL, 1, _pack_rational_array([300.0])),                       
@@ -157,8 +160,8 @@ def export_dng(source_path: str, output_path: str, thumbnail_rgb: np.ndarray, pr
                 (50717, _LONG, 1, struct.pack('<I', 1023)),                               
                 (50718, _RATIONAL, 2, _pack_rational_array([1.0, 1.0])),                  
                 (50719, _LONG, 2, struct.pack('<II', 0, 0)),                              
-                (50720, _LONG, 2, struct.pack('<II', 4144, 3088)),                        
-                (50829, _LONG, 4, struct.pack('<IIII', 0, 0, 3088, 4144)),                
+                (50720, _LONG, 2, struct.pack('<II', SENSOR_WIDTH, SENSOR_HEIGHT)),
+                (50829, _LONG, 4, struct.pack('<IIII', 0, 0, SENSOR_HEIGHT, SENSOR_WIDTH)),
             ]
             return ifd0, subifd
 

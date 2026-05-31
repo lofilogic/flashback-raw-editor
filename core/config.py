@@ -24,6 +24,14 @@ import os as _os
 
 SENSOR_BLACK = 64
 
+# Native ONE35 V2 sensor geometry. The DNG exporter writes the raw strip
+# verbatim, so these must match the source file's ImageWidth/ImageLength.
+# SENSOR_RAW_STRIP_BYTES is the fallback strip length used when StripByteCounts
+# is missing from the source EXIF (10-bit packed: w*h*10/8).
+SENSOR_WIDTH = 4144
+SENSOR_HEIGHT = 3088
+SENSOR_RAW_STRIP_BYTES = 15995840
+
 # Slider zero for the WB knob. Matches the Flashback ForwardMatrix1's
 # calibration illuminant (D55). The generic-raw path also targets this
 # Kelvin so both paths land at the same neutral point.
@@ -77,7 +85,8 @@ PUSH_PULL_RANGE_EV = 2.0
 CHROMATIC_ABERRATION_STRENGTH = 0.005
 CHROMATIC_ABERRATION_STEPS = 4
 CHROMATIC_ABERRATION_BLUE_BLUR = 0.3
-HALATION_THRESHOLD = 0.60
+CHROMATIC_ABERRATION_ZOOM_BLUR = 1.0  # multiplier on the global zoom-blur pass inside CA
+HALATION_THRESHOLD = 0.65
 HALATION_BLUR_RADIUS = 4.0
 HALATION_STRENGTH = 0.5
 SOFTNESS_SIGMA = 0.5
@@ -138,6 +147,7 @@ class VibeConfig:
     ca_strength: float = CHROMATIC_ABERRATION_STRENGTH
     ca_steps: int = CHROMATIC_ABERRATION_STEPS
     ca_blue_blur: float = CHROMATIC_ABERRATION_BLUE_BLUR
+    ca_zoom_blur: float = CHROMATIC_ABERRATION_ZOOM_BLUR
     softness_sigma: float = SOFTNESS_SIGMA
     grain_strength: float = GRAIN_STRENGTH
     sharpen_strength: float = SHARPEN_STRENGTH
@@ -229,8 +239,8 @@ class ImageAdjustments:
 # =============================================================================
 
 VIBE_PRESETS = {
-    'disposable':           {'enable_ca': True,  'ca_strength': 0.010, 'softness': 0.3, 'sharpness': 2.0, 'sharpen_radius': 0.5, 'grain': 1.2, 'vignette': 0.10, 'vignette_feather': 0.4, 'bloom': 0.10, 'lut': 'assets/luts/disposable.cube'},
-    'flashback_classic_v1': {'enable_ca': True,  'ca_strength': 0.010, 'softness': 0.5, 'sharpness': 1.0, 'sharpen_radius': 0.5, 'grain': 2.0, 'vignette': 0.10, 'vignette_feather': 0.4, 'bloom': 0.10, 'lut': 'assets/luts/V1.cube', 'base_exposure_offset_v2': 0.0},
+    'disposable':           {'enable_ca': True,  'ca_strength': 0.010, 'ca_zoom_blur': 1.5, 'softness': 0.3, 'sharpness': 2.0, 'sharpen_radius': 0.5, 'grain': 1.2, 'vignette': 0.10, 'vignette_feather': 0.4, 'bloom': 0.10, 'lut': 'assets/luts/disposable.cube'},
+    'flashback_classic_v1': {'enable_ca': True,  'ca_strength': 0.005, 'ca_zoom_blur': 4.0, 'softness': 0.3, 'sharpness': 0.8, 'sharpen_radius': 0.5, 'grain': 2.0, 'vignette': 0.10, 'vignette_feather': 0.4, 'bloom': 0.03, 'lut': 'assets/luts/V1.cube', 'base_exposure_offset_v2': 0.0},
     'point_shoot':          {'enable_ca': True,  'ca_strength': 0.002, 'softness': 0.3, 'sharpness': 0.5, 'sharpen_radius': 1.0, 'grain': 0.8, 'vignette': 0.10, 'vignette_feather': 1.0, 'bloom': 0.10, 'lut': 'assets/luts/pointandshoot.cube'},
     'rangefinder':          {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.1, 'sharpness': 0.8, 'sharpen_radius': 1.0, 'grain': 0.5, 'vignette': 0.05, 'vignette_feather': 1.0, 'bloom': 0.05, 'lut': 'assets/luts/rangefinder.cube'},
     'monochrome':           {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.1, 'sharpness': 0.8, 'sharpen_radius': 1.0, 'grain': 1.5, 'vignette': 0.20, 'vignette_feather': 1.0, 'bloom': 0.05, 'lut': 'assets/luts/monochrome.cube'},
@@ -257,6 +267,7 @@ def vibe_config_for(vibe_id: str) -> VibeConfig:
     cfg.bloom_strength              = preset['bloom']
     cfg.lut_path                    = preset['lut']
     cfg.base_exposure_offset_v2     = preset.get('base_exposure_offset_v2', BASE_EXPOSURE_OFFSET_V2)
+    cfg.ca_zoom_blur                = preset.get('ca_zoom_blur', CHROMATIC_ABERRATION_ZOOM_BLUR)
     return cfg
 
 
