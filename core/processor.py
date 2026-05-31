@@ -543,9 +543,12 @@ class FlashbackProcessor:
             return result
 
         except Exception as e:
-            print(f"[processor] load failed: {e}")
-            import traceback
-            traceback.print_exc()
+            # Returning None lets the caller (UI) decide how to surface the
+            # failure; the full traceback is logged for diagnostics. The
+            # exception is intentionally swallowed because load_image is the
+            # user-facing critical path and a half-loaded image is worse than
+            # a clean miss — we just need to make sure it can't fail silently.
+            log.exception("[processor] load failed for %s: %s", dng_path, e)
             return None
 
     def render_preview(self, downscale=False):
