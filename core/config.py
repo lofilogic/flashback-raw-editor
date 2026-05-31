@@ -246,6 +246,17 @@ VIBE_PRESETS = {
     'monochrome':           {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.1, 'sharpness': 0.8, 'sharpen_radius': 1.0, 'grain': 1.5, 'vignette': 0.20, 'vignette_feather': 1.0, 'bloom': 0.05, 'lut': 'assets/luts/monochrome.cube'},
 }
 
+# Short, file-name-safe suffix per vibe — appended to exported JPGs as
+# {basename}_{suffix}.jpg so users can tell at a glance which look produced
+# which file. Unknown vibe ids fall back to 'edit'.
+VIBE_EXPORT_SUFFIX = {
+    'disposable':           'disp',
+    'point_shoot':          'ps',
+    'rangefinder':          'rf',
+    'monochrome':           'mono',
+    'flashback_classic_v1': 'v1',
+}
+
 
 def vibe_config_for(vibe_id: str) -> VibeConfig:
     """Construct a fresh VibeConfig from a preset recipe.
