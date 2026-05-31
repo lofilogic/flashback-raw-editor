@@ -15,6 +15,7 @@ All methods accept and return float32 numpy arrays with shape (H, W, 3).
 The LUT buffer is persistent on the GPU — upload once per vibe change.
 """
 from __future__ import annotations
+import logging
 import os
 import struct
 import numpy as np
@@ -24,6 +25,8 @@ try:
     _WGPU_AVAILABLE = True
 except ImportError:
     _WGPU_AVAILABLE = False
+
+log = logging.getLogger(__name__)
 
 
 def _read_shader(name: str) -> str:
@@ -66,10 +69,10 @@ class GPUPipeline:
             adapter = wgpu.gpu.request_adapter_sync(power_preference='high-performance')
             self._device = adapter.request_device_sync()
             self._build_pipelines()
-            print(f"✓ GPU pipeline ready: {adapter.summary}")
+            log.info("✓ GPU pipeline ready: %s", adapter.summary)
             return True
         except Exception as e:
-            print(f"⚠ GPU init failed ({e}), using CPU fallbacks")
+            log.warning("⚠ GPU init failed (%s), using CPU fallbacks", e)
             self._device = None
             return False
 

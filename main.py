@@ -1,6 +1,7 @@
 """
 Flashback One35 — entry point.
 """
+import logging
 import sys
 import platform
 
@@ -14,6 +15,10 @@ from _version import __version__
 
 def main():
     """Main entry point."""
+    # Plain-message format preserves the look of the existing log lines
+    # (which already carry their own [module] prefixes and ✓ / ⚠ / ✗ glyphs).
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
     # Allow fractional DPI scaling (e.g. 125%, 150%) — must be set before QApplication
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough

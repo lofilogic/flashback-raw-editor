@@ -21,6 +21,7 @@ Pipeline (generic raw — non-Flashback):
     linear sRGB -> ACEScg via LINSRGB_TO_ACESCG    <- cached intermediate
     same render pipeline from here (LUT, sliders, grain, etc.)
 """
+import logging
 import os
 import time
 from pathlib import Path
@@ -31,6 +32,8 @@ import exifread
 import colour
 
 from . import resource_path
+
+log = logging.getLogger(__name__)
 from .config import (
     SENSOR_BLACK, GRAIN_TILE_SCALE, GRAIN_HIGHLIGHT_BIAS, PUSH_PULL_RANGE_EV,
     BASE_KELVIN, GENERIC_DAYLIGHT_K, GENERIC_DAYLIGHT_WB_FALLBACK,
@@ -321,9 +324,9 @@ class FlashbackProcessor:
         if path and os.path.exists(path):
             try:
                 self.lut = colour.read_LUT(path)
-                print(f"[processor] LUT loaded: {self.lut.name} ({self.lut.table.shape})")
+                log.info("[processor] LUT loaded: %s (%s)", self.lut.name, self.lut.table.shape)
             except Exception as e:
-                print(f"[processor] Could not load LUT {path}: {e}")
+                log.error("[processor] Could not load LUT %s: %s", path, e)
 
         self.grain_tiles = []
         self._load_grain_tiles()
@@ -481,7 +484,7 @@ class FlashbackProcessor:
         self.current_file = dng_path
 
         if os.path.splitext(dng_path)[1].lower() in ('.tif', '.tiff'):
-            print("[processor] TIFF import is not supported. Open the original DNG instead.")
+            log.warning("[processor] TIFF import is not supported. Open the original DNG instead.")
             return None
 
         is_flashback, exp_s = _read_dng_exif(dng_path)
@@ -593,7 +596,7 @@ class FlashbackProcessor:
             try:
                 img_display = apply_lut_fast(img_acescct, self.lut)
             except Exception as e:
-                print(f"[processor] LUT error: {e}")
+                log.error("[processor] LUT error: %s", e)
                 img_display = np.clip(img_acescct, 0, 1)
         else:
             flat     = img.reshape(-1, 3)

@@ -6,6 +6,7 @@ FlashbackEditor — QMainWindow: file loading, sliders, thumbnail strip,
 
 The fullscreen Zen overlay lives in ui.zen_overlay.
 """
+import logging
 import sys
 import os
 import shutil
@@ -16,6 +17,8 @@ from pathlib import Path
 
 # core must be imported before colour to apply the NumPy 2.0 compatibility shim
 import core  # noqa: F401
+
+log = logging.getLogger(__name__)
 
 import numpy as np
 import cv2
@@ -797,7 +800,7 @@ class FlashbackEditor(QMainWindow):
             gpu.upload_lut(lut.table)
             self.current_vibe.lut_path = lut_path
         except Exception as e:
-            print(f"⚠ Could not load LUT '{resolved}': {e}")
+            log.warning("⚠ Could not load LUT '%s': %s", resolved, e)
 
     # -------------------------------------------------------------------
     # Per-vibe save / reset
@@ -1300,7 +1303,7 @@ class FlashbackEditor(QMainWindow):
                 if export_image(self.processor, output_path, as_tiff=True, lut_profiling=True):
                     success_count += 1
             except Exception as e:
-                print(f"Error exporting TIFF for {file_path}: {e}")
+                log.error("Error exporting TIFF for %s: %s", file_path, e)
                 traceback.print_exc()
             self.progress_bar.setValue(i + 1)
             QApplication.processEvents()
@@ -1439,7 +1442,7 @@ class FlashbackEditor(QMainWindow):
         self.thumbnail_worker.start()
 
     def _on_thumbnail_error(self, index, error_message):
-        print(f"  ✗ Failed thumbnail {index}: {error_message}")
+        log.error("  ✗ Failed thumbnail %d: %s", index, error_message)
         try:
             if hasattr(self, 'loader_overlay') and self.loader_overlay.isVisible():
                 self.loader_overlay.progress_label.setText(f"Error at {index}: {error_message}")
@@ -1449,7 +1452,7 @@ class FlashbackEditor(QMainWindow):
 
     def _on_thumbnails_finished(self):
         self.thumbnails_loading = False
-        print("✓ Thumbnail generation complete!")
+        log.info("✓ Thumbnail generation complete!")
         self.thumbnail_strip.container.setUpdatesEnabled(True)
         if self.thumbnail_worker:
             self.thumbnail_worker.deleteLater()
@@ -1501,7 +1504,7 @@ class FlashbackEditor(QMainWindow):
         self.add_thumbnail_worker.start()
 
     def _on_add_thumbnails_finished(self):
-        print("✓ Add-images thumbnail generation complete!")
+        log.info("✓ Add-images thumbnail generation complete!")
         if hasattr(self, 'add_thumbnail_worker') and self.add_thumbnail_worker:
             self.add_thumbnail_worker.deleteLater()
             self.add_thumbnail_worker = None
@@ -1534,7 +1537,7 @@ class FlashbackEditor(QMainWindow):
                     self.thumbnail_strip.update_thumbnail(index, thumb_array)
                     return
             except Exception as e:
-                print(f"  ✗ Failed to update current thumbnail: {e}")
+                log.error("  ✗ Failed to update current thumbnail: %s", e)
         else:
             try:
                 if file_path in self.image_cache:
@@ -1554,7 +1557,7 @@ class FlashbackEditor(QMainWindow):
                         self.thumbnail_strip.update_thumbnail(index, thumb_array)
                         return
             except Exception as e:
-                print(f"  ✗ Failed to update thumbnail {index}: {e}")
+                log.error("  ✗ Failed to update thumbnail %d: %s", index, e)
 
     def update_current_thumbnail(self, img_array=None):
         if not self.image_files:
@@ -1697,7 +1700,7 @@ class FlashbackEditor(QMainWindow):
                     "to continue working with existing TIFF intermediates."
                 )
                 return
-            print(f"[Load] Image not in cache, loading from disk...")
+            log.info("[Load] Image not in cache, loading from disk...")
             img_array = self.processor.load_image(file_path)
             if img_array is not None:
                 self._file_is_flashback[file_path] = self.processor.is_flashback_file
@@ -2155,7 +2158,7 @@ class FlashbackEditor(QMainWindow):
                     self.thumbnail_strip.set_processed(idx, True)
 
             except Exception as e:
-                print(f"Error processing {file_path}: {e}")
+                log.error("Error processing %s: %s", file_path, e)
                 traceback.print_exc()
 
             self.progress_bar.setValue(i + 1)
@@ -2184,7 +2187,7 @@ class FlashbackEditor(QMainWindow):
     # ===================================================================
 
     def refresh_from_debug(self):
-        print("Refreshing...")
+        log.info("Refreshing...")
         if self.processor and self.processor.intermediate_acescg is not None:
             img_array = self.processor.render_preview()
             self.display_image(img_array)
@@ -2247,7 +2250,7 @@ class FlashbackEditor(QMainWindow):
                     from ui import native_chrome
                     native_chrome.apply(self, theme.current_theme())
                 except Exception as e:
-                    print(f"[native_chrome] apply failed: {e}")
+                    log.warning("[native_chrome] apply failed: %s", e)
 
             QTimer.singleShot(0, _do_apply)
 

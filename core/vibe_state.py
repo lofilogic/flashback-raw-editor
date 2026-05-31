@@ -11,11 +11,14 @@ Three layers as seen by the editor:
   - session  — the live VibeConfig instance the editor currently holds
 """
 import json
+import logging
 from pathlib import Path
 
 from PySide6.QtCore import QStandardPaths
 
 from .config import VibeConfig
+
+log = logging.getLogger(__name__)
 
 _FILE_NAME = 'vibe_state.json'
 
@@ -39,7 +42,7 @@ def _read_raw() -> dict:
         if isinstance(data, dict):
             return {k: v for k, v in data.items() if isinstance(v, dict)}
     except (OSError, json.JSONDecodeError) as e:
-        print(f"⚠ Could not read {path}: {e}")
+        log.warning("⚠ Could not read %s: %s", path, e)
     return {}
 
 

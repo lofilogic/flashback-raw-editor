@@ -1,7 +1,10 @@
+import logging
 import struct
 import numpy as np
 import exifread
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 from .config import (
     PROFILE_TONE_CURVE,
@@ -181,8 +184,8 @@ def export_dng(source_path: str, output_path: str, thumbnail_rgb: np.ndarray, pr
             f.write(thumb_bytes)
             f.write(raw_bytes)
             
-        print(f"✓ DNG Exported: {output_path}")
+        log.info("✓ DNG Exported: %s", output_path)
         return True
     except Exception as exc:
-        print(f"✗ DNG export failed: {exc}")
+        log.error("✗ DNG export failed: %s", exc)
         return False

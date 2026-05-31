@@ -9,12 +9,15 @@ Custom Qt widgets for the Flashback editor.
   RoundedLabel      — QLabel with anti-aliased rounded corners
   ZoomableImageWidget — pan/zoom image viewer
 """
+import logging
 import sys
 import os
 import time
 import threading
 import numpy as np
 import cv2
+
+log = logging.getLogger(__name__)
 
 from PySide6.QtWidgets import (
     QWidget, QLabel, QScrollArea, QFrame, QVBoxLayout, QHBoxLayout,
@@ -86,7 +89,7 @@ class ThumbnailWorker(QThread):
                     self.progress.emit(i + 1, total)
 
             except Exception as e:
-                print(f"  ✗ Failed thumbnail {i}: {e}")
+                log.error("  ✗ Failed thumbnail %d: %s", i, e)
                 self.error.emit(i, str(e))
 
         total_time = time.time() - total_start
@@ -225,7 +228,7 @@ class VibeRefreshWorker(QThread):
                     thumb = cv2.resize(img_display, (new_w, 70), interpolation=cv2.INTER_LINEAR)
                     self.thumbnail_ready.emit(idx, thumb)
             except Exception as e:
-                print(f"  ✗ Vibe refresh thumbnail {idx}: {e}")
+                log.error("  ✗ Vibe refresh thumbnail %d: %s", idx, e)
 
         self.finished.emit()
 
