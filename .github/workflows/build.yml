@@ -169,9 +169,9 @@ jobs:
             ### Downloads
             | Platform | File |
             |---|---|
-            | macOS (Apple Silicon — M1/M2/M3/M4) | `Flashback-macOS-AppleSilicon.dmg` |
-            | Windows | `Flashback-Windows-Setup.exe` |
-            | Linux | `Flashback-Linux.AppImage` |
+            | macOS (Apple Silicon — M1/M2/M3/M4) | [`Flashback-macOS-AppleSilicon.dmg`](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/Flashback-macOS-AppleSilicon.dmg) |
+            | Windows | [`Flashback-Windows-Setup.exe`](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/Flashback-Windows-Setup.exe) |
+            | Linux | [`Flashback-Linux.AppImage`](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/Flashback-Linux.AppImage) |
           generate_release_notes: true
           draft: false
           # Tags containing -beta or -rc are automatically marked as pre-release
