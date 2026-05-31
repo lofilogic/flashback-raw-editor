@@ -62,7 +62,8 @@ from .effects import (
 ASN_D50 = np.array([0.541, 1.0, 0.597], dtype=np.float32)
 
 # ForwardMatrix1: camera_wb_rgb (raw / ASN) -> XYZ_D50.
-# Calibrated under D55 daylight.
+# Calibrated under D50 daylight (matches CalibrationIlluminant1 in the
+# DNGs we emit and the --illuminant d50 flag used to derive the matrix).
 FM1 = np.array([
     [0.53086, 0.22116, 0.21219],
     [0.08570, 0.98930, -0.07500],
