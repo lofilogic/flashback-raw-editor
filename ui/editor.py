@@ -1498,7 +1498,7 @@ class FlashbackEditor(QMainWindow):
         )
         self.add_thumbnail_worker.progress.connect(self.loader_overlay.update_progress)
         self.add_thumbnail_worker.thumbnail_ready.connect(
-            lambda i, t, mid, off=offset: self._add_thumbnail_to_ui(i + off, t, mid)
+            lambda i, t, mid, isfb, off=offset: self._add_thumbnail_to_ui(i + off, t, mid, isfb)
         )
         self.add_thumbnail_worker.finished.connect(self._on_add_thumbnails_finished)
         self.add_thumbnail_worker.start()
@@ -1576,7 +1576,8 @@ class FlashbackEditor(QMainWindow):
         except Exception as e:
             _timing_print(f"  [Thumbnail] Update failed silently: {e}")
 
-    def _add_thumbnail_to_ui(self, index, thumb_array, intermediate=None):
+    def _add_thumbnail_to_ui(self, index, thumb_array, intermediate=None,
+                             is_flashback=None):
         self.thumbnail_strip.container.setUpdatesEnabled(False)
         filename = self.image_files[index].name if self.image_files and index < len(self.image_files) else None
         self.thumbnail_strip.add_thumbnail(thumb_array, index, filename=filename)
@@ -1592,6 +1593,13 @@ class FlashbackEditor(QMainWindow):
         if intermediate is not None and self.image_files:
             file_path = str(self.image_files[index])
             self.image_cache[file_path] = intermediate
+            if is_flashback is not None:
+                # Persist the Flashback flag alongside the cached intermediate,
+                # otherwise navigating to a worker-cached image leaves the DNG
+                # export button greyed out (it only sees False from .get()).
+                self._file_is_flashback[file_path] = bool(is_flashback)
+                if index == self.current_index:
+                    self._update_dng_button_state()
 
     def on_thumbnail_click(self, index):
         if 0 <= index < len(self.image_files):

@@ -50,7 +50,7 @@ class ThumbnailWorker(QThread):
     """
 
     progress = Signal(int, int)            # current, total
-    thumbnail_ready = Signal(int, object, object)  # index, thumb_array, intermediate
+    thumbnail_ready = Signal(int, object, object, bool)  # index, thumb_array, intermediate, is_flashback
     finished = Signal()
     error = Signal(int, str)               # index, error_message
 
@@ -85,7 +85,8 @@ class ThumbnailWorker(QThread):
                     new_w = int(w * scale)
                     thumb_array = cv2.resize(img_display, (new_w, 70), interpolation=cv2.INTER_LINEAR)
 
-                    self.thumbnail_ready.emit(i, thumb_array, intermediate)
+                    self.thumbnail_ready.emit(i, thumb_array, intermediate,
+                                              bool(processor.is_flashback_file))
                     self.progress.emit(i + 1, total)
 
             except Exception as e:
