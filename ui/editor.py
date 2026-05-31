@@ -13,6 +13,7 @@ import shutil
 import time
 import traceback
 import platform
+import re
 from pathlib import Path
 
 # core must be imported before colour to apply the NumPy 2.0 compatibility shim
@@ -93,6 +94,15 @@ class FlashbackEditor(QMainWindow):
         self.thumbnail_cache = {}
         self.thumbnail_settings = {}
         self._file_is_flashback: dict = {}  # path_str -> bool
+        # Cumulative rotation in degrees (0/90/180/270) per image path. The
+        # processor *consumes* its rotation field by burning it into the
+        # intermediate, so we keep our own running tally that survives reloads
+        # and gets persisted in project files.
+        self.image_rotations: dict = {}
+        # Path of the currently-open project file (.fbproj), or None if the
+        # current image set didn't come from a project. Save reuses this;
+        # Save As always prompts.
+        self.current_project_path = None  # type: ignore[assignment]
 
         pictures_loc = QStandardPaths.writableLocation(QStandardPaths.PicturesLocation)
         base_dir = pictures_loc if pictures_loc else str(Path.home())
@@ -167,6 +177,7 @@ class FlashbackEditor(QMainWindow):
         self.zen_overlay.closed.connect(self.on_zen_closed)
         self.zen_overlay.navigated.connect(self.on_zen_navigate)
         self.zen_overlay.rotated.connect(self.on_zen_rotate)
+        self.zen_overlay.remove_requested.connect(self.remove_current_from_project)
 
     # ===================================================================
     # ZEN MODE
@@ -210,6 +221,7 @@ class FlashbackEditor(QMainWindow):
         self.update_current_thumbnail(img_array)
         file_path = str(self.image_files[self.current_index])
         self.image_cache[file_path] = self.processor.intermediate_acescg.copy()
+        self.image_rotations[file_path] = (self.image_rotations.get(file_path, 0) + 90) % 360
 
     def rotate_counterclockwise(self):
         if not self.image_files:
@@ -221,6 +233,7 @@ class FlashbackEditor(QMainWindow):
         self.update_current_thumbnail(img_array)
         file_path = str(self.image_files[self.current_index])
         self.image_cache[file_path] = self.processor.intermediate_acescg.copy()
+        self.image_rotations[file_path] = (self.image_rotations.get(file_path, 0) - 90) % 360
 
     # ===================================================================
     # LUT LOADING
@@ -519,6 +532,7 @@ class FlashbackEditor(QMainWindow):
         self.thumbnail_strip.thumbnail_clicked.connect(self.on_thumbnail_click)
         self.thumbnail_strip.thumbnail_right_clicked.connect(self.on_thumbnail_right_click)
         self.thumbnail_strip.thumbnail_paste_selected.connect(self.on_thumbnail_paste_selected)
+        self.thumbnail_strip.thumbnail_remove_requested.connect(self.remove_from_project)
         fl.addWidget(self.thumbnail_strip)
 
         self.fade_overlay = FadeOverlayWidget(self.thumbnail_strip)
@@ -1147,6 +1161,28 @@ class FlashbackEditor(QMainWindow):
 
         file_menu.addSeparator()
 
+        act_open_project = QAction("Open Project…", self)
+        act_open_project.setShortcut(QKeySequence("Ctrl+Shift+O"))
+        act_open_project.triggered.connect(lambda: self.open_project())
+        file_menu.addAction(act_open_project)
+
+        self.recent_projects_menu = file_menu.addMenu("Open Recent Project")
+        self.recent_projects_menu.aboutToShow.connect(self._rebuild_recent_projects_menu)
+        # Initial population so the menu isn't empty before first show.
+        self._rebuild_recent_projects_menu()
+
+        act_save_project = QAction("Save Project", self)
+        act_save_project.setShortcut(QKeySequence.StandardKey.Save)  # Cmd+S / Ctrl+S
+        act_save_project.triggered.connect(self.save_project)
+        file_menu.addAction(act_save_project)
+
+        act_save_project_as = QAction("Save Project As…", self)
+        act_save_project_as.setShortcut(QKeySequence.StandardKey.SaveAs)  # Cmd+Shift+S
+        act_save_project_as.triggered.connect(self.save_project_as)
+        file_menu.addAction(act_save_project_as)
+
+        file_menu.addSeparator()
+
         act_export_jpg = QAction("Export JPGs", self)
         act_export_jpg.triggered.connect(self.export_as_jpeg)
         file_menu.addAction(act_export_jpg)
@@ -1200,6 +1236,13 @@ class FlashbackEditor(QMainWindow):
         act_reset = QAction("Reset Settings", self)
         act_reset.triggered.connect(self.reset_all_sliders)
         edit_menu.addAction(act_reset)
+
+        edit_menu.addSeparator()
+
+        act_remove = QAction("Remove from Project", self)
+        act_remove.setShortcut(QKeySequence(Qt.Key_Delete))
+        act_remove.triggered.connect(self.remove_current_from_project)
+        edit_menu.addAction(act_remove)
 
         # ── View ──────────────────────────────────────────────────────
         view_menu = mb.addMenu("View")
@@ -1324,8 +1367,38 @@ class FlashbackEditor(QMainWindow):
     # FILE MANAGEMENT
     # ===================================================================
 
-    # Volume labels that identify a Flashback camera
+    # Volume labels that identify a Flashback camera (fast-path; the camera
+    # is recognised by content even if the user renames the SD card).
     CAMERA_VOLUME_NAMES = {'ONE35 V2', 'ONE35'}
+
+    # The camera is a disposable-style device with a fixed frame budget; any
+    # volume holding more DNGs than this can't be a Flashback camera and is
+    # almost certainly someone's photo library backup.
+    CAMERA_MAX_FRAMES = 27
+
+    # Camera-issued filename shape: SN<serial>_<frame>.dng
+    _CAMERA_DNG_PATTERN = re.compile(r'^SN\d+_\d+\.dng$', re.IGNORECASE)
+
+    @classmethod
+    def _looks_like_flashback_camera(cls, mount: Path, vol_name: str, dng_files: list) -> bool:
+        """Heuristic check: does this mount look like a Flashback camera?
+
+        Rejects anything over the camera's frame capacity, then accepts on
+        any of: known volume label, presence of the camera's UNPROCESSED_JPG
+        sibling folder, or all DNG filenames matching the SN-pattern.
+        """
+        if len(dng_files) > cls.CAMERA_MAX_FRAMES:
+            return False
+        # Known label: trust even if the card is empty (freshly erased camera).
+        if vol_name in cls.CAMERA_VOLUME_NAMES:
+            return True
+        if not dng_files:
+            return False
+        if (mount / 'UNPROCESSED_JPG').is_dir():
+            return True
+        if all(cls._CAMERA_DNG_PATTERN.match(p.name) for p in dng_files):
+            return True
+        return False
 
     @staticmethod
     def _get_volume_name(path: Path) -> str:
@@ -1357,31 +1430,199 @@ class FlashbackEditor(QMainWindow):
                 if drive.exists():
                     mount_points.append(drive)
         else:  # Linux
-            for base in (Path("/media"), Path("/mnt")):
-                if base.exists():
-                    mount_points.extend(base.iterdir())
+            # Modern desktop distros (Ubuntu, Fedora) auto-mount removable
+            # media at /media/<username>/<label> or /run/media/<username>/
+            # <label>. Walk one level deeper than /media so we see actual
+            # volumes, not per-user buckets. /mnt is typically used for
+            # manual mounts and lives at the top level.
+            for base in (Path("/media"), Path("/run/media")):
+                if not base.exists():
+                    continue
+                for child in base.iterdir():
+                    if not child.is_dir():
+                        continue
+                    try:
+                        mount_points.extend(child.iterdir())
+                    except (PermissionError, OSError):
+                        continue
+            if Path("/mnt").exists():
+                mount_points.extend(Path("/mnt").iterdir())
 
         for mount in mount_points:
             if not mount.is_dir():
                 continue
             vol_name = self._get_volume_name(mount)
-            if vol_name not in self.CAMERA_VOLUME_NAMES:
+            try:
+                dng_files = list(set(mount.glob("*.dng")) | set(mount.glob("*.DNG")))
+            except (PermissionError, OSError):
                 continue
-            dng_files = list(set(mount.glob("*.dng")) | set(mount.glob("*.DNG")))
+            if not self._looks_like_flashback_camera(mount, vol_name, dng_files):
+                continue
             if dng_files:
+                from core.camera_import import plan_imports
+                to_import, skipped, _ = plan_imports(dng_files, Path(self.output_dir))
+                new_n = len(to_import)
+                skip_n = len(skipped)
+                if new_n == 0:
+                    reply = QMessageBox.question(
+                        self, "Camera Detected",
+                        f"{vol_name}: all {skip_n} DNGs already imported.\n\n"
+                        f"Open the existing copies from {self.output_dir}?",
+                        QMessageBox.Yes | QMessageBox.No
+                    )
+                    if reply == QMessageBox.Yes:
+                        self.load_image_files(skipped)
+                    return
+                msg = f"Found {len(dng_files)} DNG files on {vol_name}.\n\n"
+                msg += f"Import {new_n} new file(s) into {self.output_dir}?"
+                if skip_n:
+                    msg += f"\n({skip_n} already imported and will be skipped.)"
                 reply = QMessageBox.question(
-                    self, "Camera Detected",
-                    f"Found {len(dng_files)} DNG files on {vol_name}.\n\nLoad these files?",
+                    self, "Camera Detected", msg,
                     QMessageBox.Yes | QMessageBox.No
                 )
                 if reply == QMessageBox.Yes:
-                    self.load_image_files(dng_files)
+                    target_files = [tgt for _src, tgt in to_import]
+                    export_sources = {str(tgt): str(src) for src, tgt in to_import}
+                    # Include the already-imported copies so the strip shows
+                    # the whole roll, not just the freshly-exported subset.
+                    self.load_image_files(
+                        target_files + skipped,
+                        export_sources=export_sources,
+                    )
             else:
                 QMessageBox.information(
                     self, "Camera Connected",
                     f"{vol_name} is connected but contains no DNG files."
                 )
             return
+
+    RECENT_PROJECTS_MAX = 8
+
+    def _recent_projects(self):
+        raw = self.app_settings.value("recent_projects", []) or []
+        if isinstance(raw, str):  # QSettings sometimes returns a single string
+            raw = [raw]
+        return [str(p) for p in raw]
+
+    def _remember_recent_project(self, path):
+        path = str(path)
+        items = [p for p in self._recent_projects() if p != path]
+        items.insert(0, path)
+        items = items[: self.RECENT_PROJECTS_MAX]
+        self.app_settings.setValue("recent_projects", items)
+        if hasattr(self, 'recent_projects_menu'):
+            self._rebuild_recent_projects_menu()
+
+    def _remove_recent_project(self, path):
+        path = str(path)
+        items = [p for p in self._recent_projects() if p != path]
+        self.app_settings.setValue("recent_projects", items)
+        if hasattr(self, 'recent_projects_menu'):
+            self._rebuild_recent_projects_menu()
+
+    def _rebuild_recent_projects_menu(self):
+        menu = self.recent_projects_menu
+        menu.clear()
+        items = [p for p in self._recent_projects() if Path(p).exists()]
+        if not items:
+            act = QAction("(No recent projects)", self)
+            act.setEnabled(False)
+            menu.addAction(act)
+            return
+        for p in items:
+            label = Path(p).name
+            act = QAction(label, self)
+            act.setToolTip(p)
+            act.triggered.connect(lambda _checked=False, pth=p: self.open_project(pth))
+            menu.addAction(act)
+        menu.addSeparator()
+        act_clear = QAction("Clear Menu", self)
+        act_clear.triggered.connect(lambda: (
+            self.app_settings.setValue("recent_projects", []),
+            self._rebuild_recent_projects_menu(),
+        ))
+        menu.addAction(act_clear)
+
+    def save_project(self):
+        """Save to the currently-open project file, or prompt if none."""
+        if self.current_project_path is None:
+            return self.save_project_as()
+        self._write_project_to(self.current_project_path)
+
+    def save_project_as(self):
+        from core.project import PROJECT_EXT
+        if not self.image_files:
+            QMessageBox.information(self, "Save Project", "No images are open.")
+            return
+        default_dir = self.app_settings.value("last_project_dir", self.output_dir)
+        suggested = (str(self.current_project_path)
+                     if self.current_project_path
+                     else str(Path(default_dir) / f"Untitled{PROJECT_EXT}"))
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Project As", suggested,
+            f"Flashback Project (*{PROJECT_EXT})"
+        )
+        if not path:
+            return
+        self._write_project_to(Path(path))
+
+    def _write_project_to(self, path):
+        from core.project import save_project
+        if not self.image_files:
+            return
+        # Commit any in-flight edits so the saved project reflects the UI.
+        cur = str(self.image_files[self.current_index])
+        self.image_settings[cur] = self.processor.get_settings()
+        try:
+            written = save_project(
+                path, self.image_files, self.image_settings,
+                image_rotations=self.image_rotations,
+                current_index=self.current_index,
+            )
+            self.current_project_path = written
+            self.app_settings.setValue("last_project_dir", str(written.parent))
+            self._remember_recent_project(written)
+        except Exception as e:
+            log.error("Save project failed: %s", e)
+            QMessageBox.critical(self, "Save Project", f"Failed to save project:\n{e}")
+
+    def open_project(self, path=None):
+        from core.project import load_project, PROJECT_EXT
+        if not path:
+            default_dir = self.app_settings.value("last_project_dir", self.output_dir)
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Open Project", default_dir,
+                f"Flashback Project (*{PROJECT_EXT})"
+            )
+            if not path:
+                return
+        try:
+            image_files, image_settings, image_rotations, current_index = load_project(path)
+        except Exception as e:
+            log.error("Open project failed: %s", e)
+            QMessageBox.critical(self, "Open Project", f"Failed to open project:\n{e}")
+            self._remove_recent_project(path)
+            return
+        if not image_files:
+            QMessageBox.warning(self, "Open Project",
+                                "None of the project's images could be found on disk.")
+            return
+        self.app_settings.setValue("last_project_dir", str(Path(path).parent))
+        self._remember_recent_project(path)
+        self.image_settings = dict(image_settings)
+        # Pick the original active-file path so the alphabetical re-sort
+        # inside load_image_files doesn't drift the selection.
+        active_path = (str(image_files[current_index])
+                       if 0 <= current_index < len(image_files) else None)
+        self.load_image_files(
+            image_files,
+            image_rotations=image_rotations,
+            current_path=active_path,
+        )
+        # load_image_files cleared current_project_path; re-attach so Save
+        # writes back to this file.
+        self.current_project_path = Path(path)
 
     def open_files(self):
         default_dir = QStandardPaths.writableLocation(QStandardPaths.PicturesLocation) or str(Path.home())
@@ -1398,7 +1639,8 @@ class FlashbackEditor(QMainWindow):
             self.app_settings.setValue("last_open_dir", new_dir)
             self.load_image_files([Path(f) for f in files])
 
-    def load_image_files(self, image_files):
+    def load_image_files(self, image_files, export_sources=None,
+                          image_rotations=None, current_path=None):
         if not image_files:
             return
 
@@ -1406,11 +1648,29 @@ class FlashbackEditor(QMainWindow):
             self._vibe_refresh_worker.stop()
             self._vibe_refresh_worker.wait()
 
+        # Always present in alphabetical order (by filename, case-insensitive)
+        # regardless of source ordering or OS settings.
+        image_files = sorted(image_files, key=lambda p: Path(str(p)).name.lower())
+
+        # Any fresh image load detaches us from the previously-open project,
+        # so subsequent Save uses Save-As semantics. open_project re-assigns
+        # current_project_path after calling load_image_files.
+        self.current_project_path = None
+
         self.image_files = image_files
-        self.current_index = 0
         self.image_cache.clear()
         self._file_is_flashback.clear()
+        self.image_rotations = dict(image_rotations) if image_rotations else {}
         self.thumbnail_strip.clear()
+
+        # Pick starting index: caller-provided path wins, else first image.
+        self.current_index = 0
+        if current_path:
+            target = str(current_path)
+            for i, p in enumerate(self.image_files):
+                if str(p) == target:
+                    self.current_index = i
+                    break
 
         self.btn_process_all.setEnabled(True)
         self.update_process_button_text()
@@ -1419,6 +1679,25 @@ class FlashbackEditor(QMainWindow):
         layout_spacing = 5
         final_width = len(self.image_files) * (expected_thumb_width + layout_spacing)
         self.thumbnail_strip.container.setMinimumWidth(final_width)
+
+        # When importing from a camera, the first target file does not yet
+        # exist on disk — export it synchronously so load_current_image() has
+        # something to read. Pre-fill the image cache with what the export
+        # helper already loaded so load_current_image avoids a second read.
+        # The background worker skips this file (target now exists) and moves
+        # on to the next.
+        if export_sources:
+            first = str(image_files[0])
+            src = export_sources.get(first)
+            if src and not os.path.exists(first):
+                try:
+                    from core.camera_import import export_camera_dng
+                    preloaded = export_camera_dng(src, first, self.processor)
+                    if preloaded is not None:
+                        self.image_cache[first] = self.processor.intermediate_acescg.copy()
+                        self._file_is_flashback[first] = bool(self.processor.is_flashback_file)
+                except Exception as e:
+                    log.error("First-image camera export failed: %s", e)
 
         self.load_current_image()
 
@@ -1429,6 +1708,8 @@ class FlashbackEditor(QMainWindow):
         self.thumbnail_worker = ThumbnailWorker(
             self.image_files,
             self.processor.lut,
+            export_sources=export_sources,
+            rotations=self.image_rotations,
         )
 
         self.thumbnail_worker.progress.connect(self.loader_overlay.update_progress)
@@ -1606,6 +1887,59 @@ class FlashbackEditor(QMainWindow):
             self.current_index = index
             self.load_current_image()
 
+    def remove_current_from_project(self):
+        self.remove_from_project(self.current_index)
+
+    def remove_from_project(self, index):
+        """Drop the image at `index` from the open set (no file deletion).
+        Used to curate before saving a project."""
+        if not self.image_files:
+            return
+        if not (0 <= index < len(self.image_files)):
+            return
+        file_path = str(self.image_files[index])
+
+        self.image_files.pop(index)
+        self.image_settings.pop(file_path, None)
+        self.image_rotations.pop(file_path, None)
+        self.image_cache.pop(file_path, None)
+        self._file_is_flashback.pop(file_path, None)
+        self.thumbnail_strip.remove_at(index)
+
+        if not self.image_files:
+            self.current_index = 0
+            # Drop the cached intermediate so refresh_from_debug() (triggered
+            # by close_zen → on_zen_closed) doesn't re-render the removed
+            # image back into the view.
+            self.processor.intermediate_acescg = None
+            self.processor.current_file = None
+            # And cancel any in-flight background render — otherwise its
+            # render_done would fire after the clear and re-set
+            # image_label._original_pixmap, making the image reappear on the
+            # next zoom/scroll.
+            if hasattr(self, '_render_worker'):
+                self._render_worker.invalidate()
+            self._render_needs_commit = False
+            self.image_label.clear()
+            self.label_filename.setText("")
+            self.label_counter.setText("0 / 0")
+            self.btn_process_all.setEnabled(False)
+            self.update_process_button_text()
+            self.update_mode_label()
+            # Zen mode shows the same image; with no images left, exit zen.
+            # Defer the close so it happens after the current key-press handler
+            # in the zen overlay unwinds (calling hide() from inside a child's
+            # keyPressEvent can race with Qt re-asserting focus on the overlay).
+            if hasattr(self, 'zen_overlay'):
+                QTimer.singleShot(0, self.zen_overlay.close_zen)
+            return
+
+        # Stay on the same slot when possible; if we deleted the tail, fall
+        # back to what is now the last image.
+        self.current_index = min(index, len(self.image_files) - 1)
+        self.update_process_button_text()
+        self.load_current_image()
+
     def on_thumbnail_right_click(self, index):
         if 0 <= index < len(self.image_files):
             self.thumbnail_strip.toggle_process_selection(index)
@@ -1713,6 +2047,11 @@ class FlashbackEditor(QMainWindow):
             if img_array is not None:
                 self._file_is_flashback[file_path] = self.processor.is_flashback_file
                 self._update_dng_button_state()
+                # Re-apply any rotation persisted from a previous session.
+                stored_rot = self.image_rotations.get(file_path, 0)
+                if stored_rot:
+                    self.processor.adjustments.rotation = stored_rot
+                    img_array = self.processor._apply_rotation_and_render()
                 self.image_cache[file_path] = self.processor.intermediate_acescg.copy()
                 self.update_current_thumbnail(img_array)
                 self.display_image(img_array, is_scrub=True)
@@ -2235,6 +2574,10 @@ class FlashbackEditor(QMainWindow):
             self.mode_label.setText("Paste selection cleared")
             self.mode_label.setStyleSheet(f"color: {C['accent']};")
             QTimer.singleShot(1500, self.update_mode_label)
+            event.accept()
+        elif event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+            if self.image_files:
+                self.remove_current_from_project()
             event.accept()
         elif event.key() == Qt.Key_F12:
             if self.debug_panel.isVisible():

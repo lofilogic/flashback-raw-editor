@@ -13,6 +13,7 @@ class FullscreenZenOverlay(QWidget):
     closed = Signal()
     navigated = Signal(int)
     rotated = Signal(int)
+    remove_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -161,6 +162,13 @@ class FullscreenZenOverlay(QWidget):
                 self.main_window.paste_settings()
         elif event.key() == Qt.Key_R and (event.modifiers() & Qt.ControlModifier):
             self.main_window.reset_all_sliders()
+        elif event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+            self.remove_requested.emit()
+            # If that emptied the project, close ourselves here — closing from
+            # within zen's own keyPressEvent is more reliable than scheduling
+            # hide() from the main-window handler.
+            if not self.main_window.image_files:
+                self.close_zen()
         elif event.key() in (Qt.Key_1, Qt.Key_2, Qt.Key_3, Qt.Key_4, Qt.Key_5):
             vibes = ('disposable', 'point_shoot', 'rangefinder', 'monochrome', 'flashback_classic_v1')
             self.main_window.vibe_picker.set_vibe(vibes[event.key() - Qt.Key_1])

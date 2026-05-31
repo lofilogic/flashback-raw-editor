@@ -54,10 +54,20 @@ class ThumbnailWorker(QThread):
     finished = Signal()
     error = Signal(int, str)               # index, error_message
 
-    def __init__(self, image_files, processor_lut):
+    def __init__(self, image_files, processor_lut, export_sources=None,
+                 rotations=None):
         super().__init__()
         self.image_files = image_files
         self.processor_lut = processor_lut
+        # Optional dict: target_path_str -> source_path_str. When a target path
+        # appears here AND does not yet exist on disk, the worker exports the
+        # source DNG to the target before loading the thumbnail. This is what
+        # the camera-import flow uses to write into the dated output folders.
+        self.export_sources = export_sources or {}
+        # Optional dict: path_str -> degrees (0/90/180/270). When set, the
+        # thumbnail is generated from the rotated intermediate so project
+        # reloads show oriented thumbs.
+        self.rotations = rotations or {}
         self._is_running = True
 
     def run(self):
@@ -75,8 +85,29 @@ class ThumbnailWorker(QThread):
 
             file_path_str = str(self.image_files[i])
 
+            src = self.export_sources.get(file_path_str)
+            preloaded_display = None
+            if src and not os.path.exists(file_path_str):
+                try:
+                    from core.camera_import import export_camera_dng
+                    preloaded_display = export_camera_dng(src, file_path_str, processor)
+                except Exception as e:
+                    log.error("  ✗ Camera export failed for %s: %s", src, e)
+                    self.error.emit(i, f"export failed: {e}")
+                    continue
+
             try:
-                img_display = processor.load_image(file_path_str)
+                # If we just exported, the processor already holds the loaded
+                # image / intermediate / is_flashback flag — skip re-reading.
+                img_display = preloaded_display if preloaded_display is not None \
+                    else processor.load_image(file_path_str)
+
+                rot = int(self.rotations.get(file_path_str, 0)) % 360
+                if img_display is not None and rot:
+                    processor.adjustments.rotation = rot
+                    rotated = processor._apply_rotation_and_render()
+                    if rotated is not None:
+                        img_display = rotated
 
                 if img_display is not None and self._is_running:
                     intermediate = processor.intermediate_acescg.copy()
@@ -251,8 +282,12 @@ class ThumbnailWidget(QFrame):
 
     clicked = Signal(int)        # left click
     right_clicked = Signal(int)  # right click
+    # Emitted when the user drags a thumbnail downward and releases below
+    # the bottom edge of the application window — a "throw it away" gesture.
+    remove_requested = Signal(int)
 
     THUMBNAIL_HEIGHT = 70  # Fixed height, variable width based on aspect ratio
+    DRAG_THRESHOLD = 8     # pixels of motion before a press is treated as a drag
 
     def __init__(self, index, parent=None):
         super().__init__(parent)
@@ -262,6 +297,8 @@ class ThumbnailWidget(QFrame):
         self.is_current = False
         self.is_processed = False
         self.pixmap = None
+        self._drag_start_pos = None
+        self._drag_active = False
         self.setFixedSize(int(self.THUMBNAIL_HEIGHT * 1.5), self.THUMBNAIL_HEIGHT)
         self.setFrameStyle(QFrame.NoFrame)
         self.setCursor(Qt.PointingHandCursor)
@@ -381,6 +418,8 @@ class ThumbnailWidget(QFrame):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
+            self._drag_start_pos = event.pos()
+            self._drag_active = False
             self.clicked.emit(self.index)
             event.accept()
         elif event.button() == Qt.RightButton:
@@ -388,6 +427,39 @@ class ThumbnailWidget(QFrame):
             event.accept()
         elif event.button() == Qt.MiddleButton:
             event.ignore()
+
+    def mouseMoveEvent(self, event):
+        if (event.buttons() & Qt.LeftButton) and self._drag_start_pos is not None:
+            delta = event.pos() - self._drag_start_pos
+            if not self._drag_active and (
+                abs(delta.x()) > self.DRAG_THRESHOLD
+                or abs(delta.y()) > self.DRAG_THRESHOLD
+            ):
+                self._drag_active = True
+                self.setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._drag_active:
+            self.unsetCursor()
+            window = self.window()
+            try:
+                release_global_y = event.globalPosition().toPoint().y()
+            except AttributeError:  # PySide6 <6.0 fallback
+                release_global_y = event.globalPos().y()
+            if window is not None:
+                window_bottom = window.frameGeometry().bottom()
+                if release_global_y > window_bottom:
+                    self.remove_requested.emit(self.index)
+            self._drag_active = False
+            self._drag_start_pos = None
+            event.accept()
+            return
+        self._drag_start_pos = None
+        self._drag_active = False
+        super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event):
         event.ignore()
@@ -602,6 +674,7 @@ class ThumbnailStrip(QScrollArea):
     thumbnail_clicked = Signal(int)              # plain left click - load image
     thumbnail_right_clicked = Signal(int)        # right click - toggle process selection
     thumbnail_paste_selected = Signal(int, bool) # (index, is_selected) feedback
+    thumbnail_remove_requested = Signal(int)     # dragged out of window — remove from project
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -704,6 +777,7 @@ class ThumbnailStrip(QScrollArea):
         thumb.set_pixmap(pixmap)
         thumb.clicked.connect(self._on_left_click)
         thumb.right_clicked.connect(self._on_right_click)
+        thumb.remove_requested.connect(self.thumbnail_remove_requested)
 
         self.thumbnails.append(thumb)
         self.layout.addWidget(thumb)
@@ -713,6 +787,29 @@ class ThumbnailStrip(QScrollArea):
             if isinstance(pixmap, np.ndarray):
                 pixmap = self._array_to_pixmap(pixmap)
             self.thumbnails[index].set_pixmap(pixmap)
+
+    def remove_at(self, index: int):
+        """Drop one thumbnail and renumber the rest so their index labels
+        and click signals stay aligned with the editor's image_files list."""
+        if not (0 <= index < len(self.thumbnails)):
+            return
+        thumb = self.thumbnails.pop(index)
+        self.layout.removeWidget(thumb)
+        thumb.deleteLater()
+
+        def _shift(s):
+            shifted = set()
+            for i in s:
+                if i == index:
+                    continue
+                shifted.add(i - 1 if i > index else i)
+            return shifted
+        self.process_selected_indices = _shift(self.process_selected_indices)
+        self.paste_selected_indices = _shift(self.paste_selected_indices)
+
+        for i, t in enumerate(self.thumbnails):
+            t.index = i
+            t.update()
 
     # ===================================================================
     # PROCESS SELECTION
@@ -968,7 +1065,12 @@ class ZoomableImageWidget(QScrollArea):
         self._original_pixmap = QPixmap.fromImage(q_image)
         self._pixmap = self._original_pixmap
 
-        if self.widget() == self.placeholder_label:
+        if self.widget() is not self.image_label:
+            # takeWidget detaches the current widget without destroying it,
+            # so we can swap back to the same placeholder_label later in clear().
+            old = self.takeWidget()
+            if old is not None and old is not self.image_label:
+                old.setParent(None)
             self.setWidget(self.image_label)
 
         self._update_display()
@@ -1002,9 +1104,27 @@ class ZoomableImageWidget(QScrollArea):
     def clear(self):
         self._pixmap = None
         self._original_pixmap = None
-        self.image_label.clear()
-        self.image_label.setFixedSize(1, 1)
+        # Detach (don't destroy) the current widget — setWidget below would
+        # otherwise delete it, and on a second clear the image_label would
+        # be a dangling Qt object.
+        old = self.takeWidget()
+        if old is self.image_label:
+            old.clear()
+            old.setFixedSize(1, 1)
+            old.setParent(None)
+        # Recreate the placeholder if Qt destroyed the previous instance the
+        # first time we swapped to image_label.
+        from PySide6.QtWidgets import QLabel
+        try:
+            _ = self.placeholder_label.text()  # touches the Qt object
+        except (RuntimeError, AttributeError):
+            self.placeholder_label = QLabel("Drag & drop DNG files here\nor use the Folder icon")
+            self.placeholder_label.setAlignment(Qt.AlignCenter)
+            self._apply_viewer_theme()
         self.setWidget(self.placeholder_label)
+        self._fit_to_window = True
+        self._zoom_level = 1.0
+        self._update_cursor()
 
     def _update_display(self):
         if self._original_pixmap is None:
