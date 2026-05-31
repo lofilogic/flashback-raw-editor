@@ -734,12 +734,20 @@ class ThumbnailStrip(QScrollArea):
             super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event):
-        delta = event.angleDelta().y()
-        hbar = self.horizontalScrollBar()
-        if delta > 0:
-            hbar.setValue(hbar.value() - 100)
+        # Touchpads (and hi-res mice on macOS) deliver pixelDelta — use it
+        # directly for pixel-accurate, smooth scrolling. Combine x and y so a
+        # horizontal two-finger swipe scrolls the strip naturally and a vertical
+        # wheel still works. Fall back to angleDelta only when pixelDelta is
+        # absent (classic notched mouse), quantised to one thumbnail step.
+        pixel = event.pixelDelta()
+        if not pixel.isNull():
+            dx = pixel.x() + pixel.y()
         else:
-            hbar.setValue(hbar.value() + 100)
+            angle = event.angleDelta()
+            ay = angle.y() + angle.x()
+            dx = 100 if ay < 0 else -100 if ay > 0 else 0
+        hbar = self.horizontalScrollBar()
+        hbar.setValue(hbar.value() - dx)
         event.accept()
 
     def keyPressEvent(self, event):
