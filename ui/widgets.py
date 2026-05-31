@@ -59,8 +59,6 @@ class ThumbnailWorker(QThread):
 
     def run(self):
         """Generate thumbnails in background."""
-        import gc
-
         processor = FlashbackProcessor(None)
         if self.processor_lut is not None:
             processor.lut = self.processor_lut
