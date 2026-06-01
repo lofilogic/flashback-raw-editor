@@ -293,6 +293,73 @@ def _read_dng_exif(path: str) -> tuple:
         return False, None
 
 
+# Per-make exposure boost (EV) for non-Flashback raws developed via libraw.
+# Goal: the same exposure settings on each camera produce a similar mid-grey
+# in the developed output, with our Fuji pipeline as the rough anchor.
+#
+# Values are community ballpark — within ~0.5 EV of "matches ACR defaults",
+# distilled from RawDigger's Real ISO measurements (Iliah Borg / LibRaw),
+# DPReview studio comparisons, and RawTherapee/darktable forum consensus.
+# They are NOT calibrated against the in-house Fuji reference and should be
+# refined empirically once we measure mid-grey on each body.
+_BOOST_EV_BY_MAKE = {
+    'sony':                          0.00,
+    'nikon':                         0.20,
+    'nikon corporation':             0.20,
+    'canon':                         0.00,
+    'fujifilm':                      1.00,
+    'fuji':                          1.00,
+    'olympus':                       0.30,
+    'olympus corporation':           0.30,
+    'olympus imaging corp.':         0.30,
+    'om digital solutions':          0.30,
+    'panasonic':                     0.20,
+    'leica':                         0.30,
+    'leica camera ag':               0.30,
+    'pentax':                        0.50,
+    'ricoh':                         0.50,
+    'ricoh imaging company, ltd.':   0.50,
+    'sigma':                         0.70,
+    'hasselblad':                    0.20,
+    'phase one':                     0.20,
+    'apple':                         1.50,   # iPhone ProRAW / LR Camera DNG
+    'google':                        2.00,   # Pixel HDR+ DNG
+    'dji':                           0.30,
+}
+
+# Used only when Make can't be read from EXIF — primarily Fuji RAF, which
+# is a proprietary container exifread can't parse.
+_BOOST_EV_BY_EXT = {
+    '.raf': 1.00,
+}
+
+
+def _read_generic_raw_boost_ev(path: str) -> float:
+    """Return the per-file exposure boost (EV) for a non-Flashback raw.
+
+    Priority:
+      1. EXIF ``Make`` → per-make table.
+      2. File extension → per-extension fallback (for raws exifread can't parse).
+      3. 0.0 if unknown.
+    """
+    try:
+        with open(path, 'rb') as f:
+            tags = exifread.process_file(f, details=False)
+        make = str(tags.get('Image Make', '')).strip().lower()
+        if make and make in _BOOST_EV_BY_MAKE:
+            ev = _BOOST_EV_BY_MAKE[make]
+            log.info("[processor] baseline boost for make=%r: %+.2f EV", make, ev)
+            return ev
+        if make:
+            log.info("[processor] no baseline-boost entry for make=%r", make)
+    except Exception:
+        log.exception("[processor] EXIF read failed")
+    ext = os.path.splitext(path)[1].lower()
+    ev = _BOOST_EV_BY_EXT.get(ext, 0.0)
+    log.info("[processor] baseline boost for ext=%r: %+.2f EV", ext, ev)
+    return ev
+
+
 # =============================================================================
 # PROCESSOR
 # =============================================================================
@@ -403,7 +470,14 @@ class FlashbackProcessor:
         Output is linear sRGB → converted to ACEScg before returning.
         """
         t0 = time.time()
+        boost_ev = _read_generic_raw_boost_ev(path)
+        boost_gain = float(2.0 ** boost_ev)
         with rawpy.imread(path) as raw:
+            # X-Trans uses a 6x6 CFA; libraw's half_size 2x2 binning misaligns
+            # the pattern and produces color aliasing. Detect via raw_pattern
+            # shape and take a full-size Markesteijn demosaic, then downscale.
+            is_xtrans = raw.raw_pattern.shape != (2, 2)
+
             daylight_wb = list(raw.daylight_whitebalance or [])
             if not daylight_wb or all(v == 0.0 for v in daylight_wb):
                 daylight_wb = list(GENERIC_DAYLIGHT_WB_FALLBACK)
@@ -413,22 +487,40 @@ class FlashbackProcessor:
             fixed_wb = _wb_shift_to_kelvin(daylight_wb, BASE_KELVIN)
             _timing_print(f"  [generic] WB shifted D65->{BASE_KELVIN:.0f}K: "
                           f"[{fixed_wb[0]:.4f}, {fixed_wb[1]:.4f}, {fixed_wb[2]:.4f}]")
+            if boost_ev != 0.0:
+                _timing_print(f"  [generic] baseline exposure boost: {boost_ev:+.2f} EV "
+                              f"(gain {boost_gain:.3f})")
 
             rgb = raw.postprocess(
                 demosaic_algorithm=rawpy.DemosaicAlgorithm.LINEAR,
                 user_wb=fixed_wb,
                 use_camera_wb=False,
                 use_auto_wb=False,
-                half_size=True,
+                half_size=not is_xtrans,
                 no_auto_bright=True,
                 bright=self.rawpy_bright,
-                highlight_mode=1,
+                highlight_mode=2,
                 gamma=(1, 1),
                 output_bps=16,
                 output_color=rawpy.ColorSpace.sRGB,
             ).astype(np.float32) / 65535.0
-        _timing_print(f"  raw_develop (generic): {(time.time()-t0)*1000:6.2f} ms  "
+            # Apply baseline boost in float space — libraw's `bright` parameter
+            # interacts with its auto-brightness state machine and is unreliable
+            # with no_auto_bright=True + linear gamma. Multiplying the float
+            # output is a clean, predictable linear gain; values above 1.0 will
+            # be reined back in by the highlight rolloff downstream.
+            if boost_gain != 1.0:
+                rgb *= boost_gain
+        _timing_print(f"  raw_develop (generic{', x-trans' if is_xtrans else ''}): "
+                      f"{(time.time()-t0)*1000:6.2f} ms  "
                       f"shape={rgb.shape}  range=[{rgb.min():.4f},{rgb.max():.4f}]")
+
+        if is_xtrans:
+            t0 = time.time()
+            h, w = rgb.shape[:2]
+            rgb = cv2.resize(rgb, (w // 2, h // 2), interpolation=cv2.INTER_AREA)
+            _timing_print(f"  x-trans downscale to half: {(time.time()-t0)*1000:6.2f} ms  "
+                          f"shape={rgb.shape}")
 
         t0 = time.time()
         acescg = (rgb.reshape(-1, 3) @ LINSRGB_TO_ACESCG.T).reshape(rgb.shape)

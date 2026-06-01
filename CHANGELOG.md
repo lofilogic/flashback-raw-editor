@@ -67,6 +67,22 @@ always resolves against the install you're currently running. A
 `user:` LUT whose file has gone missing falls back to the vibe's
 factory LUT.
 
+### Per-camera baseline exposure boost for generic raws
+
+Non-Flashback raws are now boosted by a per-make EV value at develop
+time so that the same exposure settings on different cameras land at a
+roughly similar mid-grey in the developed output. Goal: within ~0.5 EV
+of "matches ACR defaults", with our Fuji pipeline as the rough anchor.
+
+Values are community ballpark (RawDigger Real ISO measurements,
+DPReview studio comparisons, RawTherapee / darktable forum
+consensus), not calibrated against an in-house reference — they will
+be refined empirically. Notable entries: Fujifilm +1.0 EV, Apple
+iPhone DNG +1.5 EV, Google Pixel DNG +2.0 EV, Pentax / Ricoh +0.5 EV,
+Sigma +0.7 EV; Sony / Canon are the rough zero point. Fuji RAFs (a
+proprietary container exifread can't parse) fall through to an
+extension-based table.
+
 ### CA zoom-blur is now wired up
 
 The `ca_zoom_blur` field existed in 1.5.0-beta but was silently
