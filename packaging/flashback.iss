@@ -91,12 +91,10 @@ begin
   // data, and so accidentally rerunning the uninstaller on a still-used
   // schema (e.g. a parallel 1.5.x install) leaves settings alone.
   RemoveSettings := MsgBox(
-    'Also remove saved Flashback settings for this version?' + #13#10 +
-    #13#10 +
+    'Also remove saved Flashback settings for this version?' + #13#10 + #13#10 +
     'Only the settings file used by this release ({#MySettingsFile})' + #13#10 +
     'will be removed. Settings from older or other Flashback versions' + #13#10 +
-    'installed on this machine will not be affected.' + #13#10 +
-    #13#10 +
+    'installed on this machine will not be affected.' + #13#10 + #13#10 +
     'Default is No.',
     mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
   Result := True;
