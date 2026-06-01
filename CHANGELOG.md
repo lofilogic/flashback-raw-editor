@@ -83,6 +83,17 @@ Sigma +0.7 EV; Sony / Canon are the rough zero point. Fuji RAFs (a
 proprietary container exifread can't parse) fall through to an
 extension-based table.
 
+### Sony ARW files no longer render black
+
+`_wb_shift_to_kelvin` (introduced in the v2-pipeline-prep commit that
+re-anchored generic raws at `BASE_KELVIN` before the WB slider) was
+overwriting Sony's `daylight_whitebalance[3] = 0.0` sentinel with an
+explicit G2 multiplier. libraw treats any non-zero G2 as an
+independent multiplier rather than "G2 tracks G1", and the resulting
+WB collapsed Sony output to near-black. The sentinel is now preserved.
+The same path also guarded `raw.raw_pattern` against `None`, which
+some compressed/lossless ARWs report.
+
 ### CA zoom-blur is now wired up
 
 The `ca_zoom_blur` field existed in 1.5.0-beta but was silently

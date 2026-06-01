@@ -172,7 +172,11 @@ def _wb_shift_to_kelvin(daylight_wb: list, target_k: float,
     wb[0]  = float(wb[0] * scale[0])   # R
     wb[2]  = float(wb[2] * scale[2])   # B
     if len(wb) > 3:
-        wb[3] = wb[1]                  # G2 tracks G
+        # Sony ARW carries G2=0.0 as a sentinel meaning "G2 tracks G1"; any
+        # non-zero G2 is interpreted by libraw as an independent multiplier
+        # and collapses the WB to near-black. Preserve the sentinel.
+        if daylight_wb[3] != 0.0:
+            wb[3] = wb[1]
     return wb
 
 
@@ -476,7 +480,9 @@ class FlashbackProcessor:
             # X-Trans uses a 6x6 CFA; libraw's half_size 2x2 binning misaligns
             # the pattern and produces color aliasing. Detect via raw_pattern
             # shape and take a full-size Markesteijn demosaic, then downscale.
-            is_xtrans = raw.raw_pattern.shape != (2, 2)
+            # Some Sony ARWs (compressed/lossless variants) report raw_pattern
+            # as None; Sony has no X-Trans, so None means Bayer.
+            is_xtrans = raw.raw_pattern is not None and raw.raw_pattern.shape != (2, 2)
 
             daylight_wb = list(raw.daylight_whitebalance or [])
             if not daylight_wb or all(v == 0.0 for v in daylight_wb):

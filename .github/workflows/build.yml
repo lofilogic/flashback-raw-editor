@@ -177,6 +177,36 @@ jobs:
         id: ver
         run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
 
+      - name: Build release notes
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+          REF: ${{ github.ref_name }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          {
+            echo "### Downloads"
+            echo "| Platform | File |"
+            echo "|---|---|"
+            echo "| macOS (Apple Silicon — M1/M2/M3/M4) | [\`Flashback-macOS-${VER}.dmg\`](${REPO_URL}/releases/download/${REF}/Flashback-macOS-${VER}.dmg) |"
+            echo "| Windows | [\`Flashback-Windows-Setup-${VER}.exe\`](${REPO_URL}/releases/download/${REF}/Flashback-Windows-Setup-${VER}.exe) |"
+            echo "| Linux | [\`Flashback-Linux-${VER}.AppImage\`](${REPO_URL}/releases/download/${REF}/Flashback-Linux-${VER}.AppImage) |"
+            echo ""
+            # Extract the section in CHANGELOG.md whose heading matches the
+            # version. Heading format: "## <version> — <date>". If no match,
+            # the release notes simply omit the changelog block.
+            if grep -q "^## ${VER}\b" CHANGELOG.md; then
+              echo "### Changelog"
+              echo ""
+              awk -v ver="^## ${VER}( |$)" '
+                $0 ~ ver { found=1; next }
+                found && /^## / { exit }
+                found { print }
+              ' CHANGELOG.md
+            fi
+          } > release-notes.md
+          echo "--- release notes ---"
+          cat release-notes.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -184,14 +214,7 @@ jobs:
             artifacts/**/*.dmg
             artifacts/**/*.exe
             artifacts/**/*.AppImage
-          body: |
-            ### Downloads
-            | Platform | File |
-            |---|---|
-            | macOS (Apple Silicon — M1/M2/M3/M4) | [`Flashback-macOS-${{ steps.ver.outputs.version }}.dmg`](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/Flashback-macOS-${{ steps.ver.outputs.version }}.dmg) |
-            | Windows | [`Flashback-Windows-Setup-${{ steps.ver.outputs.version }}.exe`](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/Flashback-Windows-Setup-${{ steps.ver.outputs.version }}.exe) |
-            | Linux | [`Flashback-Linux-${{ steps.ver.outputs.version }}.AppImage`](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/Flashback-Linux-${{ steps.ver.outputs.version }}.AppImage) |
-          generate_release_notes: true
+          body_path: release-notes.md
           draft: false
           # Tags containing -beta or -rc are automatically marked as pre-release
           prerelease: ${{ contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
