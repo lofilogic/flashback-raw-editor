@@ -11,6 +11,20 @@ print(f"=== Building version: {_app_version} ===")
 with open('_version.py', 'w') as _vf:
     _vf.write(f'__version__ = "{_app_version}"\n')
 
+# Per-component bundle id is `[A-Za-z][A-Za-z0-9-]*` per Apple's docs:
+# dots separate components and each component must start with a letter.
+# Flatten the version (1.5.0-beta2 → v1-5-0-beta2) into a single segment
+# so a parallel install of two releases registers as two distinct apps
+# in LaunchServices.
+_bundle_version_segment = 'v' + _app_version.replace('.', '-')
+_bundle_identifier = f'com.julian.flashback.{_bundle_version_segment}'
+
+# Versioned .app filename so two releases can coexist in /Applications.
+# The Info.plist display name carries the same version, so the menu bar
+# and Dock label disambiguate them too.
+_bundle_name = f'Flashback One35 {_app_version}.app'
+_bundle_display_name = f'Flashback One35 v2 {_app_version}'
+
 import platform as _platform
 _system = _platform.system()
 
@@ -159,12 +173,12 @@ coll = COLLECT(
 if _system == 'Darwin':
     app = BUNDLE(
         coll,
-        name='Flashback One35.app',
+        name=_bundle_name,
         icon='assets/icons/icon.icns',
-        bundle_identifier='com.julian.flashback',
+        bundle_identifier=_bundle_identifier,
         info_plist={
-            'CFBundleName': 'Flashback One35 v2',
-            'CFBundleDisplayName': 'Flashback One35 v2',
+            'CFBundleName': _bundle_display_name,
+            'CFBundleDisplayName': _bundle_display_name,
             'CFBundleShortVersionString': _app_version,
             'CFBundleVersion': _app_version,
             'NSHighResolutionCapable': 'True',

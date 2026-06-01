@@ -11,11 +11,11 @@ from PySide6.QtCore import Qt
 
 from core.config import (
     VibeConfig, VIBE_FIELD_NAMES,
-    HALATION_THRESHOLD, HALATION_BLUR_RADIUS, HALATION_STRENGTH,
-    CHROMATIC_ABERRATION_STRENGTH, CHROMATIC_ABERRATION_STEPS,
-    SOFTNESS_SIGMA, GRAIN_STRENGTH, SHARPEN_STRENGTH, SHARPEN_RADIUS,
-    CNR_SIGMA, VIGNETTE_STRENGTH, VIGNETTE_COLOR_SHIFT,
-    BLOOM_STRENGTH, BLOOM_THRESHOLD,
+    HALATION_THRESHOLD_STOPS, HALATION_BLUR_RADIUS, HALATION_STRENGTH_PCT,
+    CA_PIXELS, CA_STEPS, CA_BLUE_BLUR, CA_ZOOM_BLUR_PCT,
+    SOFTNESS_SIGMA, GRAIN_STRENGTH_PCT, SHARPEN_STRENGTH_PCT, SHARPEN_RADIUS,
+    CNR_AMOUNT_PCT, VIGNETTE_STRENGTH_PCT, VIGNETTE_COLOR_PCT, VIGNETTE_CURVE,
+    BLOOM_STRENGTH_PCT, BLOOM_THRESHOLD_STOPS,
 )
 
 
@@ -116,15 +116,20 @@ class DebugPanel(QWidget):
         self.chk_halation.stateChanged.connect(self.update_config)
         baked_layout.addRow(self.chk_halation)
 
-        self.spin_halation_thresh = self._create_double_spin(0.0, 1.0, HALATION_THRESHOLD, 0.05)
+        self.spin_halation_thresh = self._create_double_spin(-2.0, 8.0, HALATION_THRESHOLD_STOPS, 0.25, suffix=" EV")
+        self.spin_halation_thresh.setToolTip(
+            "Stops above 18% middle grey. 0 = middle grey, +5 ≈ scene white,\n"
+            "+4 (default) targets specular highlights, +6 only the very brightest."
+        )
         self.spin_halation_thresh.valueChanged.connect(self.update_config)
         baked_layout.addRow("Threshold:", self.spin_halation_thresh)
 
-        self.spin_halation_blur = self._create_spin(1, 100, HALATION_BLUR_RADIUS)
+        self.spin_halation_blur = self._create_spin(1, 100, int(HALATION_BLUR_RADIUS))
+        self.spin_halation_blur.setSuffix(" px")
         self.spin_halation_blur.valueChanged.connect(self.update_config)
         baked_layout.addRow("Blur Radius:", self.spin_halation_blur)
 
-        self.spin_halation_str = self._create_double_spin(0.0, 2.0, HALATION_STRENGTH, 0.1)
+        self.spin_halation_str = self._create_double_spin(0.0, 300.0, HALATION_STRENGTH_PCT, 5.0, suffix=" %")
         self.spin_halation_str.valueChanged.connect(self.update_config)
         baked_layout.addRow("Strength:", self.spin_halation_str)
 
@@ -142,9 +147,9 @@ class DebugPanel(QWidget):
         self.chk_cnr.stateChanged.connect(self.update_preview)
         live_layout.addRow(self.chk_cnr)
 
-        self.spin_cnr = self._create_double_spin(0.0, 5.0, CNR_SIGMA, 0.1)
+        self.spin_cnr = self._create_double_spin(0.0, 100.0, CNR_AMOUNT_PCT, 1.0, suffix=" %")
         self.spin_cnr.valueChanged.connect(self.update_preview)
-        live_layout.addRow("CNR Sigma:", self.spin_cnr)
+        live_layout.addRow("CNR Amount:", self.spin_cnr)
 
         live_layout.addRow(self._create_separator())
 
@@ -162,21 +167,34 @@ class DebugPanel(QWidget):
         self.chk_ca.stateChanged.connect(self.update_preview)
         live_layout.addRow(self.chk_ca)
 
-        self.spin_ca_str = self._create_double_spin(0.0, 0.02, CHROMATIC_ABERRATION_STRENGTH, 0.001)
+        self.spin_ca_str = self._create_double_spin(0.0, 40.0, CA_PIXELS, 0.5, suffix=" px")
         self.spin_ca_str.valueChanged.connect(self.update_preview)
         live_layout.addRow("CA Strength:", self.spin_ca_str)
 
-        self.spin_ca_steps = self._create_spin(1, 10, CHROMATIC_ABERRATION_STEPS)
+        # CA advanced controls — collapsible (checkable groupbox; unchecked
+        # disables children without hiding them, the closest native Qt
+        # behavior to "collapse"). Kept on by default so existing presets
+        # that depend on zoom_blur stay visible.
+        ca_advanced = QGroupBox("Advanced")
+        ca_advanced.setCheckable(True)
+        ca_advanced.setChecked(True)
+        ca_advanced.setStyleSheet("QGroupBox { color: #888; font-weight: normal; border: 1px solid #444; border-radius: 4px; margin-top: 6px; padding-top: 6px; } QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }")
+        ca_adv_layout = QFormLayout(ca_advanced)
+        ca_adv_layout.setSpacing(6)
+
+        self.spin_ca_steps = self._create_spin(1, 10, CA_STEPS)
         self.spin_ca_steps.valueChanged.connect(self.update_preview)
-        live_layout.addRow("CA Steps:", self.spin_ca_steps)
+        ca_adv_layout.addRow("CA Steps:", self.spin_ca_steps)
 
-        self.spin_ca_blue_blur = self._create_double_spin(0.0, 5.0, 0.0, 0.1)
+        self.spin_ca_blue_blur = self._create_double_spin(0.0, 5.0, CA_BLUE_BLUR, 0.1, suffix=" px")
         self.spin_ca_blue_blur.valueChanged.connect(self.update_preview)
-        live_layout.addRow("CA Blue Blur:", self.spin_ca_blue_blur)
+        ca_adv_layout.addRow("CA Blue Blur:", self.spin_ca_blue_blur)
 
-        self.spin_ca_zoom_blur = self._create_double_spin(0.0, 20.0, 1.0, 0.1)
+        self.spin_ca_zoom_blur = self._create_double_spin(0.0, 500.0, CA_ZOOM_BLUR_PCT, 5.0, suffix=" %")
         self.spin_ca_zoom_blur.valueChanged.connect(self.update_preview)
-        live_layout.addRow("CA Zoom Blur:", self.spin_ca_zoom_blur)
+        ca_adv_layout.addRow("CA Zoom Blur:", self.spin_ca_zoom_blur)
+
+        live_layout.addRow(ca_advanced)
 
         live_layout.addRow(self._create_separator())
 
@@ -186,9 +204,9 @@ class DebugPanel(QWidget):
         self.chk_softness.stateChanged.connect(self.update_preview)
         live_layout.addRow(self.chk_softness)
 
-        self.spin_softness = self._create_double_spin(0.0, 5.0, SOFTNESS_SIGMA, 0.1)
+        self.spin_softness = self._create_double_spin(0.0, 5.0, SOFTNESS_SIGMA, 0.1, suffix=" px")
         self.spin_softness.valueChanged.connect(self.update_preview)
-        live_layout.addRow("Softness Sigma:", self.spin_softness)
+        live_layout.addRow("Softness:", self.spin_softness)
 
         live_layout.addRow(self._create_separator())
 
@@ -198,7 +216,7 @@ class DebugPanel(QWidget):
         self.chk_grain.stateChanged.connect(self.update_preview)
         live_layout.addRow(self.chk_grain)
 
-        self.spin_grain = self._create_double_spin(0.0, 3.0, GRAIN_STRENGTH, 0.05)
+        self.spin_grain = self._create_double_spin(0.0, 200.0, GRAIN_STRENGTH_PCT, 5.0, suffix=" %")
         self.spin_grain.valueChanged.connect(self.update_preview)
         live_layout.addRow("Grain Strength:", self.spin_grain)
 
@@ -210,11 +228,11 @@ class DebugPanel(QWidget):
         self.chk_sharpen.stateChanged.connect(self.update_preview)
         live_layout.addRow(self.chk_sharpen)
 
-        self.spin_sharpen_str = self._create_double_spin(0.0, 5.0, SHARPEN_STRENGTH, 0.1)
+        self.spin_sharpen_str = self._create_double_spin(0.0, 500.0, SHARPEN_STRENGTH_PCT, 5.0, suffix=" %")
         self.spin_sharpen_str.valueChanged.connect(self.update_preview)
         live_layout.addRow("Sharpen Strength:", self.spin_sharpen_str)
 
-        self.spin_sharpen_rad = self._create_double_spin(0.1, 20.0, SHARPEN_RADIUS, 0.1)
+        self.spin_sharpen_rad = self._create_double_spin(0.1, 20.0, SHARPEN_RADIUS, 0.1, suffix=" px")
         self.spin_sharpen_rad.valueChanged.connect(self.update_preview)
         live_layout.addRow("Sharpen Radius:", self.spin_sharpen_rad)
 
@@ -226,17 +244,19 @@ class DebugPanel(QWidget):
         self.chk_vignette.stateChanged.connect(self.update_preview)
         live_layout.addRow(self.chk_vignette)
 
-        self.spin_vignette_str = self._create_double_spin(0.0, 1.0, VIGNETTE_STRENGTH, 0.05)
+        self.spin_vignette_str = self._create_double_spin(0.0, 100.0, VIGNETTE_STRENGTH_PCT, 1.0, suffix=" %")
         self.spin_vignette_str.valueChanged.connect(self.update_preview)
         live_layout.addRow("Vignette Strength:", self.spin_vignette_str)
 
-        self.spin_vignette_color = self._create_double_spin(0.0, 0.2, VIGNETTE_COLOR_SHIFT, 0.005)
+        self.spin_vignette_color = self._create_double_spin(0.0, 100.0, VIGNETTE_COLOR_PCT, 1.0, suffix=" %")
         self.spin_vignette_color.valueChanged.connect(self.update_preview)
         live_layout.addRow("Vignette Color Shift:", self.spin_vignette_color)
 
-        self.spin_vignette_feather = self._create_double_spin(0.1, 8.0, 1.0, 0.1)
+        # Signed curve: positive = softer falloff, negative = harder edge,
+        # 0 = neutral cosine. Maps to a power exponent via 2^(-curve/50).
+        self.spin_vignette_feather = self._create_double_spin(-100.0, 100.0, VIGNETTE_CURVE, 1.0)
         self.spin_vignette_feather.valueChanged.connect(self.update_preview)
-        live_layout.addRow("Vignette Feather:", self.spin_vignette_feather)
+        live_layout.addRow("Vignette Curve:", self.spin_vignette_feather)
 
         live_layout.addRow(self._create_separator())
 
@@ -246,11 +266,15 @@ class DebugPanel(QWidget):
         self.chk_bloom.stateChanged.connect(self.update_preview)
         live_layout.addRow(self.chk_bloom)
 
-        self.spin_bloom_str = self._create_double_spin(0.0, 1.0, BLOOM_STRENGTH, 0.05)
+        self.spin_bloom_str = self._create_double_spin(0.0, 100.0, BLOOM_STRENGTH_PCT, 1.0, suffix=" %")
         self.spin_bloom_str.valueChanged.connect(self.update_preview)
         live_layout.addRow("Bloom Strength:", self.spin_bloom_str)
 
-        self.spin_bloom_thresh = self._create_double_spin(0.0, 1.0, BLOOM_THRESHOLD, 0.05)
+        self.spin_bloom_thresh = self._create_double_spin(-2.0, 8.0, BLOOM_THRESHOLD_STOPS, 0.25, suffix=" EV")
+        self.spin_bloom_thresh.setToolTip(
+            "Stops above 18% middle grey. 0 = middle grey, +5 ≈ scene white,\n"
+            "+4 (default) targets specular highlights, +6 only the very brightest."
+        )
         self.spin_bloom_thresh.valueChanged.connect(self.update_preview)
         live_layout.addRow("Bloom Threshold:", self.spin_bloom_thresh)
 
@@ -364,35 +388,37 @@ class DebugPanel(QWidget):
             'enable_bloom': self.chk_bloom,
         }
         self._numeric_widgets = {
-            'halation_threshold': self.spin_halation_thresh,
+            'halation_threshold_stops': self.spin_halation_thresh,
             'halation_blur_radius': self.spin_halation_blur,
-            'halation_strength': self.spin_halation_str,
-            'ca_strength': self.spin_ca_str,
+            'halation_strength_pct': self.spin_halation_str,
+            'ca_pixels': self.spin_ca_str,
             'ca_steps': self.spin_ca_steps,
             'ca_blue_blur': self.spin_ca_blue_blur,
-            'ca_zoom_blur': self.spin_ca_zoom_blur,
+            'ca_zoom_blur_pct': self.spin_ca_zoom_blur,
             'softness_sigma': self.spin_softness,
-            'grain_strength': self.spin_grain,
-            'sharpen_strength': self.spin_sharpen_str,
+            'grain_strength_pct': self.spin_grain,
+            'sharpen_strength_pct': self.spin_sharpen_str,
             'sharpen_radius': self.spin_sharpen_rad,
-            'cnr_sigma': self.spin_cnr,
-            'vignette_strength': self.spin_vignette_str,
-            'vignette_color_shift': self.spin_vignette_color,
-            'vignette_feather': self.spin_vignette_feather,
-            'bloom_strength': self.spin_bloom_str,
-            'bloom_threshold': self.spin_bloom_thresh,
+            'cnr_amount_pct': self.spin_cnr,
+            'vignette_strength_pct': self.spin_vignette_str,
+            'vignette_color_pct': self.spin_vignette_color,
+            'vignette_curve': self.spin_vignette_feather,
+            'bloom_strength_pct': self.spin_bloom_str,
+            'bloom_threshold_stops': self.spin_bloom_thresh,
         }
 
     # ===================================================================
     # HELPERS
     # ===================================================================
 
-    def _create_double_spin(self, min_val, max_val, default, step):
+    def _create_double_spin(self, min_val, max_val, default, step, suffix=""):
         spin = QDoubleSpinBox()
         spin.setRange(min_val, max_val)
-        spin.setDecimals(3 if step < 0.1 else 2)
+        spin.setDecimals(3 if step < 0.1 else 2 if step < 1 else 1)
         spin.setValue(default)
         spin.setSingleStep(step)
+        if suffix:
+            spin.setSuffix(suffix)
         spin.setStyleSheet("QDoubleSpinBox { background-color: #3d3d3d; color: #d0d0d0; border: 1px solid #555; border-radius: 4px; padding: 4px; }")
         return spin
 
@@ -444,10 +470,22 @@ class DebugPanel(QWidget):
         self.refresh_lut_label()
 
     def refresh_lut_label(self):
-        """Update the LUT label to show the active LUT filename."""
+        """Update the LUT label to show the active LUT name + origin.
+
+        Factory refs show the id ("factory: disposable"); user refs show
+        the filename only ("user: my_look.cube"); empty ref reads as
+        "Default" (tone-curve fallback)."""
         from pathlib import Path as _P
-        path = self.parent_editor.current_vibe.lut_path if self.parent_editor else ''
-        self.lut_label.setText(f"Current LUT: {_P(path).name}" if path else "Current LUT: Default")
+        from core.config import LUT_REF_FACTORY, LUT_REF_USER
+        ref = self.parent_editor.current_vibe.lut_ref if self.parent_editor else ''
+        if not ref:
+            self.lut_label.setText("Current LUT: Default")
+        elif ref.startswith(LUT_REF_FACTORY):
+            self.lut_label.setText(f"Current LUT: factory · {ref[len(LUT_REF_FACTORY):]}")
+        elif ref.startswith(LUT_REF_USER):
+            self.lut_label.setText(f"Current LUT: user · {_P(ref[len(LUT_REF_USER):]).name}")
+        else:
+            self.lut_label.setText(f"Current LUT: {ref}")
 
     def update_modified_indicator(self):
         """Show '• modified' next to the vibe header when session ≠ saved-or-factory."""

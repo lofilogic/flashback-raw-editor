@@ -16,6 +16,7 @@ Two dataclasses model the two layers of user-mutable state:
 Everything that used to be DebugConfig.X is now a field on VibeConfig.
 """
 from dataclasses import dataclass, asdict, fields, replace
+import math as _math
 import os as _os
 
 # =============================================================================
@@ -82,25 +83,101 @@ PUSH_PULL_RANGE_EV = 2.0
 # EFFECT DEFAULTS
 # =============================================================================
 
-CHROMATIC_ABERRATION_STRENGTH = 0.005
-CHROMATIC_ABERRATION_STEPS = 4
-CHROMATIC_ABERRATION_BLUE_BLUR = 0.3
-CHROMATIC_ABERRATION_ZOOM_BLUR = 1.0  # multiplier on the global zoom-blur pass inside CA
-HALATION_THRESHOLD = 0.65
-HALATION_BLUR_RADIUS = 4.0
-HALATION_STRENGTH = 0.5
-SOFTNESS_SIGMA = 0.5
-GRAIN_STRENGTH = 0.01
+# User-facing effect defaults. Units are documented per-field on VibeConfig.
+# Conversion to the internal scalars the effect functions expect happens in
+# the conversion helpers below; storage and UI both use these user-facing
+# numbers.
+CA_PIXELS = 5.0            # edge pixels of blue offset at the long edge of the rendered frame
+CA_STEPS = 4
+CA_BLUE_BLUR = 0.3         # px
+CA_ZOOM_BLUR_PCT = 100.0   # percent multiplier on the global zoom-blur pass inside CA
+HALATION_THRESHOLD_STOPS = 4.0   # EV above middle grey
+HALATION_BLUR_RADIUS = 4.0 # px
+HALATION_STRENGTH_PCT = 50.0
+SOFTNESS_SIGMA = 0.5       # px
+GRAIN_STRENGTH_PCT = 50.0
 GRAIN_TILE_SCALE = 0.8     # <1.0 makes grain finer (tiles render denser); >1.0 makes it chunkier.
 GRAIN_HIGHLIGHT_BIAS = 0.3 # 1.0 = grain biased to highlights, 0.0 = shadows, 0.5 = flat.
-SHARPEN_STRENGTH = 0.5
-SHARPEN_RADIUS = 1.0
-CNR_SIGMA = 2.0
-VIGNETTE_STRENGTH = 0.5
-VIGNETTE_COLOR_SHIFT = 0.05
-VIGNETTE_FEATHER = 1.0
-BLOOM_STRENGTH = 0.3
-BLOOM_THRESHOLD = 0.65
+SHARPEN_STRENGTH_PCT = 50.0
+SHARPEN_RADIUS = 1.0       # px
+CNR_AMOUNT_PCT = 40.0
+VIGNETTE_STRENGTH_PCT = 50.0
+VIGNETTE_COLOR_PCT = 25.0
+VIGNETTE_CURVE = 0.0       # -100…+100, higher = more feathered (softer)
+BLOOM_STRENGTH_PCT = 30.0
+BLOOM_THRESHOLD_STOPS = 4.0      # EV above middle grey
+
+# Internal scalar maxima — the user-facing percent fields map 0–100 onto
+# 0–MAX. Keeping these explicit makes the migration buckets trivial to
+# write and makes the panel/pipeline agree on the same conversion.
+_CNR_SIGMA_MAX = 5.0
+_VIGNETTE_COLOR_MAX = 0.2
+
+
+# =============================================================================
+# UNIT CONVERSIONS  (user-facing values  →  internal effect scalars)
+# =============================================================================
+# Each helper takes a value as stored on VibeConfig and returns what the
+# effect function actually consumes. The pipeline calls these at the
+# effect-function boundary in core/processor.py.
+
+def ca_pixels_to_scale(pixels: float, image_width: int) -> float:
+    """Edge-pixel offset at the long edge → blue-channel scale factor.
+
+    The CA warp scales the blue channel by (1 + s) at the outermost sample;
+    that displaces the corner by s * (image_width / 2) pixels. Inverting:
+    s = pixels / (image_width / 2). When the runtime frame is wider/narrower
+    than CA_REFERENCE_WIDTH the visual pixel offset stays constant.
+    """
+    if image_width <= 0:
+        return 0.0
+    return float(pixels) / (float(image_width) / 2.0)
+
+
+def pct(value: float) -> float:
+    """0–N percent → 0–N/100 (the generic [0,1] mapping)."""
+    return float(value) / 100.0
+
+
+def vignette_curve_to_power(curve: float) -> float:
+    """Symmetric -100…+100 curve → cosine-falloff exponent.
+
+    0 → 1.0 (neutral). Higher = softer / more feathered (exponent < 1
+    keeps falloff high until near the corners). Lower = harder edge
+    (exponent > 1 pulls darkening inward).
+    """
+    return float(2.0 ** (-float(curve) / 50.0))
+
+
+def cnr_pct_to_sigma(amount_pct: float) -> float:
+    return pct(amount_pct) * _CNR_SIGMA_MAX
+
+
+def vignette_color_pct_to_shift(color_pct: float) -> float:
+    return pct(color_pct) * _VIGNETTE_COLOR_MAX
+
+
+# 18% middle grey, the reference point for the threshold-in-stops scale.
+_MID_GREY_LINEAR = 0.18
+
+
+def stops_above_mid_grey_to_acescct(stops: float) -> float:
+    """Stops above 18% middle grey → ACEScct-encoded threshold.
+
+    The bloom/halation passes mask on ACEScct-encoded luminance, which is
+    why the prior 0–100% slider was opaque (ACEScct is a log encoding, so
+    65% sat ~1.7 stops above scene white, not at "65% brightness"). This
+    helper takes a photographer-friendly EV value and produces the same
+    ACEScct number the effect functions expect.
+
+    Skips the toe branch of the ACEScct encoder: anything brighter than
+    linear 0.0078 is in the log range, which covers all sensible stops
+    values (the toe crosses linear at acescct ≈ 0.155, equivalent to
+    roughly -4.5 stops below middle grey — well below any threshold the
+    effects care about).
+    """
+    linear = _MID_GREY_LINEAR * (2.0 ** float(stops))
+    return float((_math.log2(max(linear, 1e-10)) + 9.72) / 17.52)
 
 # =============================================================================
 # DEBUG / TIMING
@@ -140,24 +217,30 @@ class VibeConfig:
     enable_vignette: bool = True
     enable_bloom: bool = True
 
-    # ---- effect parameters ----
-    halation_threshold: float = HALATION_THRESHOLD
-    halation_blur_radius: float = HALATION_BLUR_RADIUS
-    halation_strength: float = HALATION_STRENGTH
-    ca_strength: float = CHROMATIC_ABERRATION_STRENGTH
-    ca_steps: int = CHROMATIC_ABERRATION_STEPS
-    ca_blue_blur: float = CHROMATIC_ABERRATION_BLUE_BLUR
-    ca_zoom_blur: float = CHROMATIC_ABERRATION_ZOOM_BLUR
-    softness_sigma: float = SOFTNESS_SIGMA
-    grain_strength: float = GRAIN_STRENGTH
-    sharpen_strength: float = SHARPEN_STRENGTH
-    sharpen_radius: float = SHARPEN_RADIUS
-    cnr_sigma: float = CNR_SIGMA
-    vignette_strength: float = VIGNETTE_STRENGTH
-    vignette_color_shift: float = VIGNETTE_COLOR_SHIFT
-    vignette_feather: float = VIGNETTE_FEATHER
-    bloom_strength: float = BLOOM_STRENGTH
-    bloom_threshold: float = BLOOM_THRESHOLD
+    # ---- effect parameters (user-facing units; see conversion helpers) ----
+    # Percent fields are stored as 0–N where N is each effect's natural max
+    # (100 for clamped effects, 200/300/500 for ones that can over-drive).
+    # Pixel fields are explicit pixel counts. Threshold fields are in EV
+    # (stops) above 18% middle grey — 0 = middle grey, +N = N stops
+    # brighter, default ≈ +4 (just into the specular highlight range).
+    # vignette_curve is signed -100…+100 with 0 = neutral, positive = softer.
+    halation_threshold_stops: float = HALATION_THRESHOLD_STOPS  # EV above mid grey
+    halation_blur_radius: float = HALATION_BLUR_RADIUS         # px
+    halation_strength_pct: float = HALATION_STRENGTH_PCT       # 0–300
+    ca_pixels: float = CA_PIXELS                                # edge px @ long edge
+    ca_steps: int = CA_STEPS
+    ca_blue_blur: float = CA_BLUE_BLUR                          # px
+    ca_zoom_blur_pct: float = CA_ZOOM_BLUR_PCT                  # 0–500
+    softness_sigma: float = SOFTNESS_SIGMA                      # px
+    grain_strength_pct: float = GRAIN_STRENGTH_PCT              # 0–200
+    sharpen_strength_pct: float = SHARPEN_STRENGTH_PCT          # 0–500
+    sharpen_radius: float = SHARPEN_RADIUS                      # px
+    cnr_amount_pct: float = CNR_AMOUNT_PCT                      # 0–100
+    vignette_strength_pct: float = VIGNETTE_STRENGTH_PCT        # 0–100
+    vignette_color_pct: float = VIGNETTE_COLOR_PCT              # 0–100
+    vignette_curve: float = VIGNETTE_CURVE                      # -100…+100
+    bloom_strength_pct: float = BLOOM_STRENGTH_PCT              # 0–100
+    bloom_threshold_stops: float = BLOOM_THRESHOLD_STOPS        # EV above mid grey
 
     # ---- reverse-AE (advanced) ----
     enable_reverse_autoexposure: bool = False
@@ -170,8 +253,23 @@ class VibeConfig:
     base_exposure_offset_v2: float = BASE_EXPOSURE_OFFSET_V2
 
     # ---- LUT + DNG metadata ----
-    lut_path: str = ''
+    # Tagged LUT reference. One of:
+    #   ""                     — no LUT (tone-curve fallback path)
+    #   "factory:<id>"         — looked up in FACTORY_LUTS against the
+    #                            current build's asset dir
+    #   "user:<absolute path>" — user-imported .cube file on disk
+    # Factory ids decouple a saved vibe from the install-time on-disk
+    # location of bundled LUTs, so a moved/upgraded install can't load the
+    # wrong file. The migrator rewrites legacy `lut_path` strings into
+    # this tagged form.
+    lut_ref: str = ''
     dng_profile_name: str = 'Flashback Standard'
+
+    # Pre-1.5 custom LUT path, preserved by the migrator. Purely
+    # informational — never read by the pipeline. Lets users find and
+    # re-import their original .cube once they've regenerated it against
+    # the v2 color pipeline. Cleared once the user re-imports a LUT.
+    legacy_user_lut: str = ''
 
     # ---- serialization ----
     def to_dict(self) -> dict:
@@ -238,12 +336,76 @@ class ImageAdjustments:
 # VIBE PRESETS — recipes that seed a VibeConfig
 # =============================================================================
 
+# Preset values are now in user-facing units. The conversions from the
+# pre-1.5 recipe are: ca_pixels = old_ca_strength * (CA_REFERENCE_WIDTH / 2),
+# percents = old × (100 / old_internal_max), vignette_curve = -50 * log2(power)
+# (so the previous feather=0.4 / "softer" maps to curve ≈ +66).
+# =============================================================================
+# LUT REGISTRY — factory id → bundled file (relative to the install root,
+# resolved through resource_path at load time so PyInstaller bundles and
+# dev runs both work). Saved vibes store these ids, never raw paths, so a
+# moved install never silently picks up the wrong file.
+# =============================================================================
+
+FACTORY_LUTS = {
+    'disposable':           'assets/luts/disposable.cube',
+    'flashback_classic_v1': 'assets/luts/V1.cube',
+    'point_shoot':          'assets/luts/pointandshoot.cube',
+    'rangefinder':          'assets/luts/rangefinder.cube',
+    'monochrome':           'assets/luts/monochrome.cube',
+}
+
+# Tag prefixes used on VibeConfig.lut_ref. Keep these as the single source
+# of truth — sites that build or parse refs must use the constants below.
+LUT_REF_FACTORY = 'factory:'
+LUT_REF_USER = 'user:'
+
+
+def resolve_lut_ref(ref: str):
+    """Resolve a tagged LUT reference to an absolute filesystem path.
+
+    Returns (absolute_path, origin) where origin ∈ {'factory', 'user', None}.
+    Returns (None, None) for an empty ref. Returns (None, origin) when the
+    referenced LUT cannot be found — the caller decides whether to fall
+    back to the vibe's factory LUT or surface a notice.
+    """
+    # Imported here (not at module top) to avoid a circular import:
+    # core/__init__.py loads this module during package init.
+    from . import resource_path
+    if not ref:
+        return None, None
+    if ref.startswith(LUT_REF_FACTORY):
+        fid = ref[len(LUT_REF_FACTORY):]
+        rel = FACTORY_LUTS.get(fid)
+        if not rel:
+            return None, 'factory'
+        abs_path = resource_path(rel)
+        return (abs_path if _os.path.exists(abs_path) else None), 'factory'
+    if ref.startswith(LUT_REF_USER):
+        path = ref[len(LUT_REF_USER):]
+        return (path if _os.path.exists(path) else None), 'user'
+    # Unknown tag — treat as missing rather than guessing.
+    return None, None
+
+
+# `ca_pixels` is corner-pixel displacement on the *rendered* frame. The
+# pipeline develops raws with half_size=True, so the rendered width is
+# half the sensor width (2072 px for the ONE35 V2). The legacy `ca_strength`
+# values (a scale factor) produced 5–10 px of displacement at that width,
+# which is the visual baseline these presets are calibrated against.
+#
+# `ca_zoom_blur_pct` is held at 100% across all presets to match the look
+# shipped through 1.5.0-beta and earlier. The CA pass was previously
+# called without a zoom_blur argument, so higher preset values had no
+# visible effect; restoring them now would change the look of disposable
+# and flashback_classic_v1 substantially. They remain available as a
+# user-facing slider in the Advanced (CA) section.
 VIBE_PRESETS = {
-    'disposable':           {'enable_ca': True,  'ca_strength': 0.010, 'ca_zoom_blur': 1.5, 'softness': 0.3, 'sharpness': 2.0, 'sharpen_radius': 0.5, 'grain': 1.2, 'vignette': 0.10, 'vignette_feather': 0.4, 'bloom': 0.10, 'lut': 'assets/luts/disposable.cube'},
-    'flashback_classic_v1': {'enable_ca': True,  'ca_strength': 0.005, 'ca_zoom_blur': 4.0, 'softness': 0.3, 'sharpness': 0.8, 'sharpen_radius': 0.5, 'grain': 2.0, 'vignette': 0.10, 'vignette_feather': 0.4, 'bloom': 0.03, 'lut': 'assets/luts/V1.cube', 'base_exposure_offset_v2': 0.0},
-    'point_shoot':          {'enable_ca': True,  'ca_strength': 0.002, 'softness': 0.3, 'sharpness': 0.5, 'sharpen_radius': 1.0, 'grain': 0.8, 'vignette': 0.10, 'vignette_feather': 1.0, 'bloom': 0.10, 'lut': 'assets/luts/pointandshoot.cube'},
-    'rangefinder':          {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.1, 'sharpness': 0.8, 'sharpen_radius': 1.0, 'grain': 0.5, 'vignette': 0.05, 'vignette_feather': 1.0, 'bloom': 0.05, 'lut': 'assets/luts/rangefinder.cube'},
-    'monochrome':           {'enable_ca': False, 'ca_strength': 0.0,   'softness': 0.1, 'sharpness': 0.8, 'sharpen_radius': 1.0, 'grain': 1.5, 'vignette': 0.20, 'vignette_feather': 1.0, 'bloom': 0.05, 'lut': 'assets/luts/monochrome.cube'},
+    'disposable':           {'enable_ca': True,  'ca_pixels': 8.0, 'ca_zoom_blur_pct': 150.0, 'softness': 0.3, 'sharpness_pct': 200.0, 'sharpen_radius': 0.5, 'grain_pct': 120.0, 'vignette_pct': 10.0, 'vignette_curve':  66.0, 'bloom_pct': 10.0, 'lut': 'factory:disposable'},
+    'flashback_classic_v1': {'enable_ca': True,  'ca_pixels':  5.0, 'ca_zoom_blur_pct': 200.0, 'softness': 0.3, 'sharpness_pct':  80.0, 'sharpen_radius': 0.5, 'grain_pct': 200.0, 'vignette_pct': 10.0, 'vignette_curve':  66.0, 'bloom_pct':  3.0, 'lut': 'factory:flashback_classic_v1', 'base_exposure_offset_v2': 0.0},
+    'point_shoot':          {'enable_ca': True,  'ca_pixels':  2.0, 'ca_zoom_blur_pct': 100.0, 'softness': 0.3, 'sharpness_pct':  50.0, 'sharpen_radius': 1.0, 'grain_pct':  80.0, 'vignette_pct': 10.0, 'vignette_curve':   0.0, 'bloom_pct': 10.0, 'lut': 'factory:point_shoot'},
+    'rangefinder':          {'enable_ca': False, 'ca_pixels':  0.0, 'ca_zoom_blur_pct': 100.0, 'softness': 0.1, 'sharpness_pct':  80.0, 'sharpen_radius': 1.0, 'grain_pct':  50.0, 'vignette_pct':  5.0, 'vignette_curve':   0.0, 'bloom_pct':  5.0, 'lut': 'factory:rangefinder'},
+    'monochrome':           {'enable_ca': False, 'ca_pixels':  0.0, 'ca_zoom_blur_pct': 100.0, 'softness': 0.1, 'sharpness_pct':  80.0, 'sharpen_radius': 1.0, 'grain_pct': 150.0, 'vignette_pct': 20.0, 'vignette_curve':   0.0, 'bloom_pct':  5.0, 'lut': 'factory:monochrome'},
 }
 
 # Short, file-name-safe suffix per vibe — appended to exported JPGs as
@@ -262,23 +424,24 @@ def vibe_config_for(vibe_id: str) -> VibeConfig:
     """Construct a fresh VibeConfig from a preset recipe.
 
     All non-preset fields keep their factory defaults. The preset
-    dictionary uses short keys (enable_ca, ca_strength, softness, ...);
-    we map those onto the dataclass field names.
+    dictionary uses short keys (enable_ca, ca_pixels, softness, …);
+    we map those onto the dataclass field names. All numeric preset
+    values are in user-facing units (px, percent, signed curve).
     """
     cfg = VibeConfig()  # all factory defaults
     preset = VIBE_PRESETS[vibe_id]
     cfg.enable_chromatic_aberration = preset['enable_ca']
-    cfg.ca_strength                 = preset['ca_strength']
+    cfg.ca_pixels                   = preset['ca_pixels']
     cfg.softness_sigma              = preset['softness']
-    cfg.sharpen_strength            = preset['sharpness']
+    cfg.sharpen_strength_pct        = preset['sharpness_pct']
     cfg.sharpen_radius              = preset['sharpen_radius']
-    cfg.grain_strength              = preset['grain']
-    cfg.vignette_strength           = preset['vignette']
-    cfg.vignette_feather            = preset.get('vignette_feather', 1.0)
-    cfg.bloom_strength              = preset['bloom']
-    cfg.lut_path                    = preset['lut']
+    cfg.grain_strength_pct          = preset['grain_pct']
+    cfg.vignette_strength_pct       = preset['vignette_pct']
+    cfg.vignette_curve              = preset.get('vignette_curve', VIGNETTE_CURVE)
+    cfg.bloom_strength_pct          = preset['bloom_pct']
+    cfg.lut_ref                     = preset['lut']
     cfg.base_exposure_offset_v2     = preset.get('base_exposure_offset_v2', BASE_EXPOSURE_OFFSET_V2)
-    cfg.ca_zoom_blur                = preset.get('ca_zoom_blur', CHROMATIC_ABERRATION_ZOOM_BLUR)
+    cfg.ca_zoom_blur_pct            = preset.get('ca_zoom_blur_pct', CA_ZOOM_BLUR_PCT)
     return cfg
 
 

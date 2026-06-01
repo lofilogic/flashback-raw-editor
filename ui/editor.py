@@ -159,13 +159,18 @@ class FlashbackEditor(QMainWindow):
 
         self.pending_render = False
 
-        lut_path = resource_path("assets/luts/look.cube")
-        if not os.path.exists(lut_path):
-            lut_path = None
+        # Run pre-1.5 → 1.5.0 vibe-state migration once. The report (if
+        # any) is stashed for the post-window-shown notice; vibes loaded
+        # here are not directly used (the editor reads via _vibe_for) but
+        # calling migrate_and_load is what triggers the on-disk rewrite.
+        _, self._migration_report = vibe_state.migrate_and_load()
+
+        # LUT is loaded by FlashbackProcessor from current_vibe.lut_ref
+        # (factory:<id> or user:<path>). No path argument anymore — the
+        # processor never reads filesystem paths from the editor.
         self.processor = FlashbackProcessor(
             vibe=self.current_vibe,
             adjustments=ImageAdjustments(),
-            lut_path=lut_path,
         )
 
         self._render_worker = RenderWorker(self.processor)
@@ -195,6 +200,23 @@ class FlashbackEditor(QMainWindow):
         self.zen_overlay.navigated.connect(self.on_zen_navigate)
         self.zen_overlay.rotated.connect(self.on_zen_rotate)
         self.zen_overlay.remove_requested.connect(self.remove_current_from_project)
+
+        # Defer the post-migration notice until the main window has had a
+        # chance to render; singleShot(0) puts it at the back of the next
+        # event-loop tick, after show().
+        if self._migration_report is not None:
+            QTimer.singleShot(0, self._show_migration_notice)
+
+    def _show_migration_notice(self):
+        """Show the one-shot post-migration summary dialog (step 6).
+
+        Dismissal persists in the v2 envelope via
+        vibe_state.mark_migration_acknowledged so the dialog never fires
+        twice for the same migration."""
+        from .migration_notice import MigrationNoticeDialog
+        dlg = MigrationNoticeDialog(self._migration_report, parent=self)
+        dlg.show()  # non-modal — user can keep working with the editor
+        self._migration_notice_dialog = dlg  # keep a ref so it isn't GC'd
 
     # ===================================================================
     # ZEN MODE
@@ -257,8 +279,9 @@ class FlashbackEditor(QMainWindow):
     # ===================================================================
 
     def _load_custom_lut(self):
-        """Prompt for a .cube file. Path is stored on the current vibe so it
-        becomes part of the active vibe's session state and can be saved with it."""
+        """Prompt for a .cube file. Stored on the current vibe as a
+        `user:<absolute path>` ref so it becomes part of the active vibe's
+        session state and can be saved with it."""
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Select LUT", "", "LUT Files (*.cube)"
         )
@@ -269,7 +292,10 @@ class FlashbackEditor(QMainWindow):
             self._lut_cache[file_path] = custom_lut
             self.processor.lut = custom_lut
             gpu.upload_lut(custom_lut.table)
-            self.current_vibe.lut_path = file_path
+            self.current_vibe.lut_ref = f"user:{file_path}"
+            # User just imported a fresh LUT — any preserved pre-1.5 path
+            # is no longer the active choice, so drop the breadcrumb.
+            self.current_vibe.legacy_user_lut = ''
             self.debug_panel.refresh_lut_label()
             self.debug_panel.update_modified_indicator()
             self.refresh_from_debug()
@@ -809,7 +835,7 @@ class FlashbackEditor(QMainWindow):
         self.processor.vibe = self.current_vibe
         # Tag the per-image record with the new vibe id (for future Save Project).
         self.processor.adjustments.active_vibe_id = vibe_id
-        self._load_lut_from_path(self.current_vibe.lut_path)
+        self._load_lut_from_ref(self.current_vibe.lut_ref)
         if hasattr(self, 'debug_panel'):
             self.debug_panel.sync_from_config()
             self.debug_panel.update_modified_indicator()
@@ -817,19 +843,46 @@ class FlashbackEditor(QMainWindow):
         if refresh_thumbnails:
             self._refresh_all_thumbnails()
 
-    def _load_lut_from_path(self, lut_path: str):
-        """Resolve `lut_path` (relative → bundle, absolute → filesystem), load + cache,
-        push into processor + GPU. Empty path is a no-op (keeps current LUT)."""
-        if not lut_path:
+    def _load_lut_from_ref(self, lut_ref: str):
+        """Resolve a tagged LUT ref (`factory:<id>` or `user:<path>`) to an
+        absolute path via core.config.resolve_lut_ref, load + cache, push
+        into processor + GPU. Empty ref clears the LUT so the tone-curve
+        fallback renders.
+
+        A `user:` ref whose file no longer exists falls back to the LUT
+        the vibe normally ships with (whichever factory id matches the
+        active vibe), so a missing custom LUT doesn't degrade further than
+        the factory look. The post-migration / startup summary handles
+        surfacing this to the user.
+        """
+        from core.config import resolve_lut_ref, vibe_config_for, LUT_REF_FACTORY
+        if not lut_ref:
+            self.processor.lut = None
             return
-        resolved = lut_path if os.path.isabs(lut_path) else resource_path(lut_path)
+        resolved, origin = resolve_lut_ref(lut_ref)
+        if resolved is None and origin == 'user':
+            log.warning("⚠ Custom LUT missing: %s. Falling back to factory LUT.", lut_ref)
+            try:
+                vibe_id = self.current_vibe_id()
+                fallback_ref = vibe_config_for(vibe_id).lut_ref
+            except (KeyError, AttributeError):
+                fallback_ref = ''
+            if fallback_ref and fallback_ref != lut_ref:
+                self._load_lut_from_ref(fallback_ref)
+            else:
+                self.processor.lut = None
+            return
+        if resolved is None:
+            log.warning("⚠ Could not resolve LUT ref %r", lut_ref)
+            self.processor.lut = None
+            return
         try:
             if resolved not in self._lut_cache:
                 self._lut_cache[resolved] = colour.io.read_LUT(resolved)
             lut = self._lut_cache[resolved]
             self.processor.lut = lut
             gpu.upload_lut(lut.table)
-            self.current_vibe.lut_path = lut_path
+            self.current_vibe.lut_ref = lut_ref
         except Exception as e:
             log.warning("⚠ Could not load LUT '%s': %s", resolved, e)
 

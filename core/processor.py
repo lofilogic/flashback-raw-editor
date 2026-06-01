@@ -39,6 +39,10 @@ from .config import (
     BASE_KELVIN, GENERIC_DAYLIGHT_K, GENERIC_DAYLIGHT_WB_FALLBACK,
     PROFILE_TONE_CURVE,
     VibeConfig, ImageAdjustments,
+    pct, ca_pixels_to_scale, vignette_curve_to_power,
+    cnr_pct_to_sigma, vignette_color_pct_to_shift,
+    stops_above_mid_grey_to_acescct,
+    resolve_lut_ref,
     _timing_print,
 )
 from .kernels import acescct_encode, apply_grain
@@ -305,8 +309,7 @@ class FlashbackProcessor:
     global state.
     """
 
-    def __init__(self, vibe: VibeConfig = None, adjustments: ImageAdjustments = None,
-                 lut_path: str = None):
+    def __init__(self, vibe: VibeConfig = None, adjustments: ImageAdjustments = None):
         self.vibe = vibe if vibe is not None else VibeConfig()
         self.adjustments = adjustments if adjustments is not None else ImageAdjustments()
 
@@ -320,13 +323,18 @@ class FlashbackProcessor:
         self.enable_highlight_recovery = True
 
         self.lut = None
-        path = lut_path or self.vibe.lut_path
-        if path and os.path.exists(path):
+        path, origin = resolve_lut_ref(self.vibe.lut_ref)
+        if path:
             try:
                 self.lut = colour.read_LUT(path)
-                log.info("[processor] LUT loaded: %s (%s)", self.lut.name, self.lut.table.shape)
+                log.info("[processor] LUT loaded (%s): %s (%s)", origin, self.lut.name, self.lut.table.shape)
             except Exception as e:
                 log.error("[processor] Could not load LUT %s: %s", path, e)
+        elif self.vibe.lut_ref:
+            # Ref was set but resolved to nothing. The editor handles the
+            # user-facing notice; here we just log so the cause is visible.
+            log.warning("[processor] LUT ref %r could not be resolved (origin=%s)",
+                        self.vibe.lut_ref, origin)
 
         self.grain_tiles = []
         self._load_grain_tiles()
@@ -466,13 +474,13 @@ class FlashbackProcessor:
     # ---- pipeline -------------------------------------------------------------
 
     def _bake_halation(self, acescg):
-        if not (self.vibe.enable_halation and self.vibe.halation_strength > 0):
+        if not (self.vibe.enable_halation and self.vibe.halation_strength_pct > 0):
             return acescg
         return apply_halation(
             acescg,
-            self.vibe.halation_threshold,
+            stops_above_mid_grey_to_acescct(self.vibe.halation_threshold_stops),
             self.vibe.halation_blur_radius,
-            self.vibe.halation_strength,
+            pct(self.vibe.halation_strength_pct),
         )
 
     def load_image(self, dng_path):
@@ -584,17 +592,18 @@ class FlashbackProcessor:
             img = img * gain
 
         if not downscale:
-            if v.enable_bloom and v.bloom_strength > 0:
-                img = apply_bloom(img, v.bloom_strength,
-                                  v.bloom_threshold, linear=True)
-            if v.enable_vignette and v.vignette_strength > 0:
-                img = apply_vignette(img, v.vignette_strength,
-                                     v.vignette_color_shift,
-                                     v.vignette_feather)
+            if v.enable_bloom and v.bloom_strength_pct > 0:
+                img = apply_bloom(img, pct(v.bloom_strength_pct),
+                                  stops_above_mid_grey_to_acescct(v.bloom_threshold_stops),
+                                  linear=True)
+            if v.enable_vignette and v.vignette_strength_pct > 0:
+                img = apply_vignette(img, pct(v.vignette_strength_pct),
+                                     vignette_color_pct_to_shift(v.vignette_color_pct),
+                                     vignette_curve_to_power(v.vignette_curve))
 
         if v.enable_lut and self.lut is not None:
-            if v.enable_cnr and v.cnr_sigma > 0:
-                img = reduce_color_noise_chroma(img, sigma=v.cnr_sigma)
+            if v.enable_cnr and v.cnr_amount_pct > 0:
+                img = reduce_color_noise_chroma(img, sigma=cnr_pct_to_sigma(v.cnr_amount_pct))
             img_acescct = acescct_encode(np.maximum(img, 1e-10))
             try:
                 img_display = apply_lut_fast(img_acescct, self.lut)
@@ -609,19 +618,21 @@ class FlashbackProcessor:
             img_display = _srgb_oetf(np.clip(lin_srgb, 0.0, 1.0))
 
         if not downscale:
-            if v.enable_chromatic_aberration and v.ca_strength > 0:
+            if v.enable_chromatic_aberration and v.ca_pixels > 0:
+                ca_scale = ca_pixels_to_scale(v.ca_pixels, img_display.shape[1])
                 img_display = apply_chromatic_aberration(
-                    img_display, v.ca_strength, v.ca_steps, v.ca_blue_blur)
+                    img_display, ca_scale, v.ca_steps, v.ca_blue_blur,
+                    zoom_blur=pct(v.ca_zoom_blur_pct))
             if v.enable_softness and v.softness_sigma > 0:
                 img_display = apply_softness(img_display, v.softness_sigma)
-            if v.enable_grain and v.grain_strength > 0:
+            if v.enable_grain and v.grain_strength_pct > 0:
                 grain_driver = f * rev_ev + push_pull_ev
                 img_display  = self._apply_grain(
-                    img_display, v.grain_strength,
+                    img_display, pct(v.grain_strength_pct),
                     highlight_bias=self._grain_highlight_bias(grain_driver))
-            if v.enable_sharpen and v.sharpen_strength > 0:
+            if v.enable_sharpen and v.sharpen_strength_pct > 0:
                 img_display = apply_sharpen(
-                    img_display, v.sharpen_strength, v.sharpen_radius)
+                    img_display, pct(v.sharpen_strength_pct), v.sharpen_radius)
 
         post_gain = 2.0 ** (-pre_lut_ev)
         if not np.isclose(post_gain, 1.0):
@@ -681,8 +692,8 @@ def export_image(processor, output_path, quality=95, as_tiff=False,
             base_ev = vibe.base_exposure_offset_v2
             if not np.isclose(base_ev, 0.0):
                 img = img * (2.0 ** base_ev)
-        if vibe.enable_cnr and vibe.cnr_sigma > 0:
-            img = reduce_color_noise_chroma(img, sigma=vibe.cnr_sigma)
+        if vibe.enable_cnr and vibe.cnr_amount_pct > 0:
+            img = reduce_color_noise_chroma(img, sigma=cnr_pct_to_sigma(vibe.cnr_amount_pct))
         img_acescct = acescct_encode(np.maximum(img, 1e-10))
         img16 = np.clip(img_acescct * 65535.0, 0, 65535).astype(np.uint16)
         bgr   = cv2.cvtColor(img16, cv2.COLOR_RGB2BGR)

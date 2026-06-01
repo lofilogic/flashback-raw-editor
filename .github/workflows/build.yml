@@ -14,7 +14,7 @@ jobs:
       matrix:
         include:
           - os: macos-14        # Apple Silicon (M1/M2 runner)
-            artifact: Flashback-macOS-AppleSilicon
+            artifact: Flashback-macOS
           - os: windows-latest
             artifact: Flashback-Windows
           - os: ubuntu-22.04
@@ -65,26 +65,34 @@ jobs:
       # ── macOS: DMG ──────────────────────────────────────────────
       - name: Create DMG (macOS)
         if: runner.os == 'macOS'
+        env:
+          FLASHBACK_VERSION: ${{ github.ref_name }}
         run: |
           brew install create-dmg
+          # Must match the versioned name produced by Flashback.spec
+          # ("Flashback One35 <version>.app"). Strip the leading 'v'
+          # from the tag the same way the spec does.
+          VERSION="${FLASHBACK_VERSION#v}"
+          APP_NAME="Flashback One35 ${VERSION}.app"
+          DMG_NAME="${{ matrix.artifact }}-${VERSION}.dmg"
           create-dmg \
-            --volname "Flashback One35 v2" \
+            --volname "Flashback One35 v2 ${VERSION}" \
             --volicon "assets/icons/icon.icns" \
             --window-pos 200 120 \
             --window-size 600 400 \
             --icon-size 100 \
-            --icon "Flashback One35.app" 150 185 \
+            --icon "${APP_NAME}" 150 185 \
             --app-drop-link 450 185 \
             --no-internet-enable \
-            "${{ matrix.artifact }}.dmg" \
-            "dist/Flashback One35.app"
+            "${DMG_NAME}" \
+            "dist/${APP_NAME}"
 
       - name: Upload artifact (macOS)
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}.dmg
+          path: ${{ matrix.artifact }}-*.dmg
           retention-days: 14
 
       # ── Windows: Inno Setup installer ───────────────────────────
@@ -103,7 +111,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Flashback-Windows
-          path: packaging/Output/Flashback-Windows-Setup.exe
+          # Filename is versioned (Flashback-Windows-Setup-<ver>.exe) so two
+          # parallel releases never overwrite each other in artifact storage.
+          path: packaging/Output/Flashback-Windows-Setup-*.exe
           retention-days: 14
 
       # ── Linux: AppImage ─────────────────────────────────────────
@@ -132,15 +142,17 @@ jobs:
           curl -sL "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage" -o appimagetool
           chmod +x appimagetool
 
-          # Build the AppImage
-          ARCH=x86_64 ./appimagetool "$APPDIR" "Flashback-Linux.AppImage"
+          # Build the AppImage with a versioned filename so parallel
+          # releases never collide in the user's Downloads folder.
+          VERSION="${FLASHBACK_VERSION#v}"
+          ARCH=x86_64 ./appimagetool "$APPDIR" "Flashback-Linux-${VERSION}.AppImage"
 
       - name: Upload artifact (Linux)
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
           name: Flashback-Linux
-          path: Flashback-Linux.AppImage
+          path: Flashback-Linux-*.AppImage
           retention-days: 14
 
   # Runs after all 3 platform builds succeed — only on version tags
@@ -158,6 +170,13 @@ jobs:
         with:
           path: artifacts/
 
+      # Strip the leading 'v' from the tag so the URL matches the
+      # versioned installer filename produced by Inno Setup
+      # (Flashback-Windows-Setup-<ver>.exe).
+      - name: Compute version
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -169,9 +188,9 @@ jobs:
             ### Downloads
             | Platform | File |
             |---|---|
-            | macOS (Apple Silicon — M1/M2/M3/M4) | [`Flashback-macOS-AppleSilicon.dmg`](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/Flashback-macOS-AppleSilicon.dmg) |
-            | Windows | [`Flashback-Windows-Setup.exe`](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/Flashback-Windows-Setup.exe) |
-            | Linux | [`Flashback-Linux.AppImage`](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/Flashback-Linux.AppImage) |
+            | macOS (Apple Silicon — M1/M2/M3/M4) | [`Flashback-macOS-${{ steps.ver.outputs.version }}.dmg`](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/Flashback-macOS-${{ steps.ver.outputs.version }}.dmg) |
+            | Windows | [`Flashback-Windows-Setup-${{ steps.ver.outputs.version }}.exe`](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/Flashback-Windows-Setup-${{ steps.ver.outputs.version }}.exe) |
+            | Linux | [`Flashback-Linux-${{ steps.ver.outputs.version }}.AppImage`](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/Flashback-Linux-${{ steps.ver.outputs.version }}.AppImage) |
           generate_release_notes: true
           draft: false
           # Tags containing -beta or -rc are automatically marked as pre-release

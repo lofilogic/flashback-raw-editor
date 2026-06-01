@@ -27,9 +27,8 @@ from .kernels import (
 )
 from .config import (
     _timing_print,
-    CHROMATIC_ABERRATION_STRENGTH, CHROMATIC_ABERRATION_STEPS,
-    HALATION_THRESHOLD, HALATION_BLUR_RADIUS, HALATION_STRENGTH,
-    SOFTNESS_SIGMA, SHARPEN_STRENGTH, SHARPEN_RADIUS,
+    HALATION_BLUR_RADIUS,
+    SOFTNESS_SIGMA, SHARPEN_RADIUS,
 )
 
 # =============================================================================
@@ -64,7 +63,7 @@ def apply_lut_fast(image, lut):
 # EFFECT FUNCTIONS
 # =============================================================================
 
-def apply_chromatic_aberration(image, strength=CHROMATIC_ABERRATION_STRENGTH, steps=CHROMATIC_ABERRATION_STEPS, blue_blur=0.0, zoom_blur=1.0):
+def apply_chromatic_aberration(image, strength=0.005, steps=4, blue_blur=0.0, zoom_blur=1.0):
     """
     Radial chromatic aberration via per-channel rotation-matrix scaling.
 
@@ -209,7 +208,7 @@ def _halation_glow(img_f, gray, threshold, blur_radius, k=20.0):
     return glow
 
 
-def apply_halation(img, threshold=HALATION_THRESHOLD, blur_radius=HALATION_BLUR_RADIUS, strength=HALATION_STRENGTH):
+def apply_halation(img, threshold=0.65, blur_radius=HALATION_BLUR_RADIUS, strength=0.5):
     """
     Two-pass halation: regular highlights + extreme highlights with 3x radius.
     The second pass targets only the very brightest areas (threshold + 0.15)
@@ -243,7 +242,7 @@ def apply_softness(image, sigma=SOFTNESS_SIGMA):
     return gaussian_blur(image, sigma)
 
 
-def apply_sharpen(image, strength=SHARPEN_STRENGTH, radius=SHARPEN_RADIUS):
+def apply_sharpen(image, strength=0.5, radius=SHARPEN_RADIUS):
     """Unsharp mask sharpening."""
     blurred = gaussian_blur(image, radius)
     return unsharp_mask(image, blurred, strength)

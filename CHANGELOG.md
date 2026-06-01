@@ -1,5 +1,127 @@
 # Changelog
 
+## 1.5.0-beta2 — 2026-06-01
+
+Changes since 1.5.0-beta. The full 1.5 changes are documented in the
+1.5.0-beta entry below; this entry only covers the delta. Testers
+upgrading from beta1 should read the "Notes for beta1 testers" at the
+bottom — beta2 triggers a settings migration on first launch.
+
+### Schema migration is now actually implemented
+
+The 1.5.0-beta notes already described the vibe-state migration as a
+breaking change, but beta1 didn't actually run it: the old
+`vibe_state.json` was being silently read via tolerant deserialization,
+so any field names that happened to overlap with the new schema leaked
+through — often at the wrong scale. beta2 ships the real migration
+work:
+
+- Settings live in a new versioned file: `vibe_state_1_5_0.json` with
+  a `schema_version: 2` envelope. Pre-1.5 `vibe_state.json` is left
+  in place unmodified so a downgrade still finds the original file.
+- One-shot migrator on first launch translates legacy values into the
+  new schema. Bucket A (verbatim) covers the effect toggles and the
+  pixel-unit fields. Bucket B (linear rescale) covers strength /
+  color sliders that map onto the new percent units. Bucket C (reset
+  to factory) covers thresholds, CNR, vignette feather, and CA
+  strength — fields whose underlying coordinates moved with the
+  pipeline rewrite.
+- Custom user LUTs are reset to the vibe's factory LUT because a
+  pre-1.5 `.cube` was authored against the old colour pipeline and
+  would look ~2 stops over and colour-shifted under ACEScg. The
+  original path is preserved in a new `legacy_user_lut` field on the
+  vibe so you can re-import once you've regenerated the file.
+- A non-blocking post-migration summary dialog explains what was
+  rescaled, what was reset, and which custom LUTs were dropped.
+  Dismissal persists across launches via the new envelope.
+
+### Effect values now use user-facing units throughout
+
+The advanced-settings panel is the most visible change. Each control
+now has an explicit unit suffix and a range you can reason about:
+
+- Strength controls (halation, sharpen, grain, vignette, bloom, CNR)
+  are in percent.
+- CA strength is in pixels (edge offset at the long edge of the
+  frame), independent of image resolution.
+- Threshold controls (halation, bloom) are in percent of the
+  ACEScct-encoded dynamic range.
+- Vignette feather is replaced by **Vignette Curve**, a signed
+  slider from -100 to +100 where 0 is neutral, positive is softer
+  falloff, negative is harder edge.
+- Blur radii (halation, sharpen, softness, CA blue blur) stay in
+  pixels, now explicitly labelled.
+
+`VIBE_PRESETS` and the on-disk schema use the same units, so the
+panel value, the saved value, and the preset definition are all
+directly comparable.
+
+### Tagged LUT references
+
+Vibes store `lut_ref` instead of a raw `lut_path`. Values are either
+`factory:<id>` (looked up in a registry against the current build's
+asset directory) or `user:<absolute path>`. This kills the original
+Windows bug where an upgrade in place could load the previous
+version's LUT from the old install directory — a factory reference
+always resolves against the install you're currently running. A
+`user:` LUT whose file has gone missing falls back to the vibe's
+factory LUT.
+
+### CA zoom-blur is now wired up
+
+The `ca_zoom_blur` field existed in 1.5.0-beta but was silently
+dropped at the call site. It now feeds the CA pass as expected,
+which is what makes the disposable and flashback_classic_v1 presets
+match their intended look.
+
+### Parallel installs on every platform
+
+Each release now installs into its own directory and registers as a
+distinct entry in the OS, so two Flashback versions can coexist on
+the same machine. Installing a newer release does NOT replace the
+older one — if you want a clean upgrade, uninstall the old version
+first.
+
+- **Windows**: `C:\Program Files\Flashback One35 v2 <version>\`,
+  per-version `AppId`, per-version Start-Menu group and uninstaller.
+- **macOS**: `.app` bundle is `Flashback One35 <version>.app` with a
+  per-version `CFBundleIdentifier`. Menu-bar display name carries
+  the version too.
+- Release artifact filenames are now versioned across all three
+  platforms: `Flashback-macOS-<version>.dmg`,
+  `Flashback-Windows-Setup-<version>.exe`,
+  `Flashback-Linux-<version>.AppImage`.
+
+### Windows uninstaller can remove this version's settings
+
+The uninstaller asks once whether to also delete saved settings.
+Defaults to "No" so a misclick can't lose data. If confirmed, only
+the schema file the uninstalled version uses
+(`vibe_state_1_5_0.json` for any 1.5.x release) is removed —
+pre-1.5 `vibe_state.json` and any settings files belonging to a
+parallel Flashback install are left alone.
+
+### Notes for beta1 testers
+
+- **First beta2 launch will migrate your beta1 settings.** Anything
+  you tuned in beta1 goes through the same bucket logic as a fresh
+  pre-1.5 migration: strength / colour sliders are rescaled into the
+  new percent units; thresholds, CNR, vignette feather, and CA
+  strength are reset to factory because the underlying numerical
+  ranges changed in this release. The summary dialog lists what was
+  touched.
+- **Custom LUTs you imported in beta1 are reset to factory.** Same
+  reason as the pre-1.5 case: any `.cube` predating the v2 ACEScg
+  pipeline mis-targets. The original path is shown in the summary
+  dialog so you can re-import once you've regenerated the file.
+- **beta1 is not removed by beta2's installer.** The two installs
+  are independent. If you want a clean state, uninstall beta1 first
+  via Add/Remove Programs (Windows) or by dragging the old `.app`
+  to Trash (macOS). Saved settings are shared between them only if
+  you decline beta1's uninstaller "remove settings" prompt; if you
+  uninstall beta1 and remove settings, beta2 will run as a fresh
+  install with no migration.
+
 ## 1.5.0-beta — 2026-05-31
 
 A large release. The headline is a full rewrite of the color pipeline
@@ -12,9 +134,12 @@ A test suite, CI, and GPL v3 license file landed along the way.
 
 ### Breaking changes
 
-- **Vibe state format**: pre-1.5 `vibe_state.json` files are no longer
-  loaded. The first launch will write a fresh dictionary of factory
-  vibes.
+- **Vibe state format**: 1.5.0-beta read the pre-1.5 `vibe_state.json`
+  with a tolerant deserializer that silently kept any field names that
+  happened to overlap with the new schema — often at a wrong scale.
+  This was a known issue and is replaced in 1.5.0-beta2 by a proper
+  schema-versioned envelope, an explicit migrator, and a versioned
+  on-disk filename (see the 1.5.0-beta2 entry for the full story).
 - **TIFF import is no longer supported.** Open the file in 1.1.2 if
   you still need to round-trip TIFFs; an in-app dialog points there.
   TIFF was a v1-pipeline artifact and the v2 pipeline assumes raw

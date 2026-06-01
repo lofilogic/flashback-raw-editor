@@ -37,8 +37,8 @@ def test_vibeconfig_from_dict_ignores_unknown_keys():
 
 def test_vibeconfig_from_dict_coerces_types():
     """Strings like '0.5' for a float field should be coerced, not silently dropped."""
-    cfg = VibeConfig.from_dict({'grain_strength': '0.42', 'ca_steps': '7'})
-    assert cfg.grain_strength == 0.42
+    cfg = VibeConfig.from_dict({'grain_strength_pct': '42', 'ca_steps': '7'})
+    assert cfg.grain_strength_pct == 42.0
     assert cfg.ca_steps == 7
 
 
@@ -46,8 +46,8 @@ def test_vibeconfig_copy_is_independent():
     """copy() must return a deep-enough copy that mutations don't leak."""
     a = vibe_config_for('disposable')
     b = a.copy()
-    b.grain_strength = 999.0
-    assert a.grain_strength != 999.0
+    b.grain_strength_pct = 999.0
+    assert a.grain_strength_pct != 999.0
 
 
 # =============================================================================
@@ -88,12 +88,12 @@ def test_default_vibeconfig_is_factory():
     cfg = VibeConfig()
     # Spot-check fields against module constants so a future drift fails loudly
     from core.config import (
-        HALATION_THRESHOLD, GRAIN_STRENGTH, BLOOM_THRESHOLD,
+        HALATION_THRESHOLD_STOPS, GRAIN_STRENGTH_PCT, BLOOM_THRESHOLD_STOPS,
         BASE_EXPOSURE_OFFSET_V2,
     )
-    assert cfg.halation_threshold == HALATION_THRESHOLD
-    assert cfg.grain_strength == GRAIN_STRENGTH
-    assert cfg.bloom_threshold == BLOOM_THRESHOLD
+    assert cfg.halation_threshold_stops == HALATION_THRESHOLD_STOPS
+    assert cfg.grain_strength_pct == GRAIN_STRENGTH_PCT
+    assert cfg.bloom_threshold_stops == BLOOM_THRESHOLD_STOPS
     assert cfg.base_exposure_offset_v2 == BASE_EXPOSURE_OFFSET_V2
 
 
