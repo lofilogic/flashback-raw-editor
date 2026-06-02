@@ -12,7 +12,37 @@ from __future__ import annotations
 import numpy as np
 import cv2
 
-from .gpu import gpu, HAS_GPU
+from .gpu import gpu, HAS_GPU, Frame
+
+
+def run_resident(img: np.ndarray, stages) -> np.ndarray | None:
+    """Compose GPU-resident ``Frame -> Frame`` stages with a single upload and a
+    single readback.
+
+    ``stages`` is a sequence of callables taking and returning a Frame; the
+    image is uploaded once, each stage runs on the GPU without touching numpy,
+    and the result is read back once at the end. Returns None — so the caller
+    falls back to the CPU path — if the GPU is unavailable or any stage opts out
+    (returns None). Any GPU error is swallowed into a None fallback so a bad
+    driver can never break a render, only slow it.
+    """
+    if not HAS_GPU:
+        return None
+    try:
+        frame = Frame.from_cpu(img)
+        for stage in stages:
+            frame = stage(frame)
+            if frame is None:
+                return None
+        return frame.cpu()
+    except Exception:
+        return None
+
+
+def encode_then_lut(img: np.ndarray) -> np.ndarray | None:
+    """ACEScct-encode then apply the LUT as one resident chain (one upload, one
+    readback). Returns None if unavailable so the caller can use the CPU path."""
+    return run_resident(img, [gpu.encode_frame, gpu.lut_frame])
 
 # Rotation uses OpenCV — fast, correct, and rotation happens rarely
 def rotate_90_clockwise(img: np.ndarray) -> np.ndarray:

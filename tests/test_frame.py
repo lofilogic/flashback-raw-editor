@@ -12,6 +12,7 @@ import pytest
 
 from core.gpu import Frame, gpu
 from core.kernels import acescct_encode as acescct_encode_oracle
+from core.kernels import encode_then_lut
 
 from parity_utils import assert_parity, max_abs_err
 
@@ -88,6 +89,37 @@ def test_encode_frame_matches_oracle(img):
     err = assert_parity(acescct_encode_oracle, gpu_encode, img,
                         tol=PERCEPTUAL_TOL, label="encode_frame")
     assert err >= 0.0  # parity passed; err is the measured headroom
+
+
+@requires_gpu
+def test_encode_then_lut_matches_production_path(img):
+    """The resident encode->LUT chain matches today's production GPU path
+    (buffer ACEScct encode + buffer tetrahedral LUT) within perceptual tol."""
+    # A smooth, non-trivial LUT — representative of real film-emulation LUTs.
+    # (A *random* LUT is a pathological worst case: adjacent cells differ wildly,
+    # so f16 input quantization gets amplified; even then the chain measures
+    # ~3.8e-3, still under one 8-bit code value. Real LUTs are smooth, so this
+    # reflects production.)
+    n = 17
+    axis = np.linspace(0.0, 1.0, n, dtype=np.float32)
+    r, g, b = np.meshgrid(axis, axis, axis, indexing='ij')
+    lut_table = np.stack([
+        np.clip(r ** 1.1 * 0.95 + 0.03 * g, 0, 1),
+        np.clip(g ** 0.95,                  0, 1),
+        np.clip(b ** 1.05 * 0.97 + 0.02 * r, 0, 1),
+    ], axis=-1).astype(np.float32)
+    gpu.upload_lut(lut_table)
+
+    img_max = np.maximum(img, 1e-10)
+
+    def production(a):                       # current behaviour
+        return gpu.apply_lut(gpu.acescct_encode(a))
+
+    def resident(a):                         # new resident chain
+        return encode_then_lut(a)
+
+    assert_parity(production, resident, img_max,
+                  tol=PERCEPTUAL_TOL, label="encode_then_lut")
 
 
 # --- the parity gate itself --------------------------------------------------

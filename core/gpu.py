@@ -55,6 +55,8 @@ class GPUPipeline:
         self._gauss_bg_layout = None
         self._encode_tex_pipeline = None   # texture-resident ACEScct encode
         self._encode_tex_bg_layout = None
+        self._lut_tex_pipeline = None      # texture-resident tetrahedral LUT
+        self._lut_tex_bg_layout = None
         self._lut_buf = None   # persistent GPU LUT buffer
         self._lut_size = 0
 
@@ -185,6 +187,26 @@ class GPUPipeline:
         pl6 = dev.create_pipeline_layout(bind_group_layouts=[self._encode_tex_bg_layout])
         self._encode_tex_pipeline = dev.create_compute_pipeline(
             layout=pl6, compute={'module': enc_mod, 'entry_point': 'main'})
+
+        # --- LUT (texture-resident tetrahedral) pipeline ---
+        lut_tex_src = _read_shader('lut_tex.wgsl')
+        lut_tex_mod = dev.create_shader_module(code=lut_tex_src)
+        self._lut_tex_bg_layout = dev.create_bind_group_layout(entries=[
+            {'binding': 0, 'visibility': wgpu.ShaderStage.COMPUTE,
+             'texture': {'sample_type': wgpu.TextureSampleType.float,
+                         'view_dimension': wgpu.TextureViewDimension.d2}},
+            {'binding': 1, 'visibility': wgpu.ShaderStage.COMPUTE,
+             'buffer': {'type': wgpu.BufferBindingType.read_only_storage}},
+            {'binding': 2, 'visibility': wgpu.ShaderStage.COMPUTE,
+             'storage_texture': {'access': wgpu.StorageTextureAccess.write_only,
+                                 'format': self._TEX_FORMAT,
+                                 'view_dimension': wgpu.TextureViewDimension.d2}},
+            {'binding': 3, 'visibility': wgpu.ShaderStage.COMPUTE,
+             'buffer': {'type': wgpu.BufferBindingType.uniform}},
+        ])
+        pl7 = dev.create_pipeline_layout(bind_group_layouts=[self._lut_tex_bg_layout])
+        self._lut_tex_pipeline = dev.create_compute_pipeline(
+            layout=pl7, compute={'module': lut_tex_mod, 'entry_point': 'main'})
 
     # ------------------------------------------------------------------
     # LUT management
@@ -343,6 +365,33 @@ class GPUPipeline:
         enc = self._device.create_command_encoder()
         cp = enc.begin_compute_pass()
         cp.set_pipeline(self._encode_tex_pipeline)
+        cp.set_bind_group(0, bg)
+        cp.dispatch_workgroups((w + 7) // 8, (h + 7) // 8)
+        cp.end()
+        self._device.queue.submit([enc.finish()])
+        return Frame.from_gpu(dst, frame.shape, self)
+
+    def lut_frame(self, frame: "Frame"):
+        """Tetrahedral 3D LUT, texture-resident: Frame in -> Frame out.
+
+        Resident twin of apply_lut — same Sakamoto tetrahedral math against the
+        persistently-uploaded LUT (see upload_lut). Returns None if the GPU is
+        unavailable or no LUT is loaded (caller falls back).
+        """
+        if not self._init() or self._lut_buf is None:
+            return None
+        h, w = frame.shape[:2]
+        dst = self._create_tex(frame.shape)
+        uni = self._uniform(struct.pack('4I', self._lut_size, 0, 0, 0))
+        bg = self._device.create_bind_group(layout=self._lut_tex_bg_layout, entries=[
+            {'binding': 0, 'resource': frame.gpu().create_view()},
+            {'binding': 1, 'resource': {'buffer': self._lut_buf, 'offset': 0, 'size': self._lut_buf.size}},
+            {'binding': 2, 'resource': dst.create_view()},
+            {'binding': 3, 'resource': {'buffer': uni, 'offset': 0, 'size': uni.size}},
+        ])
+        enc = self._device.create_command_encoder()
+        cp = enc.begin_compute_pass()
+        cp.set_pipeline(self._lut_tex_pipeline)
         cp.set_bind_group(0, bg)
         cp.dispatch_workgroups((w + 7) // 8, (h + 7) // 8)
         cp.end()
