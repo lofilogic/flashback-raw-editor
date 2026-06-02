@@ -216,6 +216,24 @@ class GPUPipeline:
         buf_staging.unmap()
         return result.reshape(shape)
 
+    def _download(self, buf, shape) -> np.ndarray:
+        """Read an arbitrary resident storage buffer back into a float32 array.
+
+        Same readback as the per-op methods, but against a buffer the caller
+        already owns (used by Frame.cpu()). Allocates its own staging buffer.
+        """
+        if not self._init():
+            raise RuntimeError("GPU device unavailable")
+        n = int(np.prod(shape))
+        stg = self._make_staging(n)
+        enc = self._device.create_command_encoder()
+        enc.copy_buffer_to_buffer(buf, 0, stg, 0, n * 4)
+        self._device.queue.submit([enc.finish()])
+        stg.map_sync(mode=wgpu.MapMode.READ)
+        result = np.frombuffer(stg.read_mapped(), dtype=np.float32).copy()
+        stg.unmap()
+        return result.reshape(shape)
+
     def _uniform(self, data: bytes):
         # Uniform buffers must be multiples of 16 bytes
         padded = data + b'\x00' * (16 - len(data) % 16) if len(data) % 16 else data
@@ -486,6 +504,69 @@ class GPUPipeline:
         if single_ch:
             return result[:, :, 0]
         return result
+
+
+class Frame:
+    """Render-scoped image handle that lazily lives on the CPU or the GPU.
+
+    Holds one image as float32 in (H, W, C) layout — the same flat layout the
+    WGSL kernels already expect, so making a stage GPU-resident changes only
+    *where* the pixels live, never their values.
+
+    The "truth" is on whichever side last wrote it. ``cpu()`` and ``gpu()``
+    materialise the other side on demand and cache it, so a CPU<->GPU transfer
+    happens only at a real backend boundary. When two GPU-resident stages run
+    back to back the intermediate never round-trips through numpy — that is the
+    entire point of the resident-by-default guideline.
+
+    Phase 0 of the migration: every stage still calls ``.cpu()``, so behaviour
+    is byte-identical to today. As stages are converted to call ``.gpu()`` and
+    return GPU-backed Frames, the transfers between converted neighbours drop
+    out on their own, with no stage needing to know about its neighbours.
+    """
+
+    __slots__ = ("_p", "_cpu", "_gpu", "_shape")
+
+    def __init__(self, pipeline: "GPUPipeline", *, cpu=None, gpu_buf=None, shape=None):
+        if cpu is None and gpu_buf is None:
+            raise ValueError("Frame needs either cpu data or a gpu buffer")
+        if gpu_buf is not None and cpu is None and shape is None:
+            raise ValueError("Frame from a gpu buffer needs an explicit shape")
+        self._p = pipeline
+        self._cpu = None if cpu is None else np.ascontiguousarray(cpu, dtype=np.float32)
+        self._gpu = gpu_buf
+        self._shape = tuple(shape) if shape is not None else self._cpu.shape
+
+    @classmethod
+    def from_cpu(cls, arr, pipeline: "GPUPipeline" = None) -> "Frame":
+        """Wrap a numpy array. No upload happens until .gpu() is first called."""
+        return cls(pipeline or gpu, cpu=arr)
+
+    @classmethod
+    def from_gpu(cls, buf, shape, pipeline: "GPUPipeline" = None) -> "Frame":
+        """Wrap a GPU storage buffer. No readback happens until .cpu() is called."""
+        return cls(pipeline or gpu, gpu_buf=buf, shape=shape)
+
+    @property
+    def shape(self):
+        return self._shape
+
+    @property
+    def on_gpu(self) -> bool:
+        """True if the image currently has a GPU-resident copy."""
+        return self._gpu is not None
+
+    def cpu(self) -> np.ndarray:
+        """Return the image as a numpy array, reading back from the GPU only if needed."""
+        if self._cpu is None:
+            self._cpu = self._p._download(self._gpu, self._shape)
+        return self._cpu
+
+    def gpu(self):
+        """Return a GPU storage buffer, uploading from the CPU only if needed."""
+        if self._gpu is None:
+            self._gpu = self._p._upload(self._cpu)
+        return self._gpu
 
 
 # Singleton — one GPU device shared across the app
