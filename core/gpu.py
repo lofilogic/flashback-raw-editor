@@ -57,6 +57,15 @@ class GPUPipeline:
         self._encode_tex_bg_layout = None
         self._lut_tex_pipeline = None      # texture-resident tetrahedral LUT
         self._lut_tex_bg_layout = None
+        self._gauss_tex_pipeline_h = None  # texture-resident separable blur
+        self._gauss_tex_pipeline_v = None
+        self._gauss_tex_bg_layout = None
+        self._hal_mask_pipeline = None     # texture-resident halation passes
+        self._hal_mask_bg_layout = None
+        self._hal_hi_pipeline = None
+        self._hal_hi_bg_layout = None
+        self._hal_combine_pipeline = None
+        self._hal_combine_bg_layout = None
         self._lut_buf = None   # persistent GPU LUT buffer
         self._lut_size = 0
 
@@ -207,6 +216,65 @@ class GPUPipeline:
         pl7 = dev.create_pipeline_layout(bind_group_layouts=[self._lut_tex_bg_layout])
         self._lut_tex_pipeline = dev.create_compute_pipeline(
             layout=pl7, compute={'module': lut_tex_mod, 'entry_point': 'main'})
+
+        # --- Gaussian blur (texture-resident, separable) pipeline ---
+        gauss_tex_src = _read_shader('gaussian_blur_tex.wgsl')
+        gauss_tex_mod = dev.create_shader_module(code=gauss_tex_src)
+        self._gauss_tex_bg_layout = dev.create_bind_group_layout(entries=[
+            {'binding': 0, 'visibility': wgpu.ShaderStage.COMPUTE,
+             'texture': {'sample_type': wgpu.TextureSampleType.unfilterable_float,
+                         'view_dimension': wgpu.TextureViewDimension.d2}},
+            {'binding': 1, 'visibility': wgpu.ShaderStage.COMPUTE,
+             'buffer': {'type': wgpu.BufferBindingType.read_only_storage}},
+            {'binding': 2, 'visibility': wgpu.ShaderStage.COMPUTE,
+             'storage_texture': {'access': wgpu.StorageTextureAccess.write_only,
+                                 'format': self._TEX_FORMAT,
+                                 'view_dimension': wgpu.TextureViewDimension.d2}},
+        ])
+        pl8 = dev.create_pipeline_layout(bind_group_layouts=[self._gauss_tex_bg_layout])
+        self._gauss_tex_pipeline_h = dev.create_compute_pipeline(
+            layout=pl8, compute={'module': gauss_tex_mod, 'entry_point': 'main_h'})
+        self._gauss_tex_pipeline_v = dev.create_compute_pipeline(
+            layout=pl8, compute={'module': gauss_tex_mod, 'entry_point': 'main_v'})
+
+        # --- Halation (texture-resident) passes: mask, highlights, combine ---
+        _tex = {'sample_type': wgpu.TextureSampleType.unfilterable_float,
+                'view_dimension': wgpu.TextureViewDimension.d2}
+        _store = {'access': wgpu.StorageTextureAccess.write_only,
+                  'format': self._TEX_FORMAT, 'view_dimension': wgpu.TextureViewDimension.d2}
+        _C = wgpu.ShaderStage.COMPUTE
+
+        hal_mask_mod = dev.create_shader_module(code=_read_shader('halation_mask.wgsl'))
+        self._hal_mask_bg_layout = dev.create_bind_group_layout(entries=[
+            {'binding': 0, 'visibility': _C, 'texture': _tex},
+            {'binding': 1, 'visibility': _C, 'storage_texture': _store},
+            {'binding': 2, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.uniform}},
+        ])
+        self._hal_mask_pipeline = dev.create_compute_pipeline(
+            layout=dev.create_pipeline_layout(bind_group_layouts=[self._hal_mask_bg_layout]),
+            compute={'module': hal_mask_mod, 'entry_point': 'main'})
+
+        hal_hi_mod = dev.create_shader_module(code=_read_shader('halation_highlights.wgsl'))
+        self._hal_hi_bg_layout = dev.create_bind_group_layout(entries=[
+            {'binding': 0, 'visibility': _C, 'texture': _tex},
+            {'binding': 1, 'visibility': _C, 'texture': _tex},
+            {'binding': 2, 'visibility': _C, 'storage_texture': _store},
+        ])
+        self._hal_hi_pipeline = dev.create_compute_pipeline(
+            layout=dev.create_pipeline_layout(bind_group_layouts=[self._hal_hi_bg_layout]),
+            compute={'module': hal_hi_mod, 'entry_point': 'main'})
+
+        hal_comb_mod = dev.create_shader_module(code=_read_shader('halation_combine.wgsl'))
+        self._hal_combine_bg_layout = dev.create_bind_group_layout(entries=[
+            {'binding': 0, 'visibility': _C, 'texture': _tex},
+            {'binding': 1, 'visibility': _C, 'texture': _tex},
+            {'binding': 2, 'visibility': _C, 'texture': _tex},
+            {'binding': 3, 'visibility': _C, 'storage_texture': _store},
+            {'binding': 4, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.uniform}},
+        ])
+        self._hal_combine_pipeline = dev.create_compute_pipeline(
+            layout=dev.create_pipeline_layout(bind_group_layouts=[self._hal_combine_bg_layout]),
+            compute={'module': hal_comb_mod, 'entry_point': 'main'})
 
     # ------------------------------------------------------------------
     # LUT management
@@ -400,6 +468,118 @@ class GPUPipeline:
         cp.end()
         self._device.queue.submit([enc.finish()])
         return Frame.from_gpu(dst, frame.shape, self)
+
+    def blur_frame(self, frame: "Frame", sigma: float):
+        """Separable Gaussian blur, texture-resident: Frame in -> Frame out.
+
+        Matches gpu.gaussian_blur (clamp-to-edge, same normalised kernel) but
+        keeps the image on the GPU. Both passes share one command encoder.
+        """
+        if not self._init():
+            return None
+        if sigma <= 0:
+            return frame
+        h, w = frame.shape[:2]
+        kernel = self._gauss_kernel(sigma)
+        kbuf = self._device.create_buffer_with_data(
+            data=kernel.tobytes(),
+            usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC,
+        )
+        mid = self._create_tex(frame.shape)
+        dst = self._create_tex(frame.shape)
+        nx, ny = (w + 7) // 8, (h + 7) // 8
+        enc = self._device.create_command_encoder()
+        bg_h = self._device.create_bind_group(layout=self._gauss_tex_bg_layout, entries=[
+            {'binding': 0, 'resource': frame.gpu().create_view()},
+            {'binding': 1, 'resource': {'buffer': kbuf, 'offset': 0, 'size': kbuf.size}},
+            {'binding': 2, 'resource': mid.create_view()},
+        ])
+        cp = enc.begin_compute_pass()
+        cp.set_pipeline(self._gauss_tex_pipeline_h)
+        cp.set_bind_group(0, bg_h)
+        cp.dispatch_workgroups(nx, ny)
+        cp.end()
+        bg_v = self._device.create_bind_group(layout=self._gauss_tex_bg_layout, entries=[
+            {'binding': 0, 'resource': mid.create_view()},
+            {'binding': 1, 'resource': {'buffer': kbuf, 'offset': 0, 'size': kbuf.size}},
+            {'binding': 2, 'resource': dst.create_view()},
+        ])
+        cp = enc.begin_compute_pass()
+        cp.set_pipeline(self._gauss_tex_pipeline_v)
+        cp.set_bind_group(0, bg_v)
+        cp.dispatch_workgroups(nx, ny)
+        cp.end()
+        self._device.queue.submit([enc.finish()])
+        return Frame.from_gpu(dst, frame.shape, self)
+
+    def _run2d(self, pipeline, bind_group, w: int, h: int):
+        """Submit a single 2D compute pass over a w*h image (8x8 workgroups)."""
+        enc = self._device.create_command_encoder()
+        cp = enc.begin_compute_pass()
+        cp.set_pipeline(pipeline)
+        cp.set_bind_group(0, bind_group)
+        cp.dispatch_workgroups((w + 7) // 8, (h + 7) // 8)
+        cp.end()
+        self._device.queue.submit([enc.finish()])
+
+    def _halation_mask(self, frame: "Frame", threshold: float, k: float):
+        h, w = frame.shape[:2]
+        dst = self._create_tex(frame.shape)
+        uni = self._uniform(struct.pack('4f', threshold, k, 0.0, 0.0))
+        bg = self._device.create_bind_group(layout=self._hal_mask_bg_layout, entries=[
+            {'binding': 0, 'resource': frame.gpu().create_view()},
+            {'binding': 1, 'resource': dst.create_view()},
+            {'binding': 2, 'resource': {'buffer': uni, 'offset': 0, 'size': uni.size}},
+        ])
+        self._run2d(self._hal_mask_pipeline, bg, w, h)
+        return Frame.from_gpu(dst, frame.shape, self)
+
+    def _halation_highlights(self, img: "Frame", mask: "Frame"):
+        h, w = img.shape[:2]
+        dst = self._create_tex(img.shape)
+        bg = self._device.create_bind_group(layout=self._hal_hi_bg_layout, entries=[
+            {'binding': 0, 'resource': img.gpu().create_view()},
+            {'binding': 1, 'resource': mask.gpu().create_view()},
+            {'binding': 2, 'resource': dst.create_view()},
+        ])
+        self._run2d(self._hal_hi_pipeline, bg, w, h)
+        return Frame.from_gpu(dst, img.shape, self)
+
+    def _halation_combine(self, img: "Frame", glow1: "Frame", glow2: "Frame", strength: float):
+        h, w = img.shape[:2]
+        dst = self._create_tex(img.shape)
+        uni = self._uniform(struct.pack('4f', strength, 0.0, 0.0, 0.0))
+        bg = self._device.create_bind_group(layout=self._hal_combine_bg_layout, entries=[
+            {'binding': 0, 'resource': img.gpu().create_view()},
+            {'binding': 1, 'resource': glow1.gpu().create_view()},
+            {'binding': 2, 'resource': glow2.gpu().create_view()},
+            {'binding': 3, 'resource': dst.create_view()},
+            {'binding': 4, 'resource': {'buffer': uni, 'offset': 0, 'size': uni.size}},
+        ])
+        self._run2d(self._hal_combine_pipeline, bg, w, h)
+        return Frame.from_gpu(dst, img.shape, self)
+
+    def halation_frame(self, frame: "Frame", threshold: float, blur_radius: float,
+                       strength: float, k: float = 20.0):
+        """Two-pass halation, fully texture-resident: Frame in -> Frame out.
+
+        Mirrors effects.apply_halation (same thresholds, radii, channel weights
+        and screen blend) but uploads once and reads back once instead of the
+        ~9 CPU<->GPU round-trips the per-op path makes. Returns None if the GPU
+        is unavailable (caller falls back to the numpy/buffer path).
+        """
+        if not self._init():
+            return None
+
+        def glow(thresh, br):
+            mask = self._halation_mask(frame, thresh, k)
+            mask = self.blur_frame(mask, 2.0)
+            hi = self._halation_highlights(frame, mask)
+            return self.blur_frame(hi, br)
+
+        g1 = glow(threshold, blur_radius)
+        g2 = glow(min(threshold + 0.15, 0.98), blur_radius * 3.0)
+        return self._halation_combine(frame, g1, g2, strength)
 
     def _uniform(self, data: bytes):
         # Uniform buffers must be multiples of 16 bytes

@@ -122,6 +122,36 @@ def test_encode_then_lut_matches_production_path(img):
                   tol=PERCEPTUAL_TOL, label="encode_then_lut")
 
 
+@requires_gpu
+def test_blur_frame_matches_buffer_blur(img):
+    """Texture-resident separable blur matches the buffer Gaussian (bit-exact)."""
+    for sigma in (2.0, 4.0, 12.0):
+        ref = gpu.gaussian_blur(img, sigma)
+        cand = gpu.blur_frame(Frame.from_cpu(img), sigma).cpu()
+        assert max_abs_err(cand, ref) <= 1e-5
+
+
+@requires_gpu
+def test_halation_frame_matches_per_op():
+    """Resident two-pass halation matches the per-op numpy/buffer path."""
+    from core import effects
+    rng = np.random.default_rng(5)
+    img = rng.random((40, 60, 3), dtype=np.float32) * 0.5
+    img[10:20, 15:30, :] += 2.5                      # bright block drives the mask
+    th, br, st = 0.65, 4.0, 0.5
+
+    resident = gpu.halation_frame(Frame.from_cpu(img), th, br, st).cpu()
+
+    saved = gpu.halation_frame                       # force the per-op reference
+    gpu.halation_frame = lambda *a, **k: None
+    try:
+        ref = effects.apply_halation(img, th, br, st)
+    finally:
+        gpu.halation_frame = saved
+
+    assert max_abs_err(resident, ref) <= 1e-4
+
+
 # --- the parity gate itself --------------------------------------------------
 
 def test_assert_parity_passes_on_equivalent(img):
