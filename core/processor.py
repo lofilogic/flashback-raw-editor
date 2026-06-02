@@ -46,7 +46,7 @@ from .config import (
     resolve_lut_ref,
     _timing_print,
 )
-from .kernels import acescct_encode, apply_grain
+from .kernels import acescct_encode, apply_grain, encode_then_lut
 from .auto_exposure_reverse import compute_reverse_gain
 from .effects import (
     apply_lut_fast,
@@ -724,13 +724,20 @@ class FlashbackProcessor:
             if v.enable_cnr and v.cnr_amount_pct > 0:
                 with _timed("CNR"):
                     img = reduce_color_noise_chroma(img, sigma=cnr_pct_to_sigma(v.cnr_amount_pct))
-            with _timed("ACEScct encode"):
-                img_acescct = acescct_encode(np.maximum(img, 1e-10))
-            try:
-                img_display = apply_lut_fast(img_acescct, self.lut)
-            except Exception as e:
-                log.error("[processor] LUT error: %s", e)
-                img_display = np.clip(img_acescct, 0, 1)
+            img_max = np.maximum(img, 1e-10)
+            # Resident path: ACEScct-encode -> LUT on the GPU with a single
+            # upload/readback (bit-identical to the per-op path). Returns None
+            # -> CPU fallback when no GPU or no LUT is uploaded to the device.
+            with _timed("encode+LUT (resident)"):
+                img_display = encode_then_lut(img_max)
+            if img_display is None:
+                with _timed("ACEScct encode"):
+                    img_acescct = acescct_encode(img_max)
+                try:
+                    img_display = apply_lut_fast(img_acescct, self.lut)
+                except Exception as e:
+                    log.error("[processor] LUT error: %s", e)
+                    img_display = np.clip(img_acescct, 0, 1)
         else:
             flat     = img.reshape(-1, 3)
             prophoto = (flat @ ACESCG_TO_PROPHOTO).reshape(img.shape)
