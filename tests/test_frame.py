@@ -1,11 +1,9 @@
-"""Phase 0 tests for the resident-by-default render image (core.gpu.Frame).
+"""Tests for the resident render image (core.gpu.Frame) and the first
+texture-resident stage (ACEScct encode).
 
-These prove the foundation the migration rests on:
-  * a CPU-backed Frame is a transparent numpy wrapper (works with no GPU);
-  * a GPU round-trip is bit-exact, so making a stage resident can never shift
-    pixels on its own;
-  * the shared assert_parity gate both passes on equal output and fails on a
-    difference above tolerance.
+The resident GPU representation is an rgba16float texture, so round-trips are
+perceptually—not bit—exact: the bar is "below visible (1/255 ≈ 3.9e-3)", which
+half-float clears with room to spare. The numpy path stays the oracle.
 
 GPU-touching tests skip cleanly where no usable device exists (e.g. CI).
 """
@@ -13,8 +11,12 @@ import numpy as np
 import pytest
 
 from core.gpu import Frame, gpu
+from core.kernels import acescct_encode as acescct_encode_oracle
 
 from parity_utils import assert_parity, max_abs_err
+
+# A half-float round-trip stays well under one 8-bit code value.
+PERCEPTUAL_TOL = 3.0e-3
 
 
 def _gpu_available() -> bool:
@@ -48,31 +50,44 @@ def test_frame_requires_some_backing():
         Frame(gpu)
 
 
-# --- GPU round-trip: must be lossless ---------------------------------------
+# --- GPU texture round-trip: perceptually lossless --------------------------
 
 @requires_gpu
-def test_frame_gpu_roundtrip_is_bit_exact(img):
+def test_frame_gpu_roundtrip_is_perceptual(img):
     f = Frame.from_cpu(img)
-    buf = f.gpu()
+    tex = f.gpu()
     assert f.on_gpu
-    back = gpu._download(buf, img.shape)
+    back = gpu._download_tex(tex, img.shape)
     assert back.dtype == np.float32
-    assert np.array_equal(back, np.ascontiguousarray(img, dtype=np.float32))
+    assert max_abs_err(back, img) <= PERCEPTUAL_TOL
 
 
 @requires_gpu
-def test_frame_cpu_after_gpu_is_unchanged(img):
+def test_frame_cpu_after_gpu_is_perceptual(img):
     f = Frame.from_cpu(img)
-    f.gpu()  # force an upload
-    assert np.array_equal(f.cpu(), np.ascontiguousarray(img, dtype=np.float32))
+    f.gpu()  # force an upload to texture
+    assert max_abs_err(f.cpu(), img) <= PERCEPTUAL_TOL
 
 
 @requires_gpu
 def test_frame_from_gpu_reads_back(img):
-    buf = gpu._upload(img)
-    f = Frame.from_gpu(buf, img.shape)
+    tex = gpu._upload_tex(img)
+    f = Frame.from_gpu(tex, img.shape)
     assert f.on_gpu
-    assert max_abs_err(f.cpu(), img) == 0.0
+    assert max_abs_err(f.cpu(), img) <= PERCEPTUAL_TOL
+
+
+# --- first resident stage vs its numpy oracle -------------------------------
+
+@requires_gpu
+def test_encode_frame_matches_oracle(img):
+    """Texture-resident ACEScct encode matches the numpy encode perceptually."""
+    def gpu_encode(a):
+        return gpu.encode_frame(Frame.from_cpu(a)).cpu()
+
+    err = assert_parity(acescct_encode_oracle, gpu_encode, img,
+                        tol=PERCEPTUAL_TOL, label="encode_frame")
+    assert err >= 0.0  # parity passed; err is the measured headroom
 
 
 # --- the parity gate itself --------------------------------------------------

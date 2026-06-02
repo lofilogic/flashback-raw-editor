@@ -53,6 +53,8 @@ class GPUPipeline:
         self._gauss_pipeline_h = None
         self._gauss_pipeline_v = None
         self._gauss_bg_layout = None
+        self._encode_tex_pipeline = None   # texture-resident ACEScct encode
+        self._encode_tex_bg_layout = None
         self._lut_buf = None   # persistent GPU LUT buffer
         self._lut_size = 0
 
@@ -168,6 +170,22 @@ class GPUPipeline:
         self._gauss_pipeline_v = dev.create_compute_pipeline(
             layout=pl5, compute={'module': gauss_mod, 'entry_point': 'main_v'})
 
+        # --- ACEScct encode (texture-resident) pipeline ---
+        enc_src = _read_shader('encode_tex.wgsl')
+        enc_mod = dev.create_shader_module(code=enc_src)
+        self._encode_tex_bg_layout = dev.create_bind_group_layout(entries=[
+            {'binding': 0, 'visibility': wgpu.ShaderStage.COMPUTE,
+             'texture': {'sample_type': wgpu.TextureSampleType.float,
+                         'view_dimension': wgpu.TextureViewDimension.d2}},
+            {'binding': 1, 'visibility': wgpu.ShaderStage.COMPUTE,
+             'storage_texture': {'access': wgpu.StorageTextureAccess.write_only,
+                                 'format': self._TEX_FORMAT,
+                                 'view_dimension': wgpu.TextureViewDimension.d2}},
+        ])
+        pl6 = dev.create_pipeline_layout(bind_group_layouts=[self._encode_tex_bg_layout])
+        self._encode_tex_pipeline = dev.create_compute_pipeline(
+            layout=pl6, compute={'module': enc_mod, 'entry_point': 'main'})
+
     # ------------------------------------------------------------------
     # LUT management
     # ------------------------------------------------------------------
@@ -233,6 +251,103 @@ class GPUPipeline:
         result = np.frombuffer(stg.read_mapped(), dtype=np.float32).copy()
         stg.unmap()
         return result.reshape(shape)
+
+    # ------------------------------------------------------------------
+    # Texture-resident image transfer (rgba16float working space)
+    # ------------------------------------------------------------------
+    #
+    # The resident render image is an rgba16float 2D texture: the idiomatic
+    # format for an image pipeline (filterable for free hardware interpolation,
+    # 2D cache locality, a path to render-to-surface later). RGB carries the
+    # image; alpha is unused (stored as 1.0). Half-float is perceptually
+    # transparent here; the f32 CPU path remains the oracle and the
+    # precision-critical export route.
+
+    _TEX_FORMAT = 'rgba16float'
+
+    def _create_tex(self, shape):
+        h, w = shape[:2]
+        return self._device.create_texture(
+            size=(w, h, 1),
+            format=self._TEX_FORMAT,
+            usage=(wgpu.TextureUsage.TEXTURE_BINDING
+                   | wgpu.TextureUsage.STORAGE_BINDING
+                   | wgpu.TextureUsage.COPY_SRC
+                   | wgpu.TextureUsage.COPY_DST),
+        )
+
+    def _upload_tex(self, arr: np.ndarray):
+        """Upload an (H, W, 3) float32 array into a fresh rgba16float texture."""
+        if not self._init():
+            raise RuntimeError("GPU device unavailable")
+        h, w = arr.shape[:2]
+        rgba = np.ones((h, w, 4), dtype=np.float16)
+        rgba[:, :, :3] = np.ascontiguousarray(arr[:, :, :3], dtype=np.float32).astype(np.float16)
+        tex = self._create_tex(arr.shape)
+        self._device.queue.write_texture(
+            {'texture': tex},
+            rgba.tobytes(),
+            {'bytes_per_row': w * 4 * 2, 'rows_per_image': h},
+            (w, h, 1),
+        )
+        return tex
+
+    def _download_tex(self, tex, shape) -> np.ndarray:
+        """Read an rgba16float texture back into an (H, W, 3) float32 array.
+
+        copy_texture_to_buffer requires bytes_per_row to be a multiple of 256,
+        so we copy into a row-padded buffer and strip the padding on the host.
+        """
+        if not self._init():
+            raise RuntimeError("GPU device unavailable")
+        h, w = shape[:2]
+        unpadded = w * 8                      # rgba16float = 8 bytes / texel
+        padded = ((unpadded + 255) // 256) * 256
+        buf = self._device.create_buffer(
+            size=padded * h,
+            usage=wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.MAP_READ,
+        )
+        enc = self._device.create_command_encoder()
+        enc.copy_texture_to_buffer(
+            {'texture': tex},
+            {'buffer': buf, 'bytes_per_row': padded, 'rows_per_image': h},
+            (w, h, 1),
+        )
+        self._device.queue.submit([enc.finish()])
+        buf.map_sync(mode=wgpu.MapMode.READ)
+        raw = np.frombuffer(buf.read_mapped(), dtype=np.float16).copy()
+        buf.unmap()
+        rgba = raw.reshape(h, padded // 2)[:, : w * 4].reshape(h, w, 4)
+        return np.ascontiguousarray(rgba[:, :, :3], dtype=np.float32)
+
+    # ------------------------------------------------------------------
+    # Resident stages (Frame -> Frame). These never upload or read back;
+    # transfers happen only when a caller asks a Frame for the other side.
+    # ------------------------------------------------------------------
+
+    def encode_frame(self, frame: "Frame"):
+        """ACEScct encode, texture-resident: Frame in -> Frame out, no readback.
+
+        Resident twin of kernels.acescct_encode — same math (clamped to 1e-10),
+        but consumes and produces a GPU texture so it chains with neighbouring
+        GPU stages. Returns None if the GPU is unavailable (caller falls back).
+        """
+        if not self._init():
+            return None
+        h, w = frame.shape[:2]
+        dst = self._create_tex(frame.shape)
+        bg = self._device.create_bind_group(layout=self._encode_tex_bg_layout, entries=[
+            {'binding': 0, 'resource': frame.gpu().create_view()},
+            {'binding': 1, 'resource': dst.create_view()},
+        ])
+        enc = self._device.create_command_encoder()
+        cp = enc.begin_compute_pass()
+        cp.set_pipeline(self._encode_tex_pipeline)
+        cp.set_bind_group(0, bg)
+        cp.dispatch_workgroups((w + 7) // 8, (h + 7) // 8)
+        cp.end()
+        self._device.queue.submit([enc.finish()])
+        return Frame.from_gpu(dst, frame.shape, self)
 
     def _uniform(self, data: bytes):
         # Uniform buffers must be multiples of 16 bytes
@@ -509,32 +624,31 @@ class GPUPipeline:
 class Frame:
     """Render-scoped image handle that lazily lives on the CPU or the GPU.
 
-    Holds one image as float32 in (H, W, C) layout — the same flat layout the
-    WGSL kernels already expect, so making a stage GPU-resident changes only
-    *where* the pixels live, never their values.
+    Holds one image in (H, W, 3) layout. The CPU side is float32; the GPU side
+    is an rgba16float 2D texture (the resident render representation). Making a
+    stage GPU-resident changes only *where* the pixels live and trades exact
+    f32 for perceptually-transparent half-float — never the visible result.
 
     The "truth" is on whichever side last wrote it. ``cpu()`` and ``gpu()``
     materialise the other side on demand and cache it, so a CPU<->GPU transfer
     happens only at a real backend boundary. When two GPU-resident stages run
     back to back the intermediate never round-trips through numpy — that is the
-    entire point of the resident-by-default guideline.
-
-    Phase 0 of the migration: every stage still calls ``.cpu()``, so behaviour
-    is byte-identical to today. As stages are converted to call ``.gpu()`` and
-    return GPU-backed Frames, the transfers between converted neighbours drop
-    out on their own, with no stage needing to know about its neighbours.
+    entire point of the resident-by-default guideline: as stages are converted
+    to take and return GPU-backed Frames, the transfers between converted
+    neighbours drop out on their own, with no stage knowing about its
+    neighbours.
     """
 
-    __slots__ = ("_p", "_cpu", "_gpu", "_shape")
+    __slots__ = ("_p", "_cpu", "_tex", "_shape")
 
-    def __init__(self, pipeline: "GPUPipeline", *, cpu=None, gpu_buf=None, shape=None):
-        if cpu is None and gpu_buf is None:
-            raise ValueError("Frame needs either cpu data or a gpu buffer")
-        if gpu_buf is not None and cpu is None and shape is None:
-            raise ValueError("Frame from a gpu buffer needs an explicit shape")
+    def __init__(self, pipeline: "GPUPipeline", *, cpu=None, tex=None, shape=None):
+        if cpu is None and tex is None:
+            raise ValueError("Frame needs either cpu data or a gpu texture")
+        if tex is not None and cpu is None and shape is None:
+            raise ValueError("Frame from a gpu texture needs an explicit shape")
         self._p = pipeline
         self._cpu = None if cpu is None else np.ascontiguousarray(cpu, dtype=np.float32)
-        self._gpu = gpu_buf
+        self._tex = tex
         self._shape = tuple(shape) if shape is not None else self._cpu.shape
 
     @classmethod
@@ -543,9 +657,9 @@ class Frame:
         return cls(pipeline or gpu, cpu=arr)
 
     @classmethod
-    def from_gpu(cls, buf, shape, pipeline: "GPUPipeline" = None) -> "Frame":
-        """Wrap a GPU storage buffer. No readback happens until .cpu() is called."""
-        return cls(pipeline or gpu, gpu_buf=buf, shape=shape)
+    def from_gpu(cls, tex, shape, pipeline: "GPUPipeline" = None) -> "Frame":
+        """Wrap a GPU texture. No readback happens until .cpu() is called."""
+        return cls(pipeline or gpu, tex=tex, shape=shape)
 
     @property
     def shape(self):
@@ -553,20 +667,20 @@ class Frame:
 
     @property
     def on_gpu(self) -> bool:
-        """True if the image currently has a GPU-resident copy."""
-        return self._gpu is not None
+        """True if the image currently has a GPU-resident (texture) copy."""
+        return self._tex is not None
 
     def cpu(self) -> np.ndarray:
-        """Return the image as a numpy array, reading back from the GPU only if needed."""
+        """Return the image as float32, reading back from the GPU only if needed."""
         if self._cpu is None:
-            self._cpu = self._p._download(self._gpu, self._shape)
+            self._cpu = self._p._download_tex(self._tex, self._shape)
         return self._cpu
 
     def gpu(self):
-        """Return a GPU storage buffer, uploading from the CPU only if needed."""
-        if self._gpu is None:
-            self._gpu = self._p._upload(self._cpu)
-        return self._gpu
+        """Return the rgba16float texture, uploading from the CPU only if needed."""
+        if self._tex is None:
+            self._tex = self._p._upload_tex(self._cpu)
+        return self._tex
 
 
 # Singleton — one GPU device shared across the app
