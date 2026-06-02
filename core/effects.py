@@ -16,6 +16,10 @@ processor.load_image) so it benefits both the live preview and export.
 import numpy as np
 import cv2
 import time
+import logging
+
+log = logging.getLogger(__name__)
+_resident_halation_warned = False
 
 from .kernels import (
     apply_lut_gpu,
@@ -232,7 +236,13 @@ def apply_halation(img, threshold=0.65, blur_radius=HALATION_BLUR_RADIUS, streng
                 _timing_print(f"    [Halation] Total (resident): {(time.time()-start_total)*1000:.2f}ms")
                 return out
         except Exception:
-            pass  # fall through to the per-op path
+            # Bit-exact per-op fallback below — a GPU/driver issue can only slow
+            # a render, never break it. Log the cause once so backend-specific
+            # failures (e.g. Vulkan vs Metal) are diagnosable instead of silent.
+            global _resident_halation_warned
+            if not _resident_halation_warned:
+                _resident_halation_warned = True
+                log.warning("⚠ resident halation failed; using per-op fallback", exc_info=True)
 
     gray = np.max(img_f, axis=2)
 
