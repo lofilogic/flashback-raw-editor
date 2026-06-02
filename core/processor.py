@@ -24,6 +24,7 @@ Pipeline (generic raw — non-Flashback):
 import logging
 import os
 import time
+from contextlib import contextmanager
 from pathlib import Path
 import numpy as np
 import rawpy
@@ -57,6 +58,21 @@ from .effects import (
     apply_bloom,
     reduce_color_noise_chroma,
 )
+
+
+@contextmanager
+def _timed(label: str):
+    """Log wall-time for a single render stage.
+
+    Diagnostic only: the actual printing is gated inside _timing_print by the
+    FLASHBACK_DEBUG_TIMING env flag, so this is a no-op (beyond two time reads)
+    in normal runs and never touches the rendered output.
+    """
+    t0 = time.time()
+    try:
+        yield
+    finally:
+        _timing_print(f"    [{label}] {(time.time()-t0)*1000:6.2f} ms")
 
 
 # =============================================================================
@@ -455,11 +471,14 @@ class FlashbackProcessor:
 
     def _apply_grain(self, image, strength, highlight_bias=None):
         h, w = image.shape[:2]
-        grain = self._generate_grain_layer(h, w, sigma=strength)
+        with _timed("grain:generate"):
+            grain = self._generate_grain_layer(h, w, sigma=strength)
         if highlight_bias is None:
             highlight_bias = GRAIN_HIGHLIGHT_BIAS
-        return apply_grain(image, grain, intensity=strength,
-                           highlight_bias=highlight_bias)
+        with _timed("grain:blend"):
+            out = apply_grain(image, grain, intensity=strength,
+                              highlight_bias=highlight_bias)
+        return out
 
     # ---- generic raw pipeline ------------------------------------------------
 
@@ -691,18 +710,22 @@ class FlashbackProcessor:
 
         if not downscale:
             if v.enable_bloom and v.bloom_strength_pct > 0:
-                img = apply_bloom(img, pct(v.bloom_strength_pct),
-                                  stops_above_mid_grey_to_acescct(v.bloom_threshold_stops),
-                                  linear=True)
+                with _timed("bloom"):
+                    img = apply_bloom(img, pct(v.bloom_strength_pct),
+                                      stops_above_mid_grey_to_acescct(v.bloom_threshold_stops),
+                                      linear=True)
             if v.enable_vignette and v.vignette_strength_pct > 0:
-                img = apply_vignette(img, pct(v.vignette_strength_pct),
-                                     vignette_color_pct_to_shift(v.vignette_color_pct),
-                                     vignette_curve_to_power(v.vignette_curve))
+                with _timed("vignette"):
+                    img = apply_vignette(img, pct(v.vignette_strength_pct),
+                                         vignette_color_pct_to_shift(v.vignette_color_pct),
+                                         vignette_curve_to_power(v.vignette_curve))
 
         if v.enable_lut and self.lut is not None:
             if v.enable_cnr and v.cnr_amount_pct > 0:
-                img = reduce_color_noise_chroma(img, sigma=cnr_pct_to_sigma(v.cnr_amount_pct))
-            img_acescct = acescct_encode(np.maximum(img, 1e-10))
+                with _timed("CNR"):
+                    img = reduce_color_noise_chroma(img, sigma=cnr_pct_to_sigma(v.cnr_amount_pct))
+            with _timed("ACEScct encode"):
+                img_acescct = acescct_encode(np.maximum(img, 1e-10))
             try:
                 img_display = apply_lut_fast(img_acescct, self.lut)
             except Exception as e:
@@ -722,15 +745,17 @@ class FlashbackProcessor:
                     img_display, ca_scale, v.ca_steps, v.ca_blue_blur,
                     zoom_blur=pct(v.ca_zoom_blur_pct))
             if v.enable_softness and v.softness_sigma > 0:
-                img_display = apply_softness(img_display, v.softness_sigma)
+                with _timed("softness"):
+                    img_display = apply_softness(img_display, v.softness_sigma)
             if v.enable_grain and v.grain_strength_pct > 0:
                 grain_driver = f * rev_ev + push_pull_ev
                 img_display  = self._apply_grain(
                     img_display, pct(v.grain_strength_pct),
                     highlight_bias=self._grain_highlight_bias(grain_driver))
             if v.enable_sharpen and v.sharpen_strength_pct > 0:
-                img_display = apply_sharpen(
-                    img_display, pct(v.sharpen_strength_pct), v.sharpen_radius)
+                with _timed("sharpen"):
+                    img_display = apply_sharpen(
+                        img_display, pct(v.sharpen_strength_pct), v.sharpen_radius)
 
         post_gain = 2.0 ** (-pre_lut_ev)
         if not np.isclose(post_gain, 1.0):
