@@ -14,7 +14,7 @@ struct Uniforms {
 
 @group(0) @binding(0) var                      img_in:   texture_2d<f32>;
 @group(0) @binding(1) var<storage, read>       lut_data: array<f32>;
-@group(0) @binding(2) var                      img_out:  texture_storage_2d<rgba16float, write>;
+@group(0) @binding(2) var                      img_out:  texture_storage_2d<rgba32float, write>;
 @group(0) @binding(3) var<uniform>             u:        Uniforms;
 
 fn lut3(r: u32, g: u32, b: u32) -> vec3f {

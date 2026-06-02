@@ -177,7 +177,7 @@ class GPUPipeline:
         enc_mod = dev.create_shader_module(code=enc_src)
         self._encode_tex_bg_layout = dev.create_bind_group_layout(entries=[
             {'binding': 0, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'texture': {'sample_type': wgpu.TextureSampleType.float,
+             'texture': {'sample_type': wgpu.TextureSampleType.unfilterable_float,
                          'view_dimension': wgpu.TextureViewDimension.d2}},
             {'binding': 1, 'visibility': wgpu.ShaderStage.COMPUTE,
              'storage_texture': {'access': wgpu.StorageTextureAccess.write_only,
@@ -193,7 +193,7 @@ class GPUPipeline:
         lut_tex_mod = dev.create_shader_module(code=lut_tex_src)
         self._lut_tex_bg_layout = dev.create_bind_group_layout(entries=[
             {'binding': 0, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'texture': {'sample_type': wgpu.TextureSampleType.float,
+             'texture': {'sample_type': wgpu.TextureSampleType.unfilterable_float,
                          'view_dimension': wgpu.TextureViewDimension.d2}},
             {'binding': 1, 'visibility': wgpu.ShaderStage.COMPUTE,
              'buffer': {'type': wgpu.BufferBindingType.read_only_storage}},
@@ -278,14 +278,17 @@ class GPUPipeline:
     # Texture-resident image transfer (rgba16float working space)
     # ------------------------------------------------------------------
     #
-    # The resident render image is an rgba16float 2D texture: the idiomatic
-    # format for an image pipeline (filterable for free hardware interpolation,
-    # 2D cache locality, a path to render-to-surface later). RGB carries the
-    # image; alpha is unused (stored as 1.0). Half-float is perceptually
-    # transparent here; the f32 CPU path remains the oracle and the
-    # precision-critical export route.
+    # The resident render image is an rgba32float 2D texture. f32 (not f16) is
+    # the right call *here*: this pipeline is CPU-bound, and half-float would
+    # trade ~29 ms of CPU conversion per render (≈130 ms on the slow Windows
+    # CPU) to save ~25 MB of GPU memory — sub-ms of bandwidth at 3 MP. f32 keeps
+    # full precision (so the resident path matches the f32 CPU oracle to float
+    # rounding), needs no pack/unpack passes, and costs only 2D texture
+    # bandwidth we have to spare. RGB carries the image; alpha is 1.0. Most
+    # stages use textureLoad (no filtering); the rare stage that wants bilinear
+    # does it manually, so f32's non-filterability costs nothing.
 
-    _TEX_FORMAT = 'rgba16float'
+    _TEX_FORMAT = 'rgba32float'
 
     def _create_tex(self, shape):
         h, w = shape[:2]
@@ -299,23 +302,23 @@ class GPUPipeline:
         )
 
     def _upload_tex(self, arr: np.ndarray):
-        """Upload an (H, W, 3) float32 array into a fresh rgba16float texture."""
+        """Upload an (H, W, 3) float32 array into a fresh rgba32float texture."""
         if not self._init():
             raise RuntimeError("GPU device unavailable")
         h, w = arr.shape[:2]
-        rgba = np.ones((h, w, 4), dtype=np.float16)
-        rgba[:, :, :3] = np.ascontiguousarray(arr[:, :, :3], dtype=np.float32).astype(np.float16)
+        rgba = np.ones((h, w, 4), dtype=np.float32)
+        rgba[:, :, :3] = np.ascontiguousarray(arr[:, :, :3], dtype=np.float32)
         tex = self._create_tex(arr.shape)
         self._device.queue.write_texture(
             {'texture': tex},
             rgba.tobytes(),
-            {'bytes_per_row': w * 4 * 2, 'rows_per_image': h},
+            {'bytes_per_row': w * 4 * 4, 'rows_per_image': h},
             (w, h, 1),
         )
         return tex
 
     def _download_tex(self, tex, shape) -> np.ndarray:
-        """Read an rgba16float texture back into an (H, W, 3) float32 array.
+        """Read an rgba32float texture back into an (H, W, 3) float32 array.
 
         copy_texture_to_buffer requires bytes_per_row to be a multiple of 256,
         so we copy into a row-padded buffer and strip the padding on the host.
@@ -323,7 +326,7 @@ class GPUPipeline:
         if not self._init():
             raise RuntimeError("GPU device unavailable")
         h, w = shape[:2]
-        unpadded = w * 8                      # rgba16float = 8 bytes / texel
+        unpadded = w * 16                     # rgba32float = 16 bytes / texel
         padded = ((unpadded + 255) // 256) * 256
         buf = self._device.create_buffer(
             size=padded * h,
@@ -337,9 +340,9 @@ class GPUPipeline:
         )
         self._device.queue.submit([enc.finish()])
         buf.map_sync(mode=wgpu.MapMode.READ)
-        raw = np.frombuffer(buf.read_mapped(), dtype=np.float16).copy()
+        raw = np.frombuffer(buf.read_mapped(), dtype=np.float32).copy()
         buf.unmap()
-        rgba = raw.reshape(h, padded // 2)[:, : w * 4].reshape(h, w, 4)
+        rgba = raw.reshape(h, padded // 4)[:, : w * 4].reshape(h, w, 4)
         return np.ascontiguousarray(rgba[:, :, :3], dtype=np.float32)
 
     # ------------------------------------------------------------------

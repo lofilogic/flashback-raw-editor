@@ -5,7 +5,7 @@
 // numpy oracle (kernels.acescct_encode applies the same np.maximum).
 
 @group(0) @binding(0) var src: texture_2d<f32>;
-@group(0) @binding(1) var dst: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(1) var dst: texture_storage_2d<rgba32float, write>;
 
 const CUT_ENCODE: f32 = 0.0078125;
 const A: f32 = 10.5402377416545;
