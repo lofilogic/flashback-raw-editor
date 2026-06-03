@@ -750,25 +750,30 @@ class FlashbackProcessor:
         if not np.allclose(gain, 1.0):
             img = img * gain
 
-        # Pre-LUT effects (linear ACEScg): bloom then vignette, fused into one
-        # resident chain (single upload/readback). CNR (CPU) follows in the LUT
-        # branch, so this can't fuse further into encode->LUT. Per-op fallback on
-        # a GPU miss. (downscale previews skip these, as before.)
+        # Pre-LUT effects (linear ACEScg): bloom -> vignette -> CNR, fused into
+        # one resident chain (single upload/readback). CNR is gated to the LUT
+        # path to match the legacy ordering (it ran inside the LUT branch). Per-op
+        # fallback on a GPU miss. (downscale previews skip these, as before.)
         if not downscale:
             bloom_on = v.enable_bloom and v.bloom_strength_pct > 0
             vig_on = v.enable_vignette and v.vignette_strength_pct > 0
-            if bloom_on or vig_on:
-                pre = []
+            cnr_on = (v.enable_cnr and v.cnr_amount_pct > 0
+                      and v.enable_lut and self.lut is not None)
+            if bloom_on or vig_on or cnr_on:
+                pre, parts = [], []
                 if bloom_on:
                     b_args = (pct(v.bloom_strength_pct),
                               stops_above_mid_grey_to_acescct(v.bloom_threshold_stops))
-                    pre.append(lambda fr, a=b_args: gpu.bloom_frame(fr, *a))
+                    pre.append(lambda fr, a=b_args: gpu.bloom_frame(fr, *a)); parts.append("bloom")
                 if vig_on:
                     vig_args = (pct(v.vignette_strength_pct),
                                 vignette_color_pct_to_shift(v.vignette_color_pct),
                                 vignette_curve_to_power(v.vignette_curve))
-                    pre.append(lambda fr, a=vig_args: gpu.vignette_frame(fr, *a))
-                with _timed("bloom+vignette (resident)"):
+                    pre.append(lambda fr, a=vig_args: gpu.vignette_frame(fr, *a)); parts.append("vignette")
+                if cnr_on:
+                    cnr_sigma = cnr_pct_to_sigma(v.cnr_amount_pct)
+                    pre.append(lambda fr, s=cnr_sigma: gpu.cnr_frame(fr, s)); parts.append("CNR")
+                with _timed("+".join(parts) + " (resident)"):
                     res = run_resident(img, pre)
                 if res is not None:
                     img = res
@@ -777,6 +782,8 @@ class FlashbackProcessor:
                         img = apply_bloom(img, *b_args, linear=True)
                     if vig_on:
                         img = apply_vignette(img, *vig_args)
+                    if cnr_on:
+                        img = reduce_color_noise_chroma(img, sigma=cnr_sigma)
 
         grain_driver = f * rev_ev + push_pull_ev
         tail_done = False
@@ -788,9 +795,7 @@ class FlashbackProcessor:
                                   else self._resident_post_lut_stages(v, img.shape, grain_driver))
 
         if v.enable_lut and self.lut is not None:
-            if v.enable_cnr and v.cnr_amount_pct > 0:
-                with _timed("CNR"):
-                    img = reduce_color_noise_chroma(img, sigma=cnr_pct_to_sigma(v.cnr_amount_pct))
+            # CNR already applied in the pre-LUT resident chain above.
             img_max = np.maximum(img, 1e-10)
 
             img_display = None

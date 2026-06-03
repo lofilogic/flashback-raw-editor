@@ -233,6 +233,48 @@ def test_edge_softness_frame_noop_when_strength_zero(img):
     assert max_abs_err(out, img) <= PERCEPTUAL_TOL
 
 
+_AP1_LUMA = np.array([0.2722, 0.6741, 0.0537], dtype=np.float32)
+
+
+@requires_gpu
+def test_cnr_frame_preserves_luma():
+    """CNR filters only a*/b*, so AP1 luminance must be preserved (the whole
+    point of working in Lab — chroma denoise that can't shift luma)."""
+    rng = np.random.default_rng(21)
+    a = rng.random((40, 60, 3), dtype=np.float32) * 0.8 + 0.05
+    out = gpu.cnr_frame(Frame.from_cpu(a), sigma=3.0).cpu()
+    luma_in = a @ _AP1_LUMA
+    luma_out = out @ _AP1_LUMA
+    assert max_abs_err(luma_in, luma_out) <= 1e-3
+
+
+@requires_gpu
+def test_cnr_frame_reduces_chroma_noise():
+    """On a flat patch with chroma noise, CNR must cut the chroma variance
+    substantially (it's removing colour noise) without touching luma."""
+    rng = np.random.default_rng(22)
+    base = np.full((48, 48, 3), 0.3, dtype=np.float32)
+    noisy = base + rng.normal(0, 0.05, base.shape).astype(np.float32)
+    out = gpu.cnr_frame(Frame.from_cpu(noisy), sigma=4.0).cpu()
+    # chroma = colour minus its own luma (broadcast); compare spread
+    def chroma_std(x):
+        return float((x - (x @ _AP1_LUMA)[..., None]).std())
+    assert chroma_std(out) < 0.6 * chroma_std(noisy)
+
+
+@requires_gpu
+def test_cnr_frame_vs_cv2_interior_sanity():
+    """Sanity: the resident CNR tracks the cv2 reference in the interior (borders
+    differ by design — clamp vs reflect-101). Loose tol; the contract is
+    luma-preserving artifact-free denoise, not bit-parity with cv2."""
+    from core.effects import reduce_color_noise_chroma
+    rng = np.random.default_rng(23)
+    a = rng.random((48, 64, 3), dtype=np.float32)
+    ref = reduce_color_noise_chroma(a, sigma=3.0)[4:-4, 4:-4]
+    cand = gpu.cnr_frame(Frame.from_cpu(a), sigma=3.0).cpu()[4:-4, 4:-4]
+    assert max_abs_err(ref, cand) <= 2e-2
+
+
 @requires_gpu
 def test_bloom_frame_matches_oracle():
     """Resident bloom matches the numpy/cv2 oracle within perceptual tol.

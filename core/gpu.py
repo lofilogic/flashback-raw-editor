@@ -80,6 +80,11 @@ class GPUPipeline:
         self._bloom_dm_bg_layout = None
         self._bloom_ua_pipeline = None     # texture-resident bloom: upsample+add
         self._bloom_ua_bg_layout = None
+        self._cnr_to_lab_pipeline = None   # texture-resident CNR (Lab + bilateral)
+        self._cnr_to_acescg_pipeline = None
+        self._cnr_bil_pipeline = None
+        self._cnr_io_bg_layout = None
+        self._cnr_bil_bg_layout = None
         self._lut_buf = None   # persistent GPU LUT buffer
         self._lut_size = 0
 
@@ -369,6 +374,26 @@ class GPUPipeline:
         self._bloom_ua_pipeline = dev.create_compute_pipeline(
             layout=dev.create_pipeline_layout(bind_group_layouts=[self._bloom_ua_bg_layout]),
             compute={'module': bloom_ua_mod, 'entry_point': 'main'})
+
+        # --- CNR (texture-resident, pre-LUT linear): Lab transforms + bilateral ---
+        cnr_mod = dev.create_shader_module(code=_read_shader('cnr.wgsl'))
+        self._cnr_io_bg_layout = dev.create_bind_group_layout(entries=[
+            {'binding': 0, 'visibility': _C, 'texture': _tex},
+            {'binding': 1, 'visibility': _C, 'storage_texture': _store},
+        ])
+        cnr_io_pl = dev.create_pipeline_layout(bind_group_layouts=[self._cnr_io_bg_layout])
+        self._cnr_to_lab_pipeline = dev.create_compute_pipeline(
+            layout=cnr_io_pl, compute={'module': cnr_mod, 'entry_point': 'main_to_lab'})
+        self._cnr_to_acescg_pipeline = dev.create_compute_pipeline(
+            layout=cnr_io_pl, compute={'module': cnr_mod, 'entry_point': 'main_to_acescg'})
+        self._cnr_bil_bg_layout = dev.create_bind_group_layout(entries=[
+            {'binding': 0, 'visibility': _C, 'texture': _tex},
+            {'binding': 1, 'visibility': _C, 'storage_texture': _store},
+            {'binding': 2, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.uniform}},
+        ])
+        self._cnr_bil_pipeline = dev.create_compute_pipeline(
+            layout=dev.create_pipeline_layout(bind_group_layouts=[self._cnr_bil_bg_layout]),
+            compute={'module': cnr_mod, 'entry_point': 'main_bilateral'})
 
     # ------------------------------------------------------------------
     # LUT management
@@ -864,6 +889,48 @@ class GPUPipeline:
         ])
         self._run2d(self._bloom_ua_pipeline, bg_ua, w, h)
         return Frame.from_gpu(dst, frame.shape, self)
+
+    def _cnr_io(self, pipeline, src_tex, shape):
+        """Run a CNR tex->tex pass (Lab transform) and return the dst texture."""
+        h, w = shape[:2]
+        dst = self._create_tex(shape)
+        bg = self._device.create_bind_group(layout=self._cnr_io_bg_layout, entries=[
+            {'binding': 0, 'resource': src_tex.create_view()},
+            {'binding': 1, 'resource': dst.create_view()},
+        ])
+        self._run2d(pipeline, bg, w, h)
+        return dst
+
+    def cnr_frame(self, frame: "Frame", sigma: float):
+        """Chroma noise reduction in Lab, texture-resident: Frame in -> Frame out.
+
+        Resident twin of effects.reduce_color_noise_chroma: ACEScg -> Lab, an
+        edge-preserving bilateral on a*/b* only (L* untouched, so luma is
+        preserved), then Lab -> ACEScg. Window/sigmas mirror the cv2 call
+        (d = max(5, int(sigma)*2+3) odd, range sigma 15). Returns the input
+        unchanged when sigma<=0, or None if the GPU is unavailable.
+        """
+        if not self._init():
+            return None
+        if sigma <= 0:
+            return frame
+        d = max(5, int(sigma) * 2 + 3)
+        if d % 2 == 0:
+            d += 1
+        radius = d // 2
+
+        lab = self._cnr_io(self._cnr_to_lab_pipeline, frame.gpu(), frame.shape)
+        filt = self._create_tex(frame.shape)
+        uni = self._uniform(struct.pack('4f', float(sigma), 15.0, float(radius), 0.0))
+        bg = self._device.create_bind_group(layout=self._cnr_bil_bg_layout, entries=[
+            {'binding': 0, 'resource': lab.create_view()},
+            {'binding': 1, 'resource': filt.create_view()},
+            {'binding': 2, 'resource': {'buffer': uni, 'offset': 0, 'size': uni.size}},
+        ])
+        h, w = frame.shape[:2]
+        self._run2d(self._cnr_bil_pipeline, bg, w, h)
+        out = self._cnr_io(self._cnr_to_acescg_pipeline, filt, frame.shape)
+        return Frame.from_gpu(out, frame.shape, self)
 
     def _uniform(self, data: bytes):
         # Uniform buffers must be multiples of 16 bytes
