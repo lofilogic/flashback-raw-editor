@@ -750,19 +750,33 @@ class FlashbackProcessor:
         if not np.allclose(gain, 1.0):
             img = img * gain
 
+        # Pre-LUT effects (linear ACEScg): bloom then vignette, fused into one
+        # resident chain (single upload/readback). CNR (CPU) follows in the LUT
+        # branch, so this can't fuse further into encode->LUT. Per-op fallback on
+        # a GPU miss. (downscale previews skip these, as before.)
         if not downscale:
-            if v.enable_bloom and v.bloom_strength_pct > 0:
-                with _timed("bloom"):
-                    img = apply_bloom(img, pct(v.bloom_strength_pct),
-                                      stops_above_mid_grey_to_acescct(v.bloom_threshold_stops),
-                                      linear=True)
-            if v.enable_vignette and v.vignette_strength_pct > 0:
-                vig_args = (pct(v.vignette_strength_pct),
-                            vignette_color_pct_to_shift(v.vignette_color_pct),
-                            vignette_curve_to_power(v.vignette_curve))
-                with _timed("vignette (resident)"):
-                    res = run_resident(img, [lambda fr, a=vig_args: gpu.vignette_frame(fr, *a)])
-                img = res if res is not None else apply_vignette(img, *vig_args)
+            bloom_on = v.enable_bloom and v.bloom_strength_pct > 0
+            vig_on = v.enable_vignette and v.vignette_strength_pct > 0
+            if bloom_on or vig_on:
+                pre = []
+                if bloom_on:
+                    b_args = (pct(v.bloom_strength_pct),
+                              stops_above_mid_grey_to_acescct(v.bloom_threshold_stops))
+                    pre.append(lambda fr, a=b_args: gpu.bloom_frame(fr, *a))
+                if vig_on:
+                    vig_args = (pct(v.vignette_strength_pct),
+                                vignette_color_pct_to_shift(v.vignette_color_pct),
+                                vignette_curve_to_power(v.vignette_curve))
+                    pre.append(lambda fr, a=vig_args: gpu.vignette_frame(fr, *a))
+                with _timed("bloom+vignette (resident)"):
+                    res = run_resident(img, pre)
+                if res is not None:
+                    img = res
+                else:
+                    if bloom_on:
+                        img = apply_bloom(img, *b_args, linear=True)
+                    if vig_on:
+                        img = apply_vignette(img, *vig_args)
 
         grain_driver = f * rev_ev + push_pull_ev
         tail_done = False

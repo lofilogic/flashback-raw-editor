@@ -76,6 +76,10 @@ class GPUPipeline:
         self._edge_soft_bg_layout = None
         self._vignette_pipeline = None     # texture-resident vignette (pre-LUT)
         self._vignette_bg_layout = None
+        self._bloom_dm_pipeline = None     # texture-resident bloom: downsample+mask
+        self._bloom_dm_bg_layout = None
+        self._bloom_ua_pipeline = None     # texture-resident bloom: upsample+add
+        self._bloom_ua_bg_layout = None
         self._lut_buf = None   # persistent GPU LUT buffer
         self._lut_size = 0
 
@@ -343,6 +347,28 @@ class GPUPipeline:
         self._vignette_pipeline = dev.create_compute_pipeline(
             layout=dev.create_pipeline_layout(bind_group_layouts=[self._vignette_bg_layout]),
             compute={'module': vig_mod, 'entry_point': 'main'})
+
+        # --- Bloom (texture-resident, pre-LUT linear): downmask + upadd ---
+        bloom_dm_mod = dev.create_shader_module(code=_read_shader('bloom_downmask.wgsl'))
+        self._bloom_dm_bg_layout = dev.create_bind_group_layout(entries=[
+            {'binding': 0, 'visibility': _C, 'texture': _tex},
+            {'binding': 1, 'visibility': _C, 'storage_texture': _store},
+            {'binding': 2, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.uniform}},
+        ])
+        self._bloom_dm_pipeline = dev.create_compute_pipeline(
+            layout=dev.create_pipeline_layout(bind_group_layouts=[self._bloom_dm_bg_layout]),
+            compute={'module': bloom_dm_mod, 'entry_point': 'main'})
+
+        bloom_ua_mod = dev.create_shader_module(code=_read_shader('bloom_upadd.wgsl'))
+        self._bloom_ua_bg_layout = dev.create_bind_group_layout(entries=[
+            {'binding': 0, 'visibility': _C, 'texture': _tex},
+            {'binding': 1, 'visibility': _C, 'texture': _tex},
+            {'binding': 2, 'visibility': _C, 'storage_texture': _store},
+            {'binding': 3, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.uniform}},
+        ])
+        self._bloom_ua_pipeline = dev.create_compute_pipeline(
+            layout=dev.create_pipeline_layout(bind_group_layouts=[self._bloom_ua_bg_layout]),
+            compute={'module': bloom_ua_mod, 'entry_point': 'main'})
 
     # ------------------------------------------------------------------
     # LUT management
@@ -791,6 +817,52 @@ class GPUPipeline:
             {'binding': 2, 'resource': {'buffer': uni, 'offset': 0, 'size': uni.size}},
         ])
         self._run2d(self._vignette_pipeline, bg, w, h)
+        return Frame.from_gpu(dst, frame.shape, self)
+
+    def bloom_frame(self, frame: "Frame", strength: float, threshold: float):
+        """Large-radius bloom, texture-resident: Frame in -> Frame out.
+
+        Resident twin of effects.apply_bloom (the linear/additive render path):
+        area-downsample 4x, mask highlights above ``threshold`` (ACEScct), blur
+        the small layer, bilinear-upsample and add ``strength`` * layer back.
+        Everything stays on the GPU. Returns the input unchanged when there's
+        nothing to do, or None if the GPU is unavailable.
+        """
+        if not self._init():
+            return None
+        if strength <= 0:
+            return frame
+        h, w = frame.shape[:2]
+        scale = 4
+        bh, bw = max(4, h // scale), max(4, w // scale)
+        small_shape = (bh, bw, 3)
+
+        # Stage 1: area-downsample + highlight mask -> small bloom source.
+        small = self._create_tex(small_shape)
+        uni_dm = self._uniform(struct.pack('4f', float(threshold), 0.0, 0.0, 0.0))
+        bg_dm = self._device.create_bind_group(layout=self._bloom_dm_bg_layout, entries=[
+            {'binding': 0, 'resource': frame.gpu().create_view()},
+            {'binding': 1, 'resource': small.create_view()},
+            {'binding': 2, 'resource': {'buffer': uni_dm, 'offset': 0, 'size': uni_dm.size}},
+        ])
+        self._run2d(self._bloom_dm_pipeline, bg_dm, bw, bh)
+
+        # Blur the small layer (same kernel as the per-op gaussian_blur).
+        sigma = max(2, bw // 5)
+        blurred = self.blur_frame(Frame.from_gpu(small, small_shape, self), float(sigma))
+        if blurred is None:
+            return None
+
+        # Stage 2: bilinear upsample + additive blend onto the full image.
+        dst = self._create_tex(frame.shape)
+        uni_ua = self._uniform(struct.pack('4f', float(strength), 0.0, 0.0, 0.0))
+        bg_ua = self._device.create_bind_group(layout=self._bloom_ua_bg_layout, entries=[
+            {'binding': 0, 'resource': frame.gpu().create_view()},
+            {'binding': 1, 'resource': blurred.gpu().create_view()},
+            {'binding': 2, 'resource': dst.create_view()},
+            {'binding': 3, 'resource': {'buffer': uni_ua, 'offset': 0, 'size': uni_ua.size}},
+        ])
+        self._run2d(self._bloom_ua_pipeline, bg_ua, w, h)
         return Frame.from_gpu(dst, frame.shape, self)
 
     def _uniform(self, data: bytes):

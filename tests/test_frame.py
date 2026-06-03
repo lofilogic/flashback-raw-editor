@@ -234,6 +234,29 @@ def test_edge_softness_frame_noop_when_strength_zero(img):
 
 
 @requires_gpu
+def test_bloom_frame_matches_oracle():
+    """Resident bloom matches the numpy/cv2 oracle within perceptual tol.
+
+    Bloom is a soft low-frequency layer scaled by a small strength, so the
+    downsample/upsample resampling differences (box vs INTER_AREA, manual vs cv2
+    bilinear) stay well under one 8-bit code value in the blended output. Uses a
+    size divisible by 4 so the area-downsample blocks line up exactly.
+    """
+    from core.effects import apply_bloom
+    rng = np.random.default_rng(17)
+    a = rng.random((64, 96, 3), dtype=np.float32) * 0.3
+    a[20:32, 30:50, :] += 3.0                # bright block drives the bloom mask
+    for strength, threshold in ((0.3, 0.55), (0.1, 0.4)):
+        def oracle(x, s=strength, t=threshold):
+            return apply_bloom(x, s, t, linear=True)
+
+        def resident(x, s=strength, t=threshold):
+            return gpu.bloom_frame(Frame.from_cpu(x), s, t).cpu()
+
+        assert_parity(oracle, resident, a, tol=PERCEPTUAL_TOL, label="bloom")
+
+
+@requires_gpu
 def test_vignette_frame_matches_oracle():
     """Resident vignette matches the numpy oracle (linear ACEScg, pre-LUT)."""
     from core.effects import apply_vignette
