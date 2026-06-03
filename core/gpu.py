@@ -66,6 +66,10 @@ class GPUPipeline:
         self._hal_hi_bg_layout = None
         self._hal_combine_pipeline = None
         self._hal_combine_bg_layout = None
+        self._unsharp_tex_pipeline = None  # texture-resident unsharp mask
+        self._unsharp_tex_bg_layout = None
+        self._grain_tex_pipeline = None    # texture-resident grain blend
+        self._grain_tex_bg_layout = None
         self._lut_buf = None   # persistent GPU LUT buffer
         self._lut_size = 0
 
@@ -275,6 +279,30 @@ class GPUPipeline:
         self._hal_combine_pipeline = dev.create_compute_pipeline(
             layout=dev.create_pipeline_layout(bind_group_layouts=[self._hal_combine_bg_layout]),
             compute={'module': hal_comb_mod, 'entry_point': 'main'})
+
+        # --- Unsharp mask (texture-resident) pipeline: img + (img-blur)*k ---
+        unsharp_tex_mod = dev.create_shader_module(code=_read_shader('unsharp_tex.wgsl'))
+        self._unsharp_tex_bg_layout = dev.create_bind_group_layout(entries=[
+            {'binding': 0, 'visibility': _C, 'texture': _tex},
+            {'binding': 1, 'visibility': _C, 'texture': _tex},
+            {'binding': 2, 'visibility': _C, 'storage_texture': _store},
+            {'binding': 3, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.uniform}},
+        ])
+        self._unsharp_tex_pipeline = dev.create_compute_pipeline(
+            layout=dev.create_pipeline_layout(bind_group_layouts=[self._unsharp_tex_bg_layout]),
+            compute={'module': unsharp_tex_mod, 'entry_point': 'main'})
+
+        # --- Grain blend (texture-resident) pipeline ---
+        grain_tex_mod = dev.create_shader_module(code=_read_shader('grain_tex.wgsl'))
+        self._grain_tex_bg_layout = dev.create_bind_group_layout(entries=[
+            {'binding': 0, 'visibility': _C, 'texture': _tex},
+            {'binding': 1, 'visibility': _C, 'texture': _tex},
+            {'binding': 2, 'visibility': _C, 'storage_texture': _store},
+            {'binding': 3, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.uniform}},
+        ])
+        self._grain_tex_pipeline = dev.create_compute_pipeline(
+            layout=dev.create_pipeline_layout(bind_group_layouts=[self._grain_tex_bg_layout]),
+            compute={'module': grain_tex_mod, 'entry_point': 'main'})
 
     # ------------------------------------------------------------------
     # LUT management
@@ -580,6 +608,70 @@ class GPUPipeline:
         g1 = glow(threshold, blur_radius)
         g2 = glow(min(threshold + 0.15, 0.98), blur_radius * 3.0)
         return self._halation_combine(frame, g1, g2, strength)
+
+    # ------------------------------------------------------------------
+    # Post-LUT resident tail (display sRGB): softness, grain, sharpen
+    # ------------------------------------------------------------------
+
+    def softness_frame(self, frame: "Frame", sigma: float):
+        """Film-softness Gaussian blur, texture-resident: Frame in -> Frame out.
+
+        Resident twin of effects.apply_softness — it is exactly a separable
+        Gaussian blur, so this just forwards to blur_frame (kept as a named
+        stage so the post-LUT chain reads like the per-op pipeline).
+        """
+        return self.blur_frame(frame, sigma)
+
+    def sharpen_frame(self, frame: "Frame", strength: float, radius: float):
+        """Unsharp-mask sharpen, texture-resident: Frame in -> Frame out.
+
+        Resident twin of effects.apply_sharpen: blur the image, then combine
+        ``img + (img - blurred) * strength`` (same math as gpu.unsharp_mask),
+        all on the GPU. The result is left unclamped, matching the per-op path;
+        the host clips once after the final readback.
+        """
+        if not self._init():
+            return None
+        blurred = self.blur_frame(frame, radius)
+        if blurred is None:
+            return None
+        h, w = frame.shape[:2]
+        dst = self._create_tex(frame.shape)
+        uni = self._uniform(struct.pack('4f', strength, 0.0, 0.0, 0.0))
+        bg = self._device.create_bind_group(layout=self._unsharp_tex_bg_layout, entries=[
+            {'binding': 0, 'resource': frame.gpu().create_view()},
+            {'binding': 1, 'resource': blurred.gpu().create_view()},
+            {'binding': 2, 'resource': dst.create_view()},
+            {'binding': 3, 'resource': {'buffer': uni, 'offset': 0, 'size': uni.size}},
+        ])
+        self._run2d(self._unsharp_tex_pipeline, bg, w, h)
+        return Frame.from_gpu(dst, frame.shape, self)
+
+    def grain_frame(self, frame: "Frame", grain_layer: np.ndarray,
+                    intensity: float, min_grain: float = 0.2,
+                    highlight_bias: float = 0.0):
+        """Film-grain blend, texture-resident: Frame in -> Frame out.
+
+        Resident twin of gpu.grain_blend — same per-channel falloff math. The
+        grain layer is generated on the CPU (random tiles, see processor) and
+        uploaded as a texture here; the image itself stays GPU-resident, so this
+        saves the image upload+readback of the per-op path. ``grain_layer`` must
+        be an (H, W, 3) float32 array matching ``frame``'s spatial size.
+        """
+        if not self._init():
+            return None
+        h, w = frame.shape[:2]
+        grain_tex = self._upload_tex(grain_layer)
+        dst = self._create_tex(frame.shape)
+        uni = self._uniform(struct.pack('4f', intensity, min_grain, highlight_bias, 0.0))
+        bg = self._device.create_bind_group(layout=self._grain_tex_bg_layout, entries=[
+            {'binding': 0, 'resource': frame.gpu().create_view()},
+            {'binding': 1, 'resource': grain_tex.create_view()},
+            {'binding': 2, 'resource': dst.create_view()},
+            {'binding': 3, 'resource': {'buffer': uni, 'offset': 0, 'size': uni.size}},
+        ])
+        self._run2d(self._grain_tex_pipeline, bg, w, h)
+        return Frame.from_gpu(dst, frame.shape, self)
 
     def _uniform(self, data: bytes):
         # Uniform buffers must be multiples of 16 bytes

@@ -152,6 +152,82 @@ def test_halation_frame_matches_per_op():
     assert max_abs_err(resident, ref) <= 1e-4
 
 
+# --- post-LUT resident tail stages vs their per-op oracles ------------------
+
+@requires_gpu
+def test_softness_frame_matches_buffer_blur(img):
+    """Resident softness is exactly a Gaussian blur (matches the buffer blur)."""
+    for sigma in (1.5, 3.0):
+        ref = gpu.gaussian_blur(img, sigma)
+        cand = gpu.softness_frame(Frame.from_cpu(img), sigma).cpu()
+        assert max_abs_err(cand, ref) <= 1e-5
+
+
+@requires_gpu
+def test_sharpen_frame_matches_per_op(img):
+    """Resident sharpen matches the per-op buffer path (blur + unsharp)."""
+    for strength, radius in ((0.5, 2.0), (1.2, 4.0)):
+        blurred = gpu.gaussian_blur(img, radius)
+        ref = gpu.unsharp_mask(img, blurred, strength)
+        cand = gpu.sharpen_frame(Frame.from_cpu(img), strength, radius).cpu()
+        assert max_abs_err(cand, ref) <= 1e-5
+
+
+@requires_gpu
+def test_grain_frame_matches_buffer_blend(img):
+    """Resident grain blend matches the per-op buffer grain_blend on the same
+    layer (so any difference is GPU float rounding, not a different layer)."""
+    rng = np.random.default_rng(7)
+    grain = rng.random(img.shape, dtype=np.float32)
+    intensity, min_grain, bias = 0.3, 0.2, 0.4
+    ref = gpu.grain_blend(img, grain, intensity, min_grain, bias)
+    cand = gpu.grain_frame(Frame.from_cpu(img), grain, intensity, min_grain, bias).cpu()
+    assert max_abs_err(cand, ref) <= 1e-5
+
+
+@requires_gpu
+def test_resident_tail_chains_without_readback(img):
+    """encode -> LUT -> softness -> grain -> sharpen as one resident chain
+    matches running the same stages with a readback between each."""
+    n = 17
+    axis = np.linspace(0.0, 1.0, n, dtype=np.float32)
+    r, g, b = np.meshgrid(axis, axis, axis, indexing='ij')
+    lut_table = np.stack([
+        np.clip(r ** 1.1 * 0.95 + 0.03 * g, 0, 1),
+        np.clip(g ** 0.95,                  0, 1),
+        np.clip(b ** 1.05 * 0.97 + 0.02 * r, 0, 1),
+    ], axis=-1).astype(np.float32)
+    gpu.upload_lut(lut_table)
+
+    rng = np.random.default_rng(8)
+    grain = rng.random(img.shape, dtype=np.float32)
+    img_max = np.maximum(img, 1e-10)
+
+    def stage_by_stage(a):
+        f = gpu.encode_frame(Frame.from_cpu(a))
+        f = Frame.from_cpu(f.cpu())          # force a readback between stages
+        f = gpu.lut_frame(f)
+        f = Frame.from_cpu(f.cpu())
+        f = gpu.softness_frame(f, 2.0)
+        f = Frame.from_cpu(f.cpu())
+        f = gpu.grain_frame(f, grain, 0.3, 0.2, 0.4)
+        f = Frame.from_cpu(f.cpu())
+        f = gpu.sharpen_frame(f, 0.5, 2.0)
+        return f.cpu()
+
+    def fused(a):
+        f = Frame.from_cpu(a)
+        f = gpu.encode_frame(f)
+        f = gpu.lut_frame(f)
+        f = gpu.softness_frame(f, 2.0)
+        f = gpu.grain_frame(f, grain, 0.3, 0.2, 0.4)
+        f = gpu.sharpen_frame(f, 0.5, 2.0)
+        return f.cpu()
+
+    assert_parity(stage_by_stage, fused, img_max,
+                  tol=1e-5, label="resident_tail")
+
+
 # --- the parity gate itself --------------------------------------------------
 
 def test_assert_parity_passes_on_equivalent(img):

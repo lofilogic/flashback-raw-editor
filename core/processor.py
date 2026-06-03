@@ -46,7 +46,8 @@ from .config import (
     resolve_lut_ref,
     _timing_print,
 )
-from .kernels import acescct_encode, apply_grain, encode_then_lut
+from .kernels import acescct_encode, apply_grain, encode_then_lut, run_resident
+from .gpu import gpu
 from .auto_exposure_reverse import compute_reverse_gain
 from .effects import (
     apply_lut_fast,
@@ -469,16 +470,47 @@ class FlashbackProcessor:
         target = 1.0 if film_ev_driver < 0 else 0.0
         return float(GRAIN_HIGHLIGHT_BIAS + (target - GRAIN_HIGHLIGHT_BIAS) * frac)
 
-    def _apply_grain(self, image, strength, highlight_bias=None):
+    def _apply_grain(self, image, strength, highlight_bias=None, grain_layer=None):
         h, w = image.shape[:2]
-        with _timed("grain:generate"):
-            grain = self._generate_grain_layer(h, w, sigma=strength)
+        if grain_layer is not None:
+            grain = grain_layer
+        else:
+            with _timed("grain:generate"):
+                grain = self._generate_grain_layer(h, w, sigma=strength)
         if highlight_bias is None:
             highlight_bias = GRAIN_HIGHLIGHT_BIAS
         with _timed("grain:blend"):
             out = apply_grain(image, grain, intensity=strength,
                               highlight_bias=highlight_bias)
         return out
+
+    def _resident_post_lut_stages(self, v, shape, grain_driver):
+        """Build the post-LUT resident tail (softness -> grain -> sharpen) as a
+        list of Frame->Frame stages, matching the per-op order and parameters in
+        _render's per-op block.
+
+        Returns (stages, grain_layer). The grain layer is generated here (CPU,
+        random tiles) when grain is enabled so it exists regardless of which path
+        ultimately runs. Chromatic aberration is intentionally excluded: it is a
+        cv2 stage that breaks residency and runs on the CPU before this tail.
+        """
+        stages = []
+        if v.enable_softness and v.softness_sigma > 0:
+            sigma = v.softness_sigma
+            stages.append(lambda fr, s=sigma: gpu.softness_frame(fr, s))
+        grain_layer = None
+        if v.enable_grain and v.grain_strength_pct > 0:
+            h, w = shape[:2]
+            g_strength = pct(v.grain_strength_pct)
+            grain_layer = self._generate_grain_layer(h, w, sigma=g_strength)
+            g_bias = self._grain_highlight_bias(grain_driver)
+            stages.append(lambda fr, g=grain_layer, i=g_strength, b=g_bias:
+                          gpu.grain_frame(fr, g, i, highlight_bias=b))
+        if v.enable_sharpen and v.sharpen_strength_pct > 0:
+            sh_strength = pct(v.sharpen_strength_pct)
+            sh_radius = v.sharpen_radius
+            stages.append(lambda fr, s=sh_strength, r=sh_radius: gpu.sharpen_frame(fr, s, r))
+        return stages, grain_layer
 
     # ---- generic raw pipeline ------------------------------------------------
 
@@ -720,24 +752,46 @@ class FlashbackProcessor:
                                          vignette_color_pct_to_shift(v.vignette_color_pct),
                                          vignette_curve_to_power(v.vignette_curve))
 
+        grain_driver = f * rev_ev + push_pull_ev
+        tail_done = False
+        # Resident post-LUT tail (softness -> grain -> sharpen), built once and
+        # shared by the fused chain and the CA path below. grain_layer is also
+        # reused by the per-op fallback, so one grain layer is generated per
+        # render regardless of which path runs.
+        post_tail, grain_layer = (([], None) if downscale
+                                  else self._resident_post_lut_stages(v, img.shape, grain_driver))
+
         if v.enable_lut and self.lut is not None:
             if v.enable_cnr and v.cnr_amount_pct > 0:
                 with _timed("CNR"):
                     img = reduce_color_noise_chroma(img, sigma=cnr_pct_to_sigma(v.cnr_amount_pct))
             img_max = np.maximum(img, 1e-10)
-            # Resident path: ACEScct-encode -> LUT on the GPU with a single
-            # upload/readback (bit-identical to the per-op path). Returns None
-            # -> CPU fallback when no GPU or no LUT is uploaded to the device.
-            with _timed("encode+LUT (resident)"):
-                img_display = encode_then_lut(img_max)
+            ca_on = v.enable_chromatic_aberration and v.ca_pixels > 0
+
+            img_display = None
+            # No CA: fuse the entire back half — ACEScct-encode -> LUT -> tail —
+            # into one resident chain (single upload, single readback). With CA
+            # on, the tail still goes resident, just after the CPU CA stage (see
+            # the post-LUT block below). Any GPU miss returns None -> fallback.
+            if not downscale and not ca_on:
+                with _timed("encode+LUT+tail (resident)"):
+                    img_display = run_resident(
+                        img_max, [gpu.encode_frame, gpu.lut_frame, *post_tail])
+                tail_done = img_display is not None
+
             if img_display is None:
-                with _timed("ACEScct encode"):
-                    img_acescct = acescct_encode(img_max)
-                try:
-                    img_display = apply_lut_fast(img_acescct, self.lut)
-                except Exception as e:
-                    log.error("[processor] LUT error: %s", e)
-                    img_display = np.clip(img_acescct, 0, 1)
+                # Resident encode->LUT (single upload/readback), falling back to
+                # the CPU encode + LUT when no GPU/LUT is available.
+                with _timed("encode+LUT (resident)"):
+                    img_display = encode_then_lut(img_max)
+                if img_display is None:
+                    with _timed("ACEScct encode"):
+                        img_acescct = acescct_encode(img_max)
+                    try:
+                        img_display = apply_lut_fast(img_acescct, self.lut)
+                    except Exception as e:
+                        log.error("[processor] LUT error: %s", e)
+                        img_display = np.clip(img_acescct, 0, 1)
         else:
             flat     = img.reshape(-1, 3)
             prophoto = (flat @ ACESCG_TO_PROPHOTO).reshape(img.shape)
@@ -745,24 +799,35 @@ class FlashbackProcessor:
             lin_srgb = (prophoto.reshape(-1, 3) @ PROPHOTO_TO_LINSRGB).reshape(prophoto.shape)
             img_display = _srgb_oetf(np.clip(lin_srgb, 0.0, 1.0))
 
-        if not downscale:
+        # Post-LUT tail. Skipped when the fused chain already ran it (tail_done).
+        # Otherwise CA runs on the CPU (cv2 warpAffine) and the softness/grain/
+        # sharpen tail runs as one resident sub-chain (single upload/readback),
+        # falling back to the per-op path on a GPU miss.
+        if not downscale and not tail_done:
             if v.enable_chromatic_aberration and v.ca_pixels > 0:
                 ca_scale = ca_pixels_to_scale(v.ca_pixels, img_display.shape[1])
                 img_display = apply_chromatic_aberration(
                     img_display, ca_scale, v.ca_steps, v.ca_blue_blur,
                     zoom_blur=pct(v.ca_zoom_blur_pct))
-            if v.enable_softness and v.softness_sigma > 0:
-                with _timed("softness"):
-                    img_display = apply_softness(img_display, v.softness_sigma)
-            if v.enable_grain and v.grain_strength_pct > 0:
-                grain_driver = f * rev_ev + push_pull_ev
-                img_display  = self._apply_grain(
-                    img_display, pct(v.grain_strength_pct),
-                    highlight_bias=self._grain_highlight_bias(grain_driver))
-            if v.enable_sharpen and v.sharpen_strength_pct > 0:
-                with _timed("sharpen"):
-                    img_display = apply_sharpen(
-                        img_display, pct(v.sharpen_strength_pct), v.sharpen_radius)
+            resident_tail = None
+            if post_tail:
+                with _timed("tail (resident)"):
+                    resident_tail = run_resident(img_display, post_tail)
+            if resident_tail is not None:
+                img_display = resident_tail
+            else:
+                if v.enable_softness and v.softness_sigma > 0:
+                    with _timed("softness"):
+                        img_display = apply_softness(img_display, v.softness_sigma)
+                if v.enable_grain and v.grain_strength_pct > 0:
+                    img_display = self._apply_grain(
+                        img_display, pct(v.grain_strength_pct),
+                        highlight_bias=self._grain_highlight_bias(grain_driver),
+                        grain_layer=grain_layer)
+                if v.enable_sharpen and v.sharpen_strength_pct > 0:
+                    with _timed("sharpen"):
+                        img_display = apply_sharpen(
+                            img_display, pct(v.sharpen_strength_pct), v.sharpen_radius)
 
         post_gain = 2.0 ** (-pre_lut_ev)
         if not np.isclose(post_gain, 1.0):
