@@ -7,10 +7,11 @@
 // radially by its own magnification and weighted by that band's RGB
 // sensitivity, producing a smooth purple->green fringe like real glass.
 //
-// Strength matches the legacy effect's envelope: the longest wavelength sits at
-// magnification 1.0 (red ~unshifted) and the shortest at 1.0 + `scale`
-// (blue shifted by `scale`), where scale = ca_pixels / (width/2). So existing
-// ca_pixels values carry straight over.
+// Strength matches the legacy effect's envelope: red (longest wavelength) stays
+// ~unshifted and blue (shortest) is magnified outward by (1 + `scale`), where
+// scale = ca_pixels / (width/2). So existing ca_pixels values carry straight
+// over. (The per-sample magnification is the reciprocal 1/(1+scale*t) — see the
+// loop — which is what gives the physically-correct fringe direction.)
 //
 // rgba32float is not filterable, so sampling is manual bilinear with
 // clamp-to-edge (== cv2 BORDER_REPLICATE).
@@ -64,7 +65,11 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     var wsum = vec3f(0.0);
     for (var i: i32 = 0; i < n; i++) {
         let t  = select(0.0, f32(i) / f32(n - 1), n > 1);
-        let sc = 1.0 + u.scale * t;
+        // Reciprocal so the magnification matches a real lens (and the legacy
+        // cv2.warpAffine, which inverts its matrix): blue (t=1) samples inward,
+        // so blue *content* lands at larger radius. Net: light->dark edges going
+        // outward fringe blue, dark->light fringe red — as on the film scans.
+        let sc = 1.0 / (1.0 + u.scale * t);
         let w  = band(t);
         acc  += sample_edge(c + d * sc, dims) * w;
         wsum += w;

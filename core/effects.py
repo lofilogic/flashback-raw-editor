@@ -116,9 +116,11 @@ def apply_chromatic_aberration(image, scale, samples=CA_SPECTRAL_SAMPLES):
     gpu.ca_frame (the resident path the render pipeline normally takes).
 
     Models lateral CA by integrating ``samples`` points across the spectrum,
-    each radially magnified from 1.0 (red, ~unshifted) to 1.0 + ``scale`` (blue)
-    and weighted by that band's RGB sensitivity, giving a smooth purple->green
-    fringe that grows with radius. Runs on the post-LUT display-sRGB image
+    each weighted by that band's RGB sensitivity and radially magnified by the
+    reciprocal 1/(1+scale*t): red (t=0) ~unshifted, blue (t=1) magnified outward
+    by (1+scale). This gives a smooth fringe that grows with radius and runs the
+    physically-correct direction (light->dark edge => blue). Runs on the post-LUT
+    display-sRGB image
     (gamma-encoded), not linear, so the fringing stays localised to bright edges
     the way real glass behaves. ``scale`` is ca_pixels_to_scale(ca_pixels, w).
     """
@@ -137,7 +139,10 @@ def apply_chromatic_aberration(image, scale, samples=CA_SPECTRAL_SAMPLES):
 
     acc = np.zeros((h, w, 3), dtype=np.float32)
     for t, wband in zip(ts, weights):
-        sc = 1.0 + scale * t
+        # Reciprocal magnification (matches ca_tex.wgsl and the legacy cv2
+        # inverse-matrix warp): blue samples inward -> content outward, so the
+        # fringe direction is physically correct (light->dark edge => blue).
+        sc = 1.0 / (1.0 + scale * t)
         acc += _bilinear_sample_edge(image, cx + dx * sc, cy + dy * sc) * wband
     result = (acc / weights.sum(axis=0)).astype(np.float32)
 
