@@ -95,6 +95,11 @@ HALATION_THRESHOLD_STOPS = 4.0   # EV above middle grey
 HALATION_BLUR_RADIUS = 4.0 # px
 HALATION_STRENGTH_PCT = 50.0
 SOFTNESS_SIGMA = 0.5       # px
+# Edge (corner) softness — a radial defocus that grows toward the frame corners,
+# emulating lens field curvature. Distinct from the global `softness` blur.
+EDGE_SOFTNESS_STRENGTH_PCT = 60.0   # 0–100 → max sharp→blur blend at the corners
+EDGE_SOFTNESS_SIGMA = 3.0           # px, blur radius of the soft copy
+EDGE_SOFTNESS_START_PCT = 40.0      # 0–100 → radius (as % of corner) where softness begins
 GRAIN_STRENGTH_PCT = 50.0
 GRAIN_TILE_SCALE = 0.8     # <1.0 makes grain finer (tiles render denser); >1.0 makes it chunkier.
 GRAIN_HIGHLIGHT_BIAS = 0.3 # 1.0 = grain biased to highlights, 0.0 = shadows, 0.5 = flat.
@@ -210,6 +215,7 @@ class VibeConfig:
     enable_halation: bool = True
     enable_chromatic_aberration: bool = True
     enable_softness: bool = True
+    enable_edge_softness: bool = False
     enable_grain: bool = True
     enable_sharpen: bool = True
     enable_cnr: bool = True
@@ -232,6 +238,9 @@ class VibeConfig:
     ca_blue_blur: float = CA_BLUE_BLUR                          # px
     ca_zoom_blur_pct: float = CA_ZOOM_BLUR_PCT                  # 0–500
     softness_sigma: float = SOFTNESS_SIGMA                      # px
+    edge_softness_strength_pct: float = EDGE_SOFTNESS_STRENGTH_PCT  # 0–100
+    edge_softness_sigma: float = EDGE_SOFTNESS_SIGMA            # px
+    edge_softness_start_pct: float = EDGE_SOFTNESS_START_PCT    # 0–100 (% of corner radius)
     grain_strength_pct: float = GRAIN_STRENGTH_PCT              # 0–200
     sharpen_strength_pct: float = SHARPEN_STRENGTH_PCT          # 0–500
     sharpen_radius: float = SHARPEN_RADIUS                      # px

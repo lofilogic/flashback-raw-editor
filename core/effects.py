@@ -280,6 +280,27 @@ def apply_softness(image, sigma=SOFTNESS_SIGMA):
     return gaussian_blur(image, sigma)
 
 
+def apply_edge_softness(image, sigma, strength, start):
+    """Radial edge (corner) softness — numpy oracle / no-GPU fallback for
+    gpu.edge_softness_frame.
+
+    Emulates lens field curvature: a sharp centre that softens toward the
+    corners. Blends the image with a Gaussian-blurred copy by a weight that
+    grows from ``start`` (fraction of the corner radius) to 1.0 at the corners,
+    scaled by ``strength`` (0..1). Matches edge_softness_tex.wgsl.
+    """
+    if strength <= 0 or sigma <= 0:
+        return image.astype(np.float32, copy=True)
+    h, w = image.shape[:2]
+    blurred = gaussian_blur(image, sigma)
+    cx, cy = w * 0.5, h * 0.5
+    ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+    r_norm = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2) / max(np.hypot(cx, cy), 1e-6)
+    t = np.clip((r_norm - start) / max(1.0 - start, 1e-6), 0.0, 1.0)
+    w_blend = (t * t * (3.0 - 2.0 * t) * strength)[..., None]   # smoothstep * strength
+    return (image * (1.0 - w_blend) + blurred * w_blend).astype(np.float32)
+
+
 def apply_sharpen(image, strength=0.5, radius=SHARPEN_RADIUS):
     """Unsharp mask sharpening."""
     blurred = gaussian_blur(image, radius)

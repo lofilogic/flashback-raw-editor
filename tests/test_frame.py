@@ -212,6 +212,28 @@ def test_ca_frame_noop_when_scale_zero(img):
 
 
 @requires_gpu
+def test_edge_softness_frame_matches_oracle():
+    """Resident edge softness matches the numpy oracle (blur + radial blend)."""
+    from core.effects import apply_edge_softness
+    rng = np.random.default_rng(11)
+    a = rng.random((50, 80, 3), dtype=np.float32)
+    for sigma, strength, start in ((3.0, 0.6, 0.4), (5.0, 1.0, 0.2)):
+        def oracle(x, s=sigma, st=strength, sa=start):
+            return apply_edge_softness(x, s, st, sa)
+
+        def resident(x, s=sigma, st=strength, sa=start):
+            return gpu.edge_softness_frame(Frame.from_cpu(x), s, st, sa).cpu()
+
+        assert_parity(oracle, resident, a, tol=PERCEPTUAL_TOL, label="edge_softness")
+
+
+@requires_gpu
+def test_edge_softness_frame_noop_when_strength_zero(img):
+    out = gpu.edge_softness_frame(Frame.from_cpu(img), 3.0, 0.0, 0.4).cpu()
+    assert max_abs_err(out, img) <= PERCEPTUAL_TOL
+
+
+@requires_gpu
 def test_resident_tail_chains_without_readback(img):
     """encode -> LUT -> softness -> grain -> sharpen as one resident chain
     matches running the same stages with a readback between each."""

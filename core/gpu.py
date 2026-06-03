@@ -72,6 +72,8 @@ class GPUPipeline:
         self._grain_tex_bg_layout = None
         self._ca_tex_pipeline = None       # texture-resident spectral CA
         self._ca_tex_bg_layout = None
+        self._edge_soft_pipeline = None    # texture-resident edge (corner) softness
+        self._edge_soft_bg_layout = None
         self._lut_buf = None   # persistent GPU LUT buffer
         self._lut_size = 0
 
@@ -316,6 +318,18 @@ class GPUPipeline:
         self._grain_tex_pipeline = dev.create_compute_pipeline(
             layout=dev.create_pipeline_layout(bind_group_layouts=[self._grain_tex_bg_layout]),
             compute={'module': grain_tex_mod, 'entry_point': 'main'})
+
+        # --- Edge (corner) softness (texture-resident) pipeline ---
+        edge_soft_mod = dev.create_shader_module(code=_read_shader('edge_softness_tex.wgsl'))
+        self._edge_soft_bg_layout = dev.create_bind_group_layout(entries=[
+            {'binding': 0, 'visibility': _C, 'texture': _tex},
+            {'binding': 1, 'visibility': _C, 'texture': _tex},
+            {'binding': 2, 'visibility': _C, 'storage_texture': _store},
+            {'binding': 3, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.uniform}},
+        ])
+        self._edge_soft_pipeline = dev.create_compute_pipeline(
+            layout=dev.create_pipeline_layout(bind_group_layouts=[self._edge_soft_bg_layout]),
+            compute={'module': edge_soft_mod, 'entry_point': 'main'})
 
     # ------------------------------------------------------------------
     # LUT management
@@ -709,6 +723,35 @@ class GPUPipeline:
             {'binding': 2, 'resource': {'buffer': uni, 'offset': 0, 'size': uni.size}},
         ])
         self._run2d(self._ca_tex_pipeline, bg, w, h)
+        return Frame.from_gpu(dst, frame.shape, self)
+
+    def edge_softness_frame(self, frame: "Frame", sigma: float, strength: float,
+                            start: float):
+        """Radial edge (corner) softness, texture-resident: Frame in -> Frame out.
+
+        Blurs the frame once (blur_frame) and blends sharp->blurred with a weight
+        that grows from ``start`` (as a fraction of the corner radius) out to the
+        corners, scaled by ``strength`` (0..1). Resident twin of
+        effects.apply_edge_softness. Returns the input unchanged when there is
+        nothing to do, or None if the GPU is unavailable.
+        """
+        if not self._init():
+            return None
+        if strength <= 0 or sigma <= 0:
+            return frame
+        blurred = self.blur_frame(frame, sigma)
+        if blurred is None:
+            return None
+        h, w = frame.shape[:2]
+        dst = self._create_tex(frame.shape)
+        uni = self._uniform(struct.pack('4f', float(strength), float(start), 0.0, 0.0))
+        bg = self._device.create_bind_group(layout=self._edge_soft_bg_layout, entries=[
+            {'binding': 0, 'resource': frame.gpu().create_view()},
+            {'binding': 1, 'resource': blurred.gpu().create_view()},
+            {'binding': 2, 'resource': dst.create_view()},
+            {'binding': 3, 'resource': {'buffer': uni, 'offset': 0, 'size': uni.size}},
+        ])
+        self._run2d(self._edge_soft_pipeline, bg, w, h)
         return Frame.from_gpu(dst, frame.shape, self)
 
     def _uniform(self, data: bytes):

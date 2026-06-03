@@ -54,6 +54,7 @@ from .effects import (
     apply_chromatic_aberration,
     apply_halation,
     apply_softness,
+    apply_edge_softness,
     apply_sharpen,
     apply_vignette,
     apply_bloom,
@@ -497,6 +498,13 @@ class FlashbackProcessor:
         if v.enable_chromatic_aberration and v.ca_pixels > 0:
             ca_scale = ca_pixels_to_scale(v.ca_pixels, shape[1])
             stages.append(lambda fr, s=ca_scale: gpu.ca_frame(fr, s))
+        if (v.enable_edge_softness and v.edge_softness_strength_pct > 0
+                and v.edge_softness_sigma > 0):
+            es_sigma = v.edge_softness_sigma
+            es_strength = pct(v.edge_softness_strength_pct)
+            es_start = pct(v.edge_softness_start_pct)
+            stages.append(lambda fr, sg=es_sigma, st=es_strength, sa=es_start:
+                          gpu.edge_softness_frame(fr, sg, st, sa))
         if v.enable_softness and v.softness_sigma > 0:
             sigma = v.softness_sigma
             stages.append(lambda fr, s=sigma: gpu.softness_frame(fr, s))
@@ -814,6 +822,11 @@ class FlashbackProcessor:
                 if v.enable_chromatic_aberration and v.ca_pixels > 0:
                     ca_scale = ca_pixels_to_scale(v.ca_pixels, img_display.shape[1])
                     img_display = apply_chromatic_aberration(img_display, ca_scale)
+                if (v.enable_edge_softness and v.edge_softness_strength_pct > 0
+                        and v.edge_softness_sigma > 0):
+                    img_display = apply_edge_softness(
+                        img_display, v.edge_softness_sigma,
+                        pct(v.edge_softness_strength_pct), pct(v.edge_softness_start_pct))
                 if v.enable_softness and v.softness_sigma > 0:
                     with _timed("softness"):
                         img_display = apply_softness(img_display, v.softness_sigma)
