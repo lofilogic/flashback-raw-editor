@@ -757,10 +757,12 @@ class FlashbackProcessor:
                                       stops_above_mid_grey_to_acescct(v.bloom_threshold_stops),
                                       linear=True)
             if v.enable_vignette and v.vignette_strength_pct > 0:
-                with _timed("vignette"):
-                    img = apply_vignette(img, pct(v.vignette_strength_pct),
-                                         vignette_color_pct_to_shift(v.vignette_color_pct),
-                                         vignette_curve_to_power(v.vignette_curve))
+                vig_args = (pct(v.vignette_strength_pct),
+                            vignette_color_pct_to_shift(v.vignette_color_pct),
+                            vignette_curve_to_power(v.vignette_curve))
+                with _timed("vignette (resident)"):
+                    res = run_resident(img, [lambda fr, a=vig_args: gpu.vignette_frame(fr, *a)])
+                img = res if res is not None else apply_vignette(img, *vig_args)
 
         grain_driver = f * rev_ev + push_pull_ev
         tail_done = False

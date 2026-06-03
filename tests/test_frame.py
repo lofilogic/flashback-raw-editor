@@ -234,6 +234,22 @@ def test_edge_softness_frame_noop_when_strength_zero(img):
 
 
 @requires_gpu
+def test_vignette_frame_matches_oracle():
+    """Resident vignette matches the numpy oracle (linear ACEScg, pre-LUT)."""
+    from core.effects import apply_vignette
+    rng = np.random.default_rng(13)
+    a = rng.random((44, 66, 3), dtype=np.float32) * 1.5     # linear, can exceed 1
+    for strength, color, feather in ((0.5, 0.05, 1.0), (0.8, 0.12, 1.6)):
+        def oracle(x, s=strength, c=color, f=feather):
+            return apply_vignette(x, s, c, f)
+
+        def resident(x, s=strength, c=color, f=feather):
+            return gpu.vignette_frame(Frame.from_cpu(x), s, c, f).cpu()
+
+        assert_parity(oracle, resident, a, tol=PERCEPTUAL_TOL, label="vignette")
+
+
+@requires_gpu
 def test_resident_tail_chains_without_readback(img):
     """encode -> LUT -> softness -> grain -> sharpen as one resident chain
     matches running the same stages with a readback between each."""

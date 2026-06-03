@@ -74,6 +74,8 @@ class GPUPipeline:
         self._ca_tex_bg_layout = None
         self._edge_soft_pipeline = None    # texture-resident edge (corner) softness
         self._edge_soft_bg_layout = None
+        self._vignette_pipeline = None     # texture-resident vignette (pre-LUT)
+        self._vignette_bg_layout = None
         self._lut_buf = None   # persistent GPU LUT buffer
         self._lut_size = 0
 
@@ -330,6 +332,17 @@ class GPUPipeline:
         self._edge_soft_pipeline = dev.create_compute_pipeline(
             layout=dev.create_pipeline_layout(bind_group_layouts=[self._edge_soft_bg_layout]),
             compute={'module': edge_soft_mod, 'entry_point': 'main'})
+
+        # --- Vignette (texture-resident, pre-LUT linear) pipeline ---
+        vig_mod = dev.create_shader_module(code=_read_shader('vignette_tex.wgsl'))
+        self._vignette_bg_layout = dev.create_bind_group_layout(entries=[
+            {'binding': 0, 'visibility': _C, 'texture': _tex},
+            {'binding': 1, 'visibility': _C, 'storage_texture': _store},
+            {'binding': 2, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.uniform}},
+        ])
+        self._vignette_pipeline = dev.create_compute_pipeline(
+            layout=dev.create_pipeline_layout(bind_group_layouts=[self._vignette_bg_layout]),
+            compute={'module': vig_mod, 'entry_point': 'main'})
 
     # ------------------------------------------------------------------
     # LUT management
@@ -752,6 +765,32 @@ class GPUPipeline:
             {'binding': 3, 'resource': {'buffer': uni, 'offset': 0, 'size': uni.size}},
         ])
         self._run2d(self._edge_soft_pipeline, bg, w, h)
+        return Frame.from_gpu(dst, frame.shape, self)
+
+    # ------------------------------------------------------------------
+    # Pre-LUT resident stages (linear ACEScg): vignette
+    # ------------------------------------------------------------------
+
+    def vignette_frame(self, frame: "Frame", strength: float, color_shift: float,
+                       feather: float):
+        """Cosine vignette with cool-edge tint, texture-resident: Frame in ->
+        Frame out. Resident twin of effects.apply_vignette (linear ACEScg).
+        Returns the input unchanged when strength<=0, or None if no GPU.
+        """
+        if not self._init():
+            return None
+        if strength <= 0:
+            return frame
+        h, w = frame.shape[:2]
+        dst = self._create_tex(frame.shape)
+        uni = self._uniform(struct.pack('4f', float(strength), float(color_shift),
+                                        float(feather), 0.0))
+        bg = self._device.create_bind_group(layout=self._vignette_bg_layout, entries=[
+            {'binding': 0, 'resource': frame.gpu().create_view()},
+            {'binding': 1, 'resource': dst.create_view()},
+            {'binding': 2, 'resource': {'buffer': uni, 'offset': 0, 'size': uni.size}},
+        ])
+        self._run2d(self._vignette_pipeline, bg, w, h)
         return Frame.from_gpu(dst, frame.shape, self)
 
     def _uniform(self, data: bytes):
