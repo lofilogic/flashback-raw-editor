@@ -105,7 +105,7 @@ GRAIN_TILE_SCALE = 0.8     # <1.0 makes grain finer (tiles render denser); >1.0 
 GRAIN_HIGHLIGHT_BIAS = 0.3 # 1.0 = grain biased to highlights, 0.0 = shadows, 0.5 = flat.
 SHARPEN_STRENGTH_PCT = 50.0
 SHARPEN_RADIUS = 1.0       # px
-CNR_AMOUNT_PCT = 50.0      # default ~ old "200%" strength (sigma 10 at _CNR_SIGMA_MAX=20)
+CNR_AMOUNT_PCT = 40.0      # sigma 8 at _CNR_SIGMA_MAX=20 (a touch under old "200%")
 VIGNETTE_STRENGTH_PCT = 50.0
 VIGNETTE_COLOR_PCT = 25.0
 VIGNETTE_CURVE = 0.0       # -100…+100, higher = more feathered (softer)

@@ -39,12 +39,21 @@ def run_resident(img: np.ndarray, stages) -> np.ndarray | None:
         return None
 
 
+# Below this the numpy BLAS matmul is as fast as the GPU path once the
+# upload+readback round-trip is counted (measured break-even at ~3 MP on M3, and
+# transfers cost more on discrete GPUs), so small/common frames skip the GPU to
+# avoid any chance of a load regression. The GPU only wins once the matmul itself
+# is large — i.e. high-megapixel (generic) raws.
+_GPU_MATMUL_MIN_PIXELS = 8_000_000
+
+
 def color_transform(img: np.ndarray, M: np.ndarray) -> np.ndarray:
     """Per-pixel 3x3 colour-space transform, GPU or numpy. Equivalent to
     ``(img.reshape(-1,3) @ M.T).reshape(img.shape)``; used for the load-time
-    raw -> ACEScg matmul, where the GPU path helps large (high-megapixel) frames.
+    raw -> ACEScg matmul. The GPU path is taken only for large frames (see
+    _GPU_MATMUL_MIN_PIXELS), where it beats numpy despite the transfer.
     """
-    if HAS_GPU:
+    if HAS_GPU and img.size // 3 >= _GPU_MATMUL_MIN_PIXELS:
         result = gpu.color_transform(img, M)
         if result is not None:
             return result
