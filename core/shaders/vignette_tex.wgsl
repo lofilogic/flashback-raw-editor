@@ -36,7 +36,11 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     let xy = vec2f(f32(gid.x), f32(gid.y)) / denom * 2.0 - vec2f(1.0);
 
     let r_norm  = clamp(length(xy) * INV_SQRT2, 0.0, 1.0);
-    let falloff = pow(0.5 * (1.0 + cos(PI * r_norm)), u.feather);
+    // base is the cosine falloff in [0,1]; at the exact corners f32 cos(pi) can
+    // round just past -1, making base slightly negative -> pow(neg, frac) = NaN
+    // -> max(0, NaN) = 0 -> black corners. Guard with select so base<=0 -> 0.
+    let base    = 0.5 * (1.0 + cos(PI * r_norm));
+    let falloff = select(pow(max(base, 0.0), u.feather), 0.0, base <= 0.0);
     let dark    = 1.0 - u.strength * (1.0 - falloff);
     let edge    = 1.0 - falloff;
 

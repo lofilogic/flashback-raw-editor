@@ -303,8 +303,12 @@ def test_vignette_frame_matches_oracle():
     """Resident vignette matches the numpy oracle (linear ACEScg, pre-LUT)."""
     from core.effects import apply_vignette
     rng = np.random.default_rng(13)
-    a = rng.random((44, 66, 3), dtype=np.float32) * 1.5     # linear, can exceed 1
-    for strength, color, feather in ((0.5, 0.05, 1.0), (0.8, 0.12, 1.6)):
+    # Bias well above zero so the corner pixels (r_norm == 1) carry real signal —
+    # that's where a fractional-power-of-negative NaN would surface as a black
+    # corner, and a near-zero random corner would hide it. feather 0.4 is the
+    # fractional case that triggers it.
+    a = rng.random((44, 66, 3), dtype=np.float32) * 0.4 + 0.5
+    for strength, color, feather in ((0.5, 0.05, 1.0), (0.8, 0.12, 1.6), (0.1, 0.05, 0.4)):
         def oracle(x, s=strength, c=color, f=feather):
             return apply_vignette(x, s, c, f)
 

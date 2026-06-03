@@ -332,7 +332,9 @@ def apply_vignette(image, strength=0.5, color_shift=0.05, feather=1.0):
     xx, yy = np.meshgrid(x, y)
     radius = np.sqrt(xx ** 2 + yy ** 2)
     r_norm = np.clip(radius / np.sqrt(2.0), 0.0, 1.0)
-    falloff = (0.5 * (1.0 + np.cos(np.pi * r_norm))).astype(np.float32)
+    # clamp the cosine base to >=0 before pow (matches vignette_tex.wgsl; guards
+    # against a fractional power of a tiny-negative corner value -> NaN).
+    falloff = np.maximum(0.5 * (1.0 + np.cos(np.pi * r_norm)), 0.0).astype(np.float32)
     if feather != 1.0:
         falloff = np.power(falloff, feather)
     dark = 1.0 - strength * (1.0 - falloff)
