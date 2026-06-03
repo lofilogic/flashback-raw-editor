@@ -750,10 +750,14 @@ class FlashbackProcessor:
         if not np.allclose(gain, 1.0):
             img = img * gain
 
-        # Pre-LUT effects (linear ACEScg): bloom -> vignette -> CNR, fused into
-        # one resident chain (single upload/readback). CNR is gated to the LUT
-        # path to match the legacy ordering (it ran inside the LUT branch). Per-op
-        # fallback on a GPU miss. (downscale previews skip these, as before.)
+        # Pre-LUT effects (linear ACEScg): vignette -> bloom -> CNR, fused into
+        # one resident chain (single upload/readback). Vignette precedes bloom so
+        # bloom is generated from the already-vignetted (illumination-falloff)
+        # image, as a real lens does — dimmed perimeter highlights emit less glow,
+        # so bloom concentrates where the image is actually bright instead of
+        # washing the darker edges. CNR is gated to the LUT path to match the
+        # legacy ordering. Per-op fallback on a GPU miss. (downscale previews skip
+        # these, as before.)
         if not downscale:
             bloom_on = v.enable_bloom and v.bloom_strength_pct > 0
             vig_on = v.enable_vignette and v.vignette_strength_pct > 0
@@ -761,15 +765,15 @@ class FlashbackProcessor:
                       and v.enable_lut and self.lut is not None)
             if bloom_on or vig_on or cnr_on:
                 pre, parts = [], []
-                if bloom_on:
-                    b_args = (pct(v.bloom_strength_pct),
-                              stops_above_mid_grey_to_acescct(v.bloom_threshold_stops))
-                    pre.append(lambda fr, a=b_args: gpu.bloom_frame(fr, *a)); parts.append("bloom")
                 if vig_on:
                     vig_args = (pct(v.vignette_strength_pct),
                                 vignette_color_pct_to_shift(v.vignette_color_pct),
                                 vignette_curve_to_power(v.vignette_curve))
                     pre.append(lambda fr, a=vig_args: gpu.vignette_frame(fr, *a)); parts.append("vignette")
+                if bloom_on:
+                    b_args = (pct(v.bloom_strength_pct),
+                              stops_above_mid_grey_to_acescct(v.bloom_threshold_stops))
+                    pre.append(lambda fr, a=b_args: gpu.bloom_frame(fr, *a)); parts.append("bloom")
                 if cnr_on:
                     cnr_sigma = cnr_pct_to_sigma(v.cnr_amount_pct)
                     pre.append(lambda fr, s=cnr_sigma: gpu.cnr_frame(fr, s)); parts.append("CNR")
@@ -778,10 +782,10 @@ class FlashbackProcessor:
                 if res is not None:
                     img = res
                 else:
-                    if bloom_on:
-                        img = apply_bloom(img, *b_args, linear=True)
                     if vig_on:
                         img = apply_vignette(img, *vig_args)
+                    if bloom_on:
+                        img = apply_bloom(img, *b_args, linear=True)
                     if cnr_on:
                         img = reduce_color_noise_chroma(img, sigma=cnr_sigma)
 
