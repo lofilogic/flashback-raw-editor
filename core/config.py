@@ -126,17 +126,20 @@ _VIGNETTE_COLOR_MAX = 0.2
 # effect function actually consumes. The pipeline calls these at the
 # effect-function boundary in core/processor.py.
 
-def ca_pixels_to_scale(pixels: float, image_width: int) -> float:
-    """Edge-pixel offset at the long edge → blue-channel scale factor.
+def ca_pixels_to_scale(pixels: float, long_edge: int) -> float:
+    """Edge-pixel offset → CA radial scale factor, normalised by the LONG edge.
 
-    The CA warp scales the blue channel by (1 + s) at the outermost sample;
-    that displaces the corner by s * (image_width / 2) pixels. Inverting:
-    s = pixels / (image_width / 2). When the runtime frame is wider/narrower
-    than CA_REFERENCE_WIDTH the visual pixel offset stays constant.
+    CA samples are displaced radially by s * radius; ``s = pixels / (long_edge/2)``
+    so the displacement at the long half-edge is exactly ``pixels``. Normalising
+    by the long edge (max(W, H)) makes the fringe invariant to orientation and to
+    post-shoot 90° rotation — rotation swaps W and H but not their max — so a
+    portrait and a landscape framing of the same scene fringe identically, as a
+    real lens does. For a landscape frame the long edge IS the width, so existing
+    ca_pixels values are unchanged; only portrait/rotated frames are corrected.
     """
-    if image_width <= 0:
+    if long_edge <= 0:
         return 0.0
-    return float(pixels) / (float(image_width) / 2.0)
+    return float(pixels) / (float(long_edge) / 2.0)
 
 
 def pct(value: float) -> float:

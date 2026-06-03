@@ -496,7 +496,7 @@ class FlashbackProcessor:
         """
         stages = []
         if v.enable_chromatic_aberration and v.ca_pixels > 0:
-            ca_scale = ca_pixels_to_scale(v.ca_pixels, shape[1])
+            ca_scale = ca_pixels_to_scale(v.ca_pixels, max(shape[0], shape[1]))
             stages.append(lambda fr, s=ca_scale: gpu.ca_frame(fr, s))
         if (v.enable_edge_softness and v.edge_softness_strength_pct > 0
                 and v.edge_softness_sigma > 0):
@@ -841,7 +841,8 @@ class FlashbackProcessor:
                 img_display = resident_tail
             else:
                 if v.enable_chromatic_aberration and v.ca_pixels > 0:
-                    ca_scale = ca_pixels_to_scale(v.ca_pixels, img_display.shape[1])
+                    ca_scale = ca_pixels_to_scale(
+                        v.ca_pixels, max(img_display.shape[0], img_display.shape[1]))
                     img_display = apply_chromatic_aberration(img_display, ca_scale)
                 if (v.enable_edge_softness and v.edge_softness_strength_pct > 0
                         and v.edge_softness_sigma > 0):

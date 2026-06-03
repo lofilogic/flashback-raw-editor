@@ -369,7 +369,9 @@ def apply_bloom(image, strength=0.3, threshold=0.6, linear=False):
     luma_log = acescct_encode(luma_small)
     soft_mask = np.clip((luma_log - threshold) / max(0.01, 1.0 - threshold), 0.0, 1.0)
     bloom_src = small * soft_mask[:, :, np.newaxis]
-    sigma = max(2, bw // 5)
+    # Long downsampled edge so the glow size is orientation-invariant (matches
+    # gpu.bloom_frame; rotation swaps bw/bh but not their max).
+    sigma = max(2, max(bw, bh) // 5)
     blurred = gaussian_blur(bloom_src, sigma)
     bloom_layer = cv2.resize(blurred, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
     if linear:

@@ -873,7 +873,9 @@ class GPUPipeline:
         self._run2d(self._bloom_dm_pipeline, bg_dm, bw, bh)
 
         # Blur the small layer (same kernel as the per-op gaussian_blur).
-        sigma = max(2, bw // 5)
+        # Derive sigma from the long downsampled edge so the glow size is
+        # orientation-invariant (rotation swaps bw/bh but not their max).
+        sigma = max(2, max(bw, bh) // 5)
         blurred = self.blur_frame(Frame.from_gpu(small, small_shape, self), float(sigma))
         if blurred is None:
             return None
