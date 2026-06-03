@@ -12,7 +12,58 @@ from __future__ import annotations
 import numpy as np
 import cv2
 
-from .gpu import gpu, HAS_GPU
+from .gpu import gpu, HAS_GPU, Frame
+
+
+def run_resident(img: np.ndarray, stages) -> np.ndarray | None:
+    """Compose GPU-resident ``Frame -> Frame`` stages with a single upload and a
+    single readback.
+
+    ``stages`` is a sequence of callables taking and returning a Frame; the
+    image is uploaded once, each stage runs on the GPU without touching numpy,
+    and the result is read back once at the end. Returns None — so the caller
+    falls back to the CPU path — if the GPU is unavailable or any stage opts out
+    (returns None). Any GPU error is swallowed into a None fallback so a bad
+    driver can never break a render, only slow it.
+    """
+    if not HAS_GPU:
+        return None
+    try:
+        frame = Frame.from_cpu(img)
+        for stage in stages:
+            frame = stage(frame)
+            if frame is None:
+                return None
+        return frame.cpu()
+    except Exception:
+        return None
+
+
+# Below this the numpy BLAS matmul is as fast as the GPU path once the
+# upload+readback round-trip is counted (measured break-even at ~3 MP on M3, and
+# transfers cost more on discrete GPUs), so small/common frames skip the GPU to
+# avoid any chance of a load regression. The GPU only wins once the matmul itself
+# is large — i.e. high-megapixel (generic) raws.
+_GPU_MATMUL_MIN_PIXELS = 8_000_000
+
+
+def color_transform(img: np.ndarray, M: np.ndarray) -> np.ndarray:
+    """Per-pixel 3x3 colour-space transform, GPU or numpy. Equivalent to
+    ``(img.reshape(-1,3) @ M.T).reshape(img.shape)``; used for the load-time
+    raw -> ACEScg matmul. The GPU path is taken only for large frames (see
+    _GPU_MATMUL_MIN_PIXELS), where it beats numpy despite the transfer.
+    """
+    if HAS_GPU and img.size // 3 >= _GPU_MATMUL_MIN_PIXELS:
+        result = gpu.color_transform(img, M)
+        if result is not None:
+            return result
+    return (img.reshape(-1, 3) @ M.T).reshape(img.shape).astype(np.float32)
+
+
+def encode_then_lut(img: np.ndarray) -> np.ndarray | None:
+    """ACEScct-encode then apply the LUT as one resident chain (one upload, one
+    readback). Returns None if unavailable so the caller can use the CPU path."""
+    return run_resident(img, [gpu.encode_frame, gpu.lut_frame])
 
 # Rotation uses OpenCV — fast, correct, and rotation happens rarely
 def rotate_90_clockwise(img: np.ndarray) -> np.ndarray:

@@ -6,16 +6,22 @@ but linear-light effects (apply_bloom with linear=True, apply_halation) can
 return values >1 since they run before the display transform.
 
 Render-pipeline ordering (see processor._render):
-  bloom → vignette       (linear ACEScg)
-  CNR → ACEScct → LUT    (display transform)
-  CA → softness → grain → sharpen   (display sRGB, post-LUT)
+  vignette → bloom → CNR                      (linear ACEScg, pre-LUT)
+  ACEScct encode → LUT                         (display transform)
+  CA → edge-softness → softness → grain → sharpen   (display sRGB, post-LUT)
 
+At full res with a LUT active these all run as one GPU-resident chain (one
+upload/readback); these numpy functions are the oracle + no-GPU fallback.
 Halation is baked into the cached intermediate at load time (see
 processor.load_image) so it benefits both the live preview and export.
 """
 import numpy as np
 import cv2
 import time
+import logging
+
+log = logging.getLogger(__name__)
+_resident_halation_warned = False
 
 from .kernels import (
     apply_lut_gpu,
@@ -25,10 +31,12 @@ from .kernels import (
     gaussian_blur,
     acescct_encode,
 )
+from .gpu import gpu, HAS_GPU, Frame
 from .config import (
     _timing_print,
     HALATION_BLUR_RADIUS,
     SOFTNESS_SIGMA, SHARPEN_RADIUS,
+    cnr_sigma_color,
 )
 
 # =============================================================================
@@ -63,70 +71,87 @@ def apply_lut_fast(image, lut):
 # EFFECT FUNCTIONS
 # =============================================================================
 
-def apply_chromatic_aberration(image, strength=0.005, steps=4, blue_blur=0.0, zoom_blur=1.0):
-    """
-    Radial chromatic aberration via per-channel rotation-matrix scaling.
+CA_SPECTRAL_SAMPLES = 16
 
-    Runs on the post-LUT display-sRGB image (gamma-encoded), not linear.
-    Working in display space keeps the fringing visually localised to bright
-    edges the way a real lens behaves; doing it in linear would over-spread
-    highlights once the display curve is reapplied.
 
-    blue_blur: optional Gaussian sigma applied to the blue channel of the final result.
-    zoom_blur: multiplier on the global zoom-blur pass (1.0 = default).
+def _ca_band_weights(samples: int) -> np.ndarray:
+    """Per-channel spectral sensitivity for each spectral sample t in [0, 1].
+
+    Smooth Gaussian bands centred at t=0 (red), 0.5 (green), 1 (blue); the
+    caller normalises per channel so a neutral input stays neutral. Matches the
+    band() helper in ca_tex.wgsl. Returns an (samples, 3) float32 array.
     """
+    t = (np.linspace(0.0, 1.0, samples, dtype=np.float32) if samples > 1
+         else np.zeros(1, dtype=np.float32))
+    s2 = 2.0 * 0.25 * 0.25
+    return np.stack([
+        np.exp(-(t - 0.0) ** 2 / s2),
+        np.exp(-(t - 0.5) ** 2 / s2),
+        np.exp(-(t - 1.0) ** 2 / s2),
+    ], axis=1).astype(np.float32)
+
+
+def _bilinear_sample_edge(image, map_x, map_y):
+    """Bilinear sample with clamp-to-edge, matching ca_tex.wgsl's sample_edge.
+
+    True float bilinear (numpy), unlike cv2.remap which quantises the sub-pixel
+    fraction to 1/32 px and so drifts from the GPU at hard edges. Coords are in
+    pixel space; integer coords are texel centres.
+    """
+    h, w = image.shape[:2]
+    x = np.clip(map_x, 0.0, w - 1.0)
+    y = np.clip(map_y, 0.0, h - 1.0)
+    x0 = np.floor(x).astype(np.int32)
+    y0 = np.floor(y).astype(np.int32)
+    x1 = np.minimum(x0 + 1, w - 1)
+    y1 = np.minimum(y0 + 1, h - 1)
+    fx = (x - x0)[..., None]
+    fy = (y - y0)[..., None]
+    c00 = image[y0, x0]; c10 = image[y0, x1]
+    c01 = image[y1, x0]; c11 = image[y1, x1]
+    cx0 = c00 + (c10 - c00) * fx
+    cx1 = c01 + (c11 - c01) * fx
+    return cx0 + (cx1 - cx0) * fy
+
+
+def apply_chromatic_aberration(image, scale, samples=CA_SPECTRAL_SAMPLES):
+    """Spectral chromatic aberration — numpy oracle / no-GPU fallback for
+    gpu.ca_frame (the resident path the render pipeline normally takes).
+
+    Models lateral CA by integrating ``samples`` points across the spectrum,
+    each weighted by that band's RGB sensitivity and radially magnified by the
+    reciprocal 1/(1+scale*t): red (t=0) ~unshifted, blue (t=1) magnified outward
+    by (1+scale). This gives a smooth fringe that grows with radius and runs the
+    physically-correct direction (light->dark edge => blue). Runs on the post-LUT
+    display-sRGB image
+    (gamma-encoded), not linear, so the fringing stays localised to bright edges
+    the way real glass behaves. ``scale`` is ca_pixels_to_scale(ca_pixels, w).
+    """
+    if scale <= 0:
+        return image.astype(np.float32, copy=True)
     start_total = time.time()
 
     h, w = image.shape[:2]
-    center = (w / 2.0, h / 2.0)
+    cx, cy = w * 0.5, h * 0.5          # matches the GPU centre / cv2 convention
+    ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+    dx, dy = xs - cx, ys - cy
 
-    # --- PHASE 1: Color Splitting ---
-    r_acc = np.zeros((h, w), dtype=np.float32)
-    g_acc = np.zeros((h, w), dtype=np.float32)
-    b_acc = np.zeros((h, w), dtype=np.float32)
+    weights = _ca_band_weights(samples)
+    ts = (np.linspace(0.0, 1.0, samples, dtype=np.float32) if samples > 1
+          else np.zeros(1, dtype=np.float32))
 
-    for i in range(steps):
-        factor = i / max(1, steps - 1) if steps > 1 else 1.0
-
-        scale_r = 1.0
-        M_r = cv2.getRotationMatrix2D(center, 0, scale_r)
-        r_acc += cv2.warpAffine(image[:, :, 0], M_r, (w, h),
-                                flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-
-        scale_g = 1.0 + (strength/2 * factor)
-        M_g = cv2.getRotationMatrix2D(center, 0, scale_g)
-        g_acc += cv2.warpAffine(image[:, :, 1], M_g, (w, h),
-                                flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-
-        scale_b = 1.0 + (strength * factor)
-        M_b = cv2.getRotationMatrix2D(center, 0, scale_b)
-        b_acc += cv2.warpAffine(image[:, :, 2], M_b, (w, h),
-                                flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-
-    ca_result = np.empty_like(image, dtype=np.float32)
-    ca_result[:, :, 0] = r_acc / steps
-    ca_result[:, :, 1] = g_acc / steps
-    ca_result[:, :, 2] = b_acc / steps
-
-    # --- PHASE 2: Global Zoom Blur ---
-    zoom_acc = np.zeros_like(ca_result, dtype=np.float32)
-
-    for i in range(steps):
-        factor = i / max(1, steps - 1) if steps > 1 else 1.0
-        scale_z = 1.0 + (strength/6 * zoom_blur * factor)
-        M_z = cv2.getRotationMatrix2D(center, 0, scale_z)
-        zoom_acc += cv2.warpAffine(ca_result, M_z, (w, h),
-                                   flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-
-    final_result = zoom_acc / steps
-
-    if blue_blur > 0:
-        final_result[:, :, 2] = gaussian_blur(final_result[:, :, 2], blue_blur)
+    acc = np.zeros((h, w, 3), dtype=np.float32)
+    for t, wband in zip(ts, weights):
+        # Reciprocal magnification (matches ca_tex.wgsl and the legacy cv2
+        # inverse-matrix warp): blue samples inward -> content outward, so the
+        # fringe direction is physically correct (light->dark edge => blue).
+        sc = 1.0 / (1.0 + scale * t)
+        acc += _bilinear_sample_edge(image, cx + dx * sc, cy + dy * sc) * wband
+    result = (acc / weights.sum(axis=0)).astype(np.float32)
 
     total_time = time.time() - start_total
     _timing_print(f"    [Chromatic Aberration] Total: {total_time*1000:.2f}ms (display sRGB)")
-
-    return final_result
+    return result
 
 
 # ACEScg (AP1, D60) <-> XYZ_D60 matrices for Lab CNR round-trip.
@@ -186,9 +211,10 @@ def reduce_color_noise_chroma(image, sigma=0.7):
     d = max(5, int(sigma) * 2 + 3)
     if d % 2 == 0:
         d += 1
-    # sigmaColor in Lab units (a*/b* range ~±80): smooths noise-level variation
-    # (typically < 8 Lab units) while stopping at real colour edges (> 20 units).
-    sigma_color = 15.0
+    # sigmaColor in Lab units (a*/b* range ~±80), scaled with sigma so high
+    # settings denoise harder (see config.cnr_sigma_color); floor 15 keeps low
+    # settings edge-preserving.
+    sigma_color = cnr_sigma_color(sigma)
     lab[:, :, 1] = cv2.bilateralFilter(lab[:, :, 1], d, sigma_color, sigma)
     lab[:, :, 2] = cv2.bilateralFilter(lab[:, :, 2], d, sigma_color, sigma)
     return _lab_to_acescg(lab)
@@ -218,6 +244,27 @@ def apply_halation(img, threshold=0.65, blur_radius=HALATION_BLUR_RADIUS, streng
     start_total = time.time()
 
     img_f = img.astype(np.float32)
+
+    # Resident path: the whole two-pass halation runs on the GPU with one
+    # upload/readback instead of ~9 CPU<->GPU round-trips. Bit-identical to the
+    # per-op path below (validated max abs diff ~1e-7). Falls back on any GPU
+    # issue so a bad driver can only slow a render, never break it.
+    if HAS_GPU:
+        try:
+            res = gpu.halation_frame(Frame.from_cpu(img_f), threshold, blur_radius, strength)
+            if res is not None:
+                out = res.cpu()   # combine shader already clamps to >= 0
+                _timing_print(f"    [Halation] Total (resident): {(time.time()-start_total)*1000:.2f}ms")
+                return out
+        except Exception:
+            # Bit-exact per-op fallback below — a GPU/driver issue can only slow
+            # a render, never break it. Log the cause once so backend-specific
+            # failures (e.g. Vulkan vs Metal) are diagnosable instead of silent.
+            global _resident_halation_warned
+            if not _resident_halation_warned:
+                _resident_halation_warned = True
+                log.warning("⚠ resident halation failed; using per-op fallback", exc_info=True)
+
     gray = np.max(img_f, axis=2)
 
     # Pass 1 — regular highlights
@@ -240,6 +287,27 @@ def apply_halation(img, threshold=0.65, blur_radius=HALATION_BLUR_RADIUS, streng
 def apply_softness(image, sigma=SOFTNESS_SIGMA):
     """Subtle Gaussian blur for film-like softness."""
     return gaussian_blur(image, sigma)
+
+
+def apply_edge_softness(image, sigma, strength, start):
+    """Radial edge (corner) softness — numpy oracle / no-GPU fallback for
+    gpu.edge_softness_frame.
+
+    Emulates lens field curvature: a sharp centre that softens toward the
+    corners. Blends the image with a Gaussian-blurred copy by a weight that
+    grows from ``start`` (fraction of the corner radius) to 1.0 at the corners,
+    scaled by ``strength`` (0..1). Matches edge_softness_tex.wgsl.
+    """
+    if strength <= 0 or sigma <= 0:
+        return image.astype(np.float32, copy=True)
+    h, w = image.shape[:2]
+    blurred = gaussian_blur(image, sigma)
+    cx, cy = w * 0.5, h * 0.5
+    ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+    r_norm = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2) / max(np.hypot(cx, cy), 1e-6)
+    t = np.clip((r_norm - start) / max(1.0 - start, 1e-6), 0.0, 1.0)
+    w_blend = (t * t * (3.0 - 2.0 * t) * strength)[..., None]   # smoothstep * strength
+    return (image * (1.0 - w_blend) + blurred * w_blend).astype(np.float32)
 
 
 def apply_sharpen(image, strength=0.5, radius=SHARPEN_RADIUS):
@@ -268,7 +336,9 @@ def apply_vignette(image, strength=0.5, color_shift=0.05, feather=1.0):
     xx, yy = np.meshgrid(x, y)
     radius = np.sqrt(xx ** 2 + yy ** 2)
     r_norm = np.clip(radius / np.sqrt(2.0), 0.0, 1.0)
-    falloff = (0.5 * (1.0 + np.cos(np.pi * r_norm))).astype(np.float32)
+    # clamp the cosine base to >=0 before pow (matches vignette_tex.wgsl; guards
+    # against a fractional power of a tiny-negative corner value -> NaN).
+    falloff = np.maximum(0.5 * (1.0 + np.cos(np.pi * r_norm)), 0.0).astype(np.float32)
     if feather != 1.0:
         falloff = np.power(falloff, feather)
     dark = 1.0 - strength * (1.0 - falloff)
@@ -305,7 +375,9 @@ def apply_bloom(image, strength=0.3, threshold=0.6, linear=False):
     luma_log = acescct_encode(luma_small)
     soft_mask = np.clip((luma_log - threshold) / max(0.01, 1.0 - threshold), 0.0, 1.0)
     bloom_src = small * soft_mask[:, :, np.newaxis]
-    sigma = max(2, bw // 5)
+    # Long downsampled edge so the glow size is orientation-invariant (matches
+    # gpu.bloom_frame; rotation swaps bw/bh but not their max).
+    sigma = max(2, max(bw, bh) // 5)
     blurred = gaussian_blur(bloom_src, sigma)
     bloom_layer = cv2.resize(blurred, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
     if linear:

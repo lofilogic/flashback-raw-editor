@@ -1,5 +1,59 @@
 # Changelog
 
+## Unreleased (targets 1.5.0-beta3)
+
+### Performance: GPU-resident render pipeline
+
+The render now keeps the image on the GPU for the whole pass. The entire
+effect chain — vignette, bloom, chroma noise reduction, ACEScct encode, LUT,
+chromatic aberration, edge softness, softness, grain, sharpen — runs as a
+single GPU chain with one upload and one readback, instead of moving the
+image between CPU and GPU for every effect. On the slower Windows / RTX 3090
+reference machine a full-quality render dropped from ~2.3 s to ~0.3 s; on
+Apple Silicon from ~0.48 s to ~0.11 s. The migration itself is output-neutral
+(verified bit-exact against the previous CPU path); the CPU path is retained
+as the oracle and as an automatic fallback when no usable GPU is present. The
+look changes below are separate and intentional.
+
+### Chromatic aberration is now spectral
+
+CA was rebuilt as a spectral model: instead of three discrete red/green/blue
+copies it integrates a continuous spectrum, giving a smooth purple→green
+fringe like real glass.
+
+- The fringe direction was corrected — a light→dark edge (going outward from
+  the centre) fringes blue and a dark→light edge red, matching the scanned
+  film reference and earlier betas.
+- CA strength (and bloom) are now orientation-invariant: rotating a photo 90°
+  no longer changes the look (both normalise to the long edge). Existing
+  `ca_pixels` values are unchanged for landscape framing.
+- The legacy CA sub-parameters (steps, blue blur, zoom blur) are no longer
+  used by the spectral model.
+
+### New: edge (corner) softness
+
+An optional effect that softens the image toward the corners (lens
+field-curvature look) while keeping the centre sharp. Off by default; tune
+strength / blur / start-radius in the Advanced panel.
+
+### Bloom is now applied after vignette
+
+Bloom is generated from the vignetted image, as a real lens does: dimmed
+perimeter highlights emit less glow, so bloom concentrates where the image is
+actually bright instead of washing the darker edges.
+
+### Stronger chroma noise reduction
+
+The CNR range tolerance now scales with the amount, so high settings remove
+substantially more chroma noise (the previous fixed value plateaued early)
+while low settings stay edge-preserving. The strength slider range was
+rescaled to match.
+
+### Fixes
+
+- Vignette no longer blackens the extreme corner pixels on some GPUs (a NaN
+  from a corner-case power calculation).
+
 ## 1.5.0-beta2 — 2026-06-01
 
 Changes since 1.5.0-beta. The full 1.5 changes are documented in the

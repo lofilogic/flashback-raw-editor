@@ -8,8 +8,20 @@ from dataclasses import fields
 
 from core.config import (
     VibeConfig, ImageAdjustments, VIBE_PRESETS,
-    vibe_config_for, VIBE_FIELD_NAMES,
+    vibe_config_for, VIBE_FIELD_NAMES, ca_pixels_to_scale,
 )
+
+
+def test_ca_scale_is_orientation_invariant():
+    """CA strength must not change when the frame is rotated (W<->H swap), so a
+    portrait/rotated image fringes like its landscape counterpart. And for a
+    landscape frame the long edge IS the width, so legacy values are unchanged."""
+    W, H = 6000, 4000
+    landscape = ca_pixels_to_scale(8.0, max(W, H))
+    portrait  = ca_pixels_to_scale(8.0, max(H, W))
+    assert landscape == portrait
+    assert landscape == 8.0 / (W / 2.0)        # unchanged vs the old width-based value
+    assert ca_pixels_to_scale(8.0, 0) == 0.0   # degenerate guard
 
 
 # =============================================================================

@@ -88,29 +88,38 @@ PUSH_PULL_RANGE_EV = 2.0
 # the conversion helpers below; storage and UI both use these user-facing
 # numbers.
 CA_PIXELS = 5.0            # edge pixels of blue offset at the long edge of the rendered frame
+# Legacy CA params — UNUSED by the current spectral CA (gpu.ca_frame /
+# effects.apply_chromatic_aberration), which is driven solely by ca_pixels. Kept
+# so existing presets/saved projects/UI don't break; candidates for repurposing
+# or removal in a future cleanup.
 CA_STEPS = 4
 CA_BLUE_BLUR = 0.3         # px
-CA_ZOOM_BLUR_PCT = 100.0   # percent multiplier on the global zoom-blur pass inside CA
+CA_ZOOM_BLUR_PCT = 100.0   # percent
 HALATION_THRESHOLD_STOPS = 4.0   # EV above middle grey
 HALATION_BLUR_RADIUS = 4.0 # px
 HALATION_STRENGTH_PCT = 50.0
 SOFTNESS_SIGMA = 0.5       # px
+# Edge (corner) softness — a radial defocus that grows toward the frame corners,
+# emulating lens field curvature. Distinct from the global `softness` blur.
+EDGE_SOFTNESS_STRENGTH_PCT = 60.0   # 0–100 → max sharp→blur blend at the corners
+EDGE_SOFTNESS_SIGMA = 3.0           # px, blur radius of the soft copy
+EDGE_SOFTNESS_START_PCT = 40.0      # 0–100 → radius (as % of corner) where softness begins
 GRAIN_STRENGTH_PCT = 50.0
 GRAIN_TILE_SCALE = 0.8     # <1.0 makes grain finer (tiles render denser); >1.0 makes it chunkier.
 GRAIN_HIGHLIGHT_BIAS = 0.3 # 1.0 = grain biased to highlights, 0.0 = shadows, 0.5 = flat.
 SHARPEN_STRENGTH_PCT = 50.0
 SHARPEN_RADIUS = 1.0       # px
-CNR_AMOUNT_PCT = 40.0
+CNR_AMOUNT_PCT = 40.0      # sigma 8 at _CNR_SIGMA_MAX=20 (a touch under old "200%")
 VIGNETTE_STRENGTH_PCT = 50.0
 VIGNETTE_COLOR_PCT = 25.0
 VIGNETTE_CURVE = 0.0       # -100…+100, higher = more feathered (softer)
 BLOOM_STRENGTH_PCT = 30.0
-BLOOM_THRESHOLD_STOPS = 4.0      # EV above middle grey
+BLOOM_THRESHOLD_STOPS = 3.0      # EV above middle grey
 
 # Internal scalar maxima — the user-facing percent fields map 0–100 onto
 # 0–MAX. Keeping these explicit makes the migration buckets trivial to
 # write and makes the panel/pipeline agree on the same conversion.
-_CNR_SIGMA_MAX = 5.0
+_CNR_SIGMA_MAX = 20.0
 _VIGNETTE_COLOR_MAX = 0.2
 
 
@@ -121,17 +130,20 @@ _VIGNETTE_COLOR_MAX = 0.2
 # effect function actually consumes. The pipeline calls these at the
 # effect-function boundary in core/processor.py.
 
-def ca_pixels_to_scale(pixels: float, image_width: int) -> float:
-    """Edge-pixel offset at the long edge → blue-channel scale factor.
+def ca_pixels_to_scale(pixels: float, long_edge: int) -> float:
+    """Edge-pixel offset → CA radial scale factor, normalised by the LONG edge.
 
-    The CA warp scales the blue channel by (1 + s) at the outermost sample;
-    that displaces the corner by s * (image_width / 2) pixels. Inverting:
-    s = pixels / (image_width / 2). When the runtime frame is wider/narrower
-    than CA_REFERENCE_WIDTH the visual pixel offset stays constant.
+    CA samples are displaced radially by s * radius; ``s = pixels / (long_edge/2)``
+    so the displacement at the long half-edge is exactly ``pixels``. Normalising
+    by the long edge (max(W, H)) makes the fringe invariant to orientation and to
+    post-shoot 90° rotation — rotation swaps W and H but not their max — so a
+    portrait and a landscape framing of the same scene fringe identically, as a
+    real lens does. For a landscape frame the long edge IS the width, so existing
+    ca_pixels values are unchanged; only portrait/rotated frames are corrected.
     """
-    if image_width <= 0:
+    if long_edge <= 0:
         return 0.0
-    return float(pixels) / (float(image_width) / 2.0)
+    return float(pixels) / (float(long_edge) / 2.0)
 
 
 def pct(value: float) -> float:
@@ -151,6 +163,20 @@ def vignette_curve_to_power(curve: float) -> float:
 
 def cnr_pct_to_sigma(amount_pct: float) -> float:
     return pct(amount_pct) * _CNR_SIGMA_MAX
+
+
+def cnr_sigma_color(sigma: float) -> float:
+    """Bilateral range sigma for chroma NR, scaled with the spatial sigma.
+
+    A fixed range sigma capped the strength: the bilateral preserved chroma
+    variation near edges, so cranking the spatial sigma plateaued (it never
+    removed the last ~12% of chroma noise). Scaling the range tolerance with the
+    spatial sigma lets high settings approach a near-Gaussian chroma blur (much
+    stronger), while a floor of 15 keeps low settings edge-preserving (no colour
+    bleed across saturated boundaries). Single source of truth for both the
+    numpy/cv2 path and gpu.cnr_frame.
+    """
+    return max(15.0, float(sigma) * 3.0)
 
 
 def vignette_color_pct_to_shift(color_pct: float) -> float:
@@ -210,6 +236,7 @@ class VibeConfig:
     enable_halation: bool = True
     enable_chromatic_aberration: bool = True
     enable_softness: bool = True
+    enable_edge_softness: bool = False
     enable_grain: bool = True
     enable_sharpen: bool = True
     enable_cnr: bool = True
@@ -232,6 +259,9 @@ class VibeConfig:
     ca_blue_blur: float = CA_BLUE_BLUR                          # px
     ca_zoom_blur_pct: float = CA_ZOOM_BLUR_PCT                  # 0–500
     softness_sigma: float = SOFTNESS_SIGMA                      # px
+    edge_softness_strength_pct: float = EDGE_SOFTNESS_STRENGTH_PCT  # 0–100
+    edge_softness_sigma: float = EDGE_SOFTNESS_SIGMA            # px
+    edge_softness_start_pct: float = EDGE_SOFTNESS_START_PCT    # 0–100 (% of corner radius)
     grain_strength_pct: float = GRAIN_STRENGTH_PCT              # 0–200
     sharpen_strength_pct: float = SHARPEN_STRENGTH_PCT          # 0–500
     sharpen_radius: float = SHARPEN_RADIUS                      # px
@@ -336,10 +366,9 @@ class ImageAdjustments:
 # VIBE PRESETS — recipes that seed a VibeConfig
 # =============================================================================
 
-# Preset values are now in user-facing units. The conversions from the
-# pre-1.5 recipe are: ca_pixels = old_ca_strength * (CA_REFERENCE_WIDTH / 2),
-# percents = old × (100 / old_internal_max), vignette_curve = -50 * log2(power)
-# (so the previous feather=0.4 / "softer" maps to curve ≈ +66).
+# Preset values are in user-facing units (see the conversion helpers above).
+# vignette_curve = -50 * log2(power), so the previous feather=0.4 / "softer"
+# maps to curve ≈ +66.
 # =============================================================================
 # LUT REGISTRY — factory id → bundled file (relative to the install root,
 # resolved through resource_path at load time so PyInstaller bundles and
@@ -388,20 +417,16 @@ def resolve_lut_ref(ref: str):
     return None, None
 
 
-# `ca_pixels` is corner-pixel displacement on the *rendered* frame. The
-# pipeline develops raws with half_size=True, so the rendered width is
-# half the sensor width (2072 px for the ONE35 V2). The legacy `ca_strength`
-# values (a scale factor) produced 5–10 px of displacement at that width,
-# which is the visual baseline these presets are calibrated against.
+# `ca_pixels` is the blue fringe offset in pixels at the long half-edge of the
+# rendered frame (see ca_pixels_to_scale — normalised by the long edge so it's
+# orientation-invariant). The pipeline develops raws with half_size=True, so the
+# rendered width is half the sensor width (2072 px for the ONE35 V2); 2–8 px is
+# the visual baseline these presets are calibrated against.
 #
-# `ca_zoom_blur_pct` is held at 100% across all presets to match the look
-# shipped through 1.5.0-beta and earlier. The CA pass was previously
-# called without a zoom_blur argument, so higher preset values had no
-# visible effect; restoring them now would change the look of disposable
-# and flashback_classic_v1 substantially. They remain available as a
-# user-facing slider in the Advanced (CA) section.
+# `ca_zoom_blur_pct` in the presets is legacy/inert — the spectral CA is driven
+# only by ca_pixels (the radial spectral spread subsumes the old zoom-blur pass).
 VIBE_PRESETS = {
-    'disposable':           {'enable_ca': True,  'ca_pixels': 8.0, 'ca_zoom_blur_pct': 150.0, 'softness': 0.3, 'sharpness_pct': 200.0, 'sharpen_radius': 0.5, 'grain_pct': 120.0, 'vignette_pct': 10.0, 'vignette_curve':  66.0, 'bloom_pct': 10.0, 'lut': 'factory:disposable'},
+    'disposable':           {'enable_ca': True,  'ca_pixels': 8.0, 'ca_zoom_blur_pct': 150.0, 'softness': 0.3, 'sharpness_pct': 200.0, 'sharpen_radius': 0.5, 'grain_pct': 120.0, 'vignette_pct': 10.0, 'vignette_curve':  66.0, 'bloom_pct': 15.0, 'lut': 'factory:disposable'},
     'flashback_classic_v1': {'enable_ca': True,  'ca_pixels':  5.0, 'ca_zoom_blur_pct': 200.0, 'softness': 0.3, 'sharpness_pct':  80.0, 'sharpen_radius': 0.5, 'grain_pct': 200.0, 'vignette_pct': 10.0, 'vignette_curve':  66.0, 'bloom_pct':  3.0, 'lut': 'factory:flashback_classic_v1', 'base_exposure_offset_v2': 0.0},
     'point_shoot':          {'enable_ca': True,  'ca_pixels':  2.0, 'ca_zoom_blur_pct': 100.0, 'softness': 0.3, 'sharpness_pct':  50.0, 'sharpen_radius': 1.0, 'grain_pct':  80.0, 'vignette_pct': 10.0, 'vignette_curve':   0.0, 'bloom_pct': 10.0, 'lut': 'factory:point_shoot'},
     'rangefinder':          {'enable_ca': False, 'ca_pixels':  0.0, 'ca_zoom_blur_pct': 100.0, 'softness': 0.1, 'sharpness_pct':  80.0, 'sharpen_radius': 1.0, 'grain_pct':  50.0, 'vignette_pct':  5.0, 'vignette_curve':   0.0, 'bloom_pct':  5.0, 'lut': 'factory:rangefinder'},
