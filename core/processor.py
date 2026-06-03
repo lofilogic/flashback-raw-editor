@@ -485,6 +485,31 @@ class FlashbackProcessor:
                               highlight_bias=highlight_bias)
         return out
 
+    def _resident_pre_lut_stages(self, v, lut_path):
+        """Build the pre-LUT resident stages (vignette -> bloom -> CNR) plus
+        matching CPU fallback ops, in render order. Vignette precedes bloom so
+        glow is generated from the vignetted image; CNR is gated to the LUT path
+        (legacy behaviour). Returns (stages, cpu_ops) where cpu_ops[i] is an
+        img->img callable mirroring stages[i] for the no-GPU fallback.
+        """
+        stages, cpu_ops = [], []
+        if v.enable_vignette and v.vignette_strength_pct > 0:
+            va = (pct(v.vignette_strength_pct),
+                  vignette_color_pct_to_shift(v.vignette_color_pct),
+                  vignette_curve_to_power(v.vignette_curve))
+            stages.append(lambda fr, a=va: gpu.vignette_frame(fr, *a))
+            cpu_ops.append(lambda im, a=va: apply_vignette(im, *a))
+        if v.enable_bloom and v.bloom_strength_pct > 0:
+            ba = (pct(v.bloom_strength_pct),
+                  stops_above_mid_grey_to_acescct(v.bloom_threshold_stops))
+            stages.append(lambda fr, a=ba: gpu.bloom_frame(fr, *a))
+            cpu_ops.append(lambda im, a=ba: apply_bloom(im, *a, linear=True))
+        if lut_path and v.enable_cnr and v.cnr_amount_pct > 0:
+            cs = cnr_pct_to_sigma(v.cnr_amount_pct)
+            stages.append(lambda fr, s=cs: gpu.cnr_frame(fr, s))
+            cpu_ops.append(lambda im, s=cs: reduce_color_noise_chroma(im, sigma=s))
+        return stages, cpu_ops
+
     def _resident_post_lut_stages(self, v, shape, grain_driver):
         """Build the post-LUT resident tail (CA -> softness -> grain -> sharpen)
         as a list of Frame->Frame stages, matching the per-op order and
@@ -750,121 +775,99 @@ class FlashbackProcessor:
         if not np.allclose(gain, 1.0):
             img = img * gain
 
-        # Pre-LUT effects (linear ACEScg): vignette -> bloom -> CNR, fused into
-        # one resident chain (single upload/readback). Vignette precedes bloom so
-        # bloom is generated from the already-vignetted (illumination-falloff)
-        # image, as a real lens does — dimmed perimeter highlights emit less glow,
-        # so bloom concentrates where the image is actually bright instead of
-        # washing the darker edges. CNR is gated to the LUT path to match the
-        # legacy ordering. Per-op fallback on a GPU miss. (downscale previews skip
-        # these, as before.)
-        if not downscale:
-            bloom_on = v.enable_bloom and v.bloom_strength_pct > 0
-            vig_on = v.enable_vignette and v.vignette_strength_pct > 0
-            cnr_on = (v.enable_cnr and v.cnr_amount_pct > 0
-                      and v.enable_lut and self.lut is not None)
-            if bloom_on or vig_on or cnr_on:
-                pre, parts = [], []
-                if vig_on:
-                    vig_args = (pct(v.vignette_strength_pct),
-                                vignette_color_pct_to_shift(v.vignette_color_pct),
-                                vignette_curve_to_power(v.vignette_curve))
-                    pre.append(lambda fr, a=vig_args: gpu.vignette_frame(fr, *a)); parts.append("vignette")
-                if bloom_on:
-                    b_args = (pct(v.bloom_strength_pct),
-                              stops_above_mid_grey_to_acescct(v.bloom_threshold_stops))
-                    pre.append(lambda fr, a=b_args: gpu.bloom_frame(fr, *a)); parts.append("bloom")
-                if cnr_on:
-                    cnr_sigma = cnr_pct_to_sigma(v.cnr_amount_pct)
-                    pre.append(lambda fr, s=cnr_sigma: gpu.cnr_frame(fr, s)); parts.append("CNR")
-                with _timed("+".join(parts) + " (resident)"):
-                    res = run_resident(img, pre)
-                if res is not None:
-                    img = res
-                else:
-                    if vig_on:
-                        img = apply_vignette(img, *vig_args)
-                    if bloom_on:
-                        img = apply_bloom(img, *b_args, linear=True)
-                    if cnr_on:
-                        img = reduce_color_noise_chroma(img, sigma=cnr_sigma)
-
         grain_driver = f * rev_ev + push_pull_ev
-        tail_done = False
-        # Resident post-LUT tail (softness -> grain -> sharpen), built once and
-        # shared by the fused chain and the CA path below. grain_layer is also
-        # reused by the per-op fallback, so one grain layer is generated per
-        # render regardless of which path runs.
+        lut_path = v.enable_lut and self.lut is not None
+
+        # Resident stage lists (full-res only; downscale previews skip effects).
+        # Pre-LUT order is vignette -> bloom -> CNR: bloom is generated from the
+        # already-vignetted (illumination-falloff) image, as a real lens does, so
+        # dimmed perimeter highlights emit less glow and bloom concentrates where
+        # the image is actually bright.
+        pre_stages, pre_cpu = (([], []) if downscale
+                               else self._resident_pre_lut_stages(v, lut_path))
         post_tail, grain_layer = (([], None) if downscale
                                   else self._resident_post_lut_stages(v, img.shape, grain_driver))
 
-        if v.enable_lut and self.lut is not None:
-            # CNR already applied in the pre-LUT resident chain above.
-            img_max = np.maximum(img, 1e-10)
+        img_display = None
+        fully_fused = False
 
-            img_display = None
-            # Fuse the entire back half — ACEScct-encode -> LUT -> CA -> softness
-            # -> grain -> sharpen — into one resident chain (single upload, single
-            # readback). Any GPU miss returns None -> the per-op fallback below.
-            if not downscale:
+        # Grand fusion: when a LUT is active, run the ENTIRE render — vignette,
+        # bloom, CNR, ACEScct-encode, LUT, CA, edge-softness, softness, grain,
+        # sharpen — as one resident chain with a single upload and single
+        # readback. The numpy max(img,1e-10) the per-op path puts before encode is
+        # unnecessary here: the encode shader already clamps to 1e-10. Any GPU
+        # miss returns None and the per-op pipeline below takes over unchanged.
+        if not downscale and lut_path:
+            with _timed("full render (resident)"):
+                img_display = run_resident(
+                    img, [*pre_stages, gpu.encode_frame, gpu.lut_frame, *post_tail])
+            fully_fused = img_display is not None
+
+        if not fully_fused:
+            # ---- per-op pipeline (no-GPU fallback / downscale preview / non-LUT) ----
+            tail_done = False
+            if pre_stages:
+                with _timed("pre-LUT (resident)"):
+                    res = run_resident(img, pre_stages)
+                if res is not None:
+                    img = res
+                else:
+                    for op in pre_cpu:
+                        img = op(img)
+
+            if lut_path:
+                img_max = np.maximum(img, 1e-10)
                 with _timed("encode+LUT+tail (resident)"):
                     img_display = run_resident(
                         img_max, [gpu.encode_frame, gpu.lut_frame, *post_tail])
                 tail_done = img_display is not None
-
-            if img_display is None:
-                # Resident encode->LUT (single upload/readback), falling back to
-                # the CPU encode + LUT when no GPU/LUT is available.
-                with _timed("encode+LUT (resident)"):
-                    img_display = encode_then_lut(img_max)
                 if img_display is None:
-                    with _timed("ACEScct encode"):
-                        img_acescct = acescct_encode(img_max)
-                    try:
-                        img_display = apply_lut_fast(img_acescct, self.lut)
-                    except Exception as e:
-                        log.error("[processor] LUT error: %s", e)
-                        img_display = np.clip(img_acescct, 0, 1)
-        else:
-            flat     = img.reshape(-1, 3)
-            prophoto = (flat @ ACESCG_TO_PROPHOTO).reshape(img.shape)
-            prophoto = _apply_tone_curve(np.clip(prophoto, 0.0, 1.0))
-            lin_srgb = (prophoto.reshape(-1, 3) @ PROPHOTO_TO_LINSRGB).reshape(prophoto.shape)
-            img_display = _srgb_oetf(np.clip(lin_srgb, 0.0, 1.0))
-
-        # Post-LUT tail. Skipped when the fused chain already ran it (tail_done);
-        # reached for the non-LUT display path, or as the no-GPU fallback. Try
-        # the resident tail (CA -> softness -> grain -> sharpen) as one sub-chain
-        # first, then fall back to the per-op CPU stages on a GPU miss.
-        if not downscale and not tail_done:
-            resident_tail = None
-            if post_tail:
-                with _timed("tail (resident)"):
-                    resident_tail = run_resident(img_display, post_tail)
-            if resident_tail is not None:
-                img_display = resident_tail
+                    with _timed("encode+LUT (resident)"):
+                        img_display = encode_then_lut(img_max)
+                    if img_display is None:
+                        with _timed("ACEScct encode"):
+                            img_acescct = acescct_encode(img_max)
+                        try:
+                            img_display = apply_lut_fast(img_acescct, self.lut)
+                        except Exception as e:
+                            log.error("[processor] LUT error: %s", e)
+                            img_display = np.clip(img_acescct, 0, 1)
             else:
-                if v.enable_chromatic_aberration and v.ca_pixels > 0:
-                    ca_scale = ca_pixels_to_scale(
-                        v.ca_pixels, max(img_display.shape[0], img_display.shape[1]))
-                    img_display = apply_chromatic_aberration(img_display, ca_scale)
-                if (v.enable_edge_softness and v.edge_softness_strength_pct > 0
-                        and v.edge_softness_sigma > 0):
-                    img_display = apply_edge_softness(
-                        img_display, v.edge_softness_sigma,
-                        pct(v.edge_softness_strength_pct), pct(v.edge_softness_start_pct))
-                if v.enable_softness and v.softness_sigma > 0:
-                    with _timed("softness"):
-                        img_display = apply_softness(img_display, v.softness_sigma)
-                if v.enable_grain and v.grain_strength_pct > 0:
-                    img_display = self._apply_grain(
-                        img_display, pct(v.grain_strength_pct),
-                        highlight_bias=self._grain_highlight_bias(grain_driver),
-                        grain_layer=grain_layer)
-                if v.enable_sharpen and v.sharpen_strength_pct > 0:
-                    with _timed("sharpen"):
-                        img_display = apply_sharpen(
-                            img_display, pct(v.sharpen_strength_pct), v.sharpen_radius)
+                flat     = img.reshape(-1, 3)
+                prophoto = (flat @ ACESCG_TO_PROPHOTO).reshape(img.shape)
+                prophoto = _apply_tone_curve(np.clip(prophoto, 0.0, 1.0))
+                lin_srgb = (prophoto.reshape(-1, 3) @ PROPHOTO_TO_LINSRGB).reshape(prophoto.shape)
+                img_display = _srgb_oetf(np.clip(lin_srgb, 0.0, 1.0))
+
+            # Post-LUT tail (CA -> edge-softness -> softness -> grain -> sharpen):
+            # one resident sub-chain, else per-op. Skipped when an upstream chain
+            # already ran it (tail_done) or on the downscale preview.
+            if not downscale and not tail_done:
+                resident_tail = run_resident(img_display, post_tail) if post_tail else None
+                if resident_tail is not None:
+                    img_display = resident_tail
+                else:
+                    if v.enable_chromatic_aberration and v.ca_pixels > 0:
+                        ca_scale = ca_pixels_to_scale(
+                            v.ca_pixels, max(img_display.shape[0], img_display.shape[1]))
+                        img_display = apply_chromatic_aberration(img_display, ca_scale)
+                    if (v.enable_edge_softness and v.edge_softness_strength_pct > 0
+                            and v.edge_softness_sigma > 0):
+                        img_display = apply_edge_softness(
+                            img_display, v.edge_softness_sigma,
+                            pct(v.edge_softness_strength_pct), pct(v.edge_softness_start_pct))
+                    if v.enable_softness and v.softness_sigma > 0:
+                        with _timed("softness"):
+                            img_display = apply_softness(img_display, v.softness_sigma)
+                    if v.enable_grain and v.grain_strength_pct > 0:
+                        img_display = self._apply_grain(
+                            img_display, pct(v.grain_strength_pct),
+                            highlight_bias=self._grain_highlight_bias(grain_driver),
+                            grain_layer=grain_layer)
+                    if v.enable_sharpen and v.sharpen_strength_pct > 0:
+                        with _timed("sharpen"):
+                            img_display = apply_sharpen(
+                                img_display, pct(v.sharpen_strength_pct), v.sharpen_radius)
 
         post_gain = 2.0 ** (-pre_lut_ev)
         if not np.isclose(post_gain, 1.0):
