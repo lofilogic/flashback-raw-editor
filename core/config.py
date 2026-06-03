@@ -88,9 +88,13 @@ PUSH_PULL_RANGE_EV = 2.0
 # the conversion helpers below; storage and UI both use these user-facing
 # numbers.
 CA_PIXELS = 5.0            # edge pixels of blue offset at the long edge of the rendered frame
+# Legacy CA params — UNUSED by the current spectral CA (gpu.ca_frame /
+# effects.apply_chromatic_aberration), which is driven solely by ca_pixels. Kept
+# so existing presets/saved projects/UI don't break; candidates for repurposing
+# or removal in a future cleanup.
 CA_STEPS = 4
 CA_BLUE_BLUR = 0.3         # px
-CA_ZOOM_BLUR_PCT = 100.0   # percent multiplier on the global zoom-blur pass inside CA
+CA_ZOOM_BLUR_PCT = 100.0   # percent
 HALATION_THRESHOLD_STOPS = 4.0   # EV above middle grey
 HALATION_BLUR_RADIUS = 4.0 # px
 HALATION_STRENGTH_PCT = 50.0
@@ -362,10 +366,9 @@ class ImageAdjustments:
 # VIBE PRESETS — recipes that seed a VibeConfig
 # =============================================================================
 
-# Preset values are now in user-facing units. The conversions from the
-# pre-1.5 recipe are: ca_pixels = old_ca_strength * (CA_REFERENCE_WIDTH / 2),
-# percents = old × (100 / old_internal_max), vignette_curve = -50 * log2(power)
-# (so the previous feather=0.4 / "softer" maps to curve ≈ +66).
+# Preset values are in user-facing units (see the conversion helpers above).
+# vignette_curve = -50 * log2(power), so the previous feather=0.4 / "softer"
+# maps to curve ≈ +66.
 # =============================================================================
 # LUT REGISTRY — factory id → bundled file (relative to the install root,
 # resolved through resource_path at load time so PyInstaller bundles and
@@ -414,18 +417,14 @@ def resolve_lut_ref(ref: str):
     return None, None
 
 
-# `ca_pixels` is corner-pixel displacement on the *rendered* frame. The
-# pipeline develops raws with half_size=True, so the rendered width is
-# half the sensor width (2072 px for the ONE35 V2). The legacy `ca_strength`
-# values (a scale factor) produced 5–10 px of displacement at that width,
-# which is the visual baseline these presets are calibrated against.
+# `ca_pixels` is the blue fringe offset in pixels at the long half-edge of the
+# rendered frame (see ca_pixels_to_scale — normalised by the long edge so it's
+# orientation-invariant). The pipeline develops raws with half_size=True, so the
+# rendered width is half the sensor width (2072 px for the ONE35 V2); 2–8 px is
+# the visual baseline these presets are calibrated against.
 #
-# `ca_zoom_blur_pct` is held at 100% across all presets to match the look
-# shipped through 1.5.0-beta and earlier. The CA pass was previously
-# called without a zoom_blur argument, so higher preset values had no
-# visible effect; restoring them now would change the look of disposable
-# and flashback_classic_v1 substantially. They remain available as a
-# user-facing slider in the Advanced (CA) section.
+# `ca_zoom_blur_pct` in the presets is legacy/inert — the spectral CA is driven
+# only by ca_pixels (the radial spectral spread subsumes the old zoom-blur pass).
 VIBE_PRESETS = {
     'disposable':           {'enable_ca': True,  'ca_pixels': 8.0, 'ca_zoom_blur_pct': 150.0, 'softness': 0.3, 'sharpness_pct': 200.0, 'sharpen_radius': 0.5, 'grain_pct': 120.0, 'vignette_pct': 10.0, 'vignette_curve':  66.0, 'bloom_pct': 15.0, 'lut': 'factory:disposable'},
     'flashback_classic_v1': {'enable_ca': True,  'ca_pixels':  5.0, 'ca_zoom_blur_pct': 200.0, 'softness': 0.3, 'sharpness_pct':  80.0, 'sharpen_radius': 0.5, 'grain_pct': 200.0, 'vignette_pct': 10.0, 'vignette_curve':  66.0, 'bloom_pct':  3.0, 'lut': 'factory:flashback_classic_v1', 'base_exposure_offset_v2': 0.0},

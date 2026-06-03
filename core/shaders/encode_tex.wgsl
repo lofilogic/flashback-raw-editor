@@ -1,4 +1,4 @@
-// ACEScct linear -> log encode, texture I/O (rgba16float).
+// ACEScct linear -> log encode, texture I/O (rgba32float).
 // Resident-pipeline twin of acescct.wgsl `main_encode`: identical math, but
 // reads/writes 2D textures instead of a flat storage buffer so the image can
 // stay GPU-resident between stages. Input is clamped to >= 1e-10 to match the

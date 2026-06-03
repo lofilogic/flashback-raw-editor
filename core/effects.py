@@ -6,10 +6,12 @@ but linear-light effects (apply_bloom with linear=True, apply_halation) can
 return values >1 since they run before the display transform.
 
 Render-pipeline ordering (see processor._render):
-  bloom → vignette       (linear ACEScg)
-  CNR → ACEScct → LUT    (display transform)
-  CA → softness → grain → sharpen   (display sRGB, post-LUT)
+  vignette → bloom → CNR                      (linear ACEScg, pre-LUT)
+  ACEScct encode → LUT                         (display transform)
+  CA → edge-softness → softness → grain → sharpen   (display sRGB, post-LUT)
 
+At full res with a LUT active these all run as one GPU-resident chain (one
+upload/readback); these numpy functions are the oracle + no-GPU fallback.
 Halation is baked into the cached intermediate at load time (see
 processor.load_image) so it benefits both the live preview and export.
 """

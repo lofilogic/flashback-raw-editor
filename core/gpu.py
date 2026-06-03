@@ -475,7 +475,7 @@ class GPUPipeline:
         return result.reshape(shape)
 
     # ------------------------------------------------------------------
-    # Texture-resident image transfer (rgba16float working space)
+    # Texture-resident image transfer (rgba32float working space)
     # ------------------------------------------------------------------
     #
     # The resident render image is an rgba32float 2D texture. f32 (not f16) is
@@ -1258,9 +1258,10 @@ class Frame:
     """Render-scoped image handle that lazily lives on the CPU or the GPU.
 
     Holds one image in (H, W, 3) layout. The CPU side is float32; the GPU side
-    is an rgba16float 2D texture (the resident render representation). Making a
-    stage GPU-resident changes only *where* the pixels live and trades exact
-    f32 for perceptually-transparent half-float — never the visible result.
+    is an rgba32float 2D texture (the resident render representation, full f32 —
+    see the _TEX_FORMAT note for why f32 not f16 here). Making a stage
+    GPU-resident changes only *where* the pixels live, not the values, so a
+    resident round-trip is lossless against the f32 CPU oracle.
 
     The "truth" is on whichever side last wrote it. ``cpu()`` and ``gpu()``
     materialise the other side on demand and cache it, so a CPU<->GPU transfer
@@ -1310,7 +1311,7 @@ class Frame:
         return self._cpu
 
     def gpu(self):
-        """Return the rgba16float texture, uploading from the CPU only if needed."""
+        """Return the rgba32float texture, uploading from the CPU only if needed."""
         if self._tex is None:
             self._tex = self._p._upload_tex(self._cpu)
         return self._tex
