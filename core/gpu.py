@@ -85,6 +85,8 @@ class GPUPipeline:
         self._cnr_bil_pipeline = None
         self._cnr_io_bg_layout = None
         self._cnr_bil_bg_layout = None
+        self._colormat_pipeline = None     # buffer 3x3 colour transform (load-time)
+        self._colormat_bg_layout = None
         self._lut_buf = None   # persistent GPU LUT buffer
         self._lut_size = 0
 
@@ -394,6 +396,17 @@ class GPUPipeline:
         self._cnr_bil_pipeline = dev.create_compute_pipeline(
             layout=dev.create_pipeline_layout(bind_group_layouts=[self._cnr_bil_bg_layout]),
             compute={'module': cnr_mod, 'entry_point': 'main_bilateral'})
+
+        # --- Color-space matrix transform (buffer, load-time raw->ACEScg) ---
+        colormat_mod = dev.create_shader_module(code=_read_shader('color_matmul.wgsl'))
+        self._colormat_bg_layout = dev.create_bind_group_layout(entries=[
+            {'binding': 0, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.read_only_storage}},
+            {'binding': 1, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.storage}},
+            {'binding': 2, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.uniform}},
+        ])
+        self._colormat_pipeline = dev.create_compute_pipeline(
+            layout=dev.create_pipeline_layout(bind_group_layouts=[self._colormat_bg_layout]),
+            compute={'module': colormat_mod, 'entry_point': 'main'})
 
     # ------------------------------------------------------------------
     # LUT management
@@ -990,6 +1003,39 @@ class GPUPipeline:
         result = np.frombuffer(buf_stg.read_mapped(), dtype=np.float32).copy()
         buf_stg.unmap()
         return result.reshape(h, w, 3)
+
+    def color_transform(self, img: np.ndarray, M: np.ndarray) -> np.ndarray | None:
+        """Per-pixel 3x3 colour-space transform: out = (img.reshape(-1,3) @ M.T).
+
+        Load-time helper for raw -> ACEScg. Returns None if the GPU is
+        unavailable (caller falls back to numpy). M is a (3, 3) float array.
+        """
+        if not self._init():
+            return None
+        shape = img.shape
+        flat = np.ascontiguousarray(img, dtype=np.float32).ravel()
+        n = flat.size
+
+        buf_in  = self._upload(flat)
+        buf_out = self._make_output(n)
+        buf_stg = self._make_staging(n)
+        rows = np.zeros((3, 4), dtype=np.float32)
+        rows[:, :3] = np.asarray(M, dtype=np.float32)
+        uni = self._uniform(rows.tobytes())
+
+        bg = self._device.create_bind_group(layout=self._colormat_bg_layout, entries=[
+            {'binding': 0, 'resource': {'buffer': buf_in,  'offset': 0, 'size': buf_in.size}},
+            {'binding': 1, 'resource': {'buffer': buf_out, 'offset': 0, 'size': buf_out.size}},
+            {'binding': 2, 'resource': {'buffer': uni,     'offset': 0, 'size': uni.size}},
+        ])
+        enc = self._dispatch(self._colormat_pipeline, bg, n // 3, workgroup_size=256)
+        enc.copy_buffer_to_buffer(buf_out, 0, buf_stg, 0, n * 4)
+        self._device.queue.submit([enc.finish()])
+
+        buf_stg.map_sync(mode=wgpu.MapMode.READ)
+        result = np.frombuffer(buf_stg.read_mapped(), dtype=np.float32).copy()
+        buf_stg.unmap()
+        return result.reshape(shape)
 
     def acescct_decode(self, img: np.ndarray) -> np.ndarray:
         """ACEScct → linear. Operates in-place semantics (returns new array)."""

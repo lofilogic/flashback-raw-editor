@@ -46,7 +46,8 @@ from .config import (
     resolve_lut_ref,
     _timing_print,
 )
-from .kernels import acescct_encode, apply_grain, encode_then_lut, run_resident
+from .kernels import (acescct_encode, apply_grain, encode_then_lut, run_resident,
+                      color_transform)
 from .gpu import gpu
 from .auto_exposure_reverse import compute_reverse_gain
 from .effects import (
@@ -615,7 +616,7 @@ class FlashbackProcessor:
                           f"shape={rgb.shape}")
 
         t0 = time.time()
-        acescg = (rgb.reshape(-1, 3) @ LINSRGB_TO_ACESCG.T).reshape(rgb.shape)
+        acescg = color_transform(rgb, LINSRGB_TO_ACESCG)
         _timing_print(f"  linSRGB->ACEScg: {(time.time()-t0)*1000:6.2f} ms  "
                       f"range=[{acescg.min():.4f},{acescg.max():.4f}]")
         return acescg
@@ -708,9 +709,9 @@ class FlashbackProcessor:
                 t0 = time.time()
                 if self.enable_highlight_recovery:
                     rgb_wb = _recover_highlights(rgb, ASN_D50)
-                    acescg = (rgb_wb.reshape(-1, 3) @ FM1_WB_TO_ACESCG.T).reshape(rgb_wb.shape)
+                    acescg = color_transform(rgb_wb, FM1_WB_TO_ACESCG)
                 else:
-                    acescg = (rgb.reshape(-1, 3) @ RAW_TO_ACESCG.T).reshape(rgb.shape)
+                    acescg = color_transform(rgb, RAW_TO_ACESCG)
                 _timing_print(f"  raw->ACEScg: {(time.time()-t0)*1000:6.2f} ms  "
                               f"range=[{acescg.min():.4f},{acescg.max():.4f}]")
 

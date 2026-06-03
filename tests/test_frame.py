@@ -237,6 +237,19 @@ _AP1_LUMA = np.array([0.2722, 0.6741, 0.0537], dtype=np.float32)
 
 
 @requires_gpu
+def test_color_transform_matches_numpy():
+    """GPU 3x3 colour transform matches (img.reshape(-1,3) @ M.T)."""
+    rng = np.random.default_rng(31)
+    a = rng.random((37, 53, 3), dtype=np.float32) * 2.0 - 0.3   # incl. negatives
+    M = np.array([[0.53, 0.22, 0.21],
+                  [0.09, 0.99, -0.07],
+                  [0.05, -0.37, 1.15]], dtype=np.float32)
+    ref = (a.reshape(-1, 3) @ M.T).reshape(a.shape)
+    cand = gpu.color_transform(a, M)
+    assert max_abs_err(ref, cand) <= 1e-5
+
+
+@requires_gpu
 def test_cnr_frame_preserves_luma():
     """CNR filters only a*/b*, so AP1 luminance must be preserved (the whole
     point of working in Lab — chroma denoise that can't shift luma)."""

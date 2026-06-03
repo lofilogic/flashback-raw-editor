@@ -39,6 +39,18 @@ def run_resident(img: np.ndarray, stages) -> np.ndarray | None:
         return None
 
 
+def color_transform(img: np.ndarray, M: np.ndarray) -> np.ndarray:
+    """Per-pixel 3x3 colour-space transform, GPU or numpy. Equivalent to
+    ``(img.reshape(-1,3) @ M.T).reshape(img.shape)``; used for the load-time
+    raw -> ACEScg matmul, where the GPU path helps large (high-megapixel) frames.
+    """
+    if HAS_GPU:
+        result = gpu.color_transform(img, M)
+        if result is not None:
+            return result
+    return (img.reshape(-1, 3) @ M.T).reshape(img.shape).astype(np.float32)
+
+
 def encode_then_lut(img: np.ndarray) -> np.ndarray | None:
     """ACEScct-encode then apply the LUT as one resident chain (one upload, one
     readback). Returns None if unavailable so the caller can use the CPU path."""
