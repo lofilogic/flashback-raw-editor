@@ -68,70 +68,82 @@ def apply_lut_fast(image, lut):
 # EFFECT FUNCTIONS
 # =============================================================================
 
-def apply_chromatic_aberration(image, strength=0.005, steps=4, blue_blur=0.0, zoom_blur=1.0):
-    """
-    Radial chromatic aberration via per-channel rotation-matrix scaling.
+CA_SPECTRAL_SAMPLES = 16
 
-    Runs on the post-LUT display-sRGB image (gamma-encoded), not linear.
-    Working in display space keeps the fringing visually localised to bright
-    edges the way a real lens behaves; doing it in linear would over-spread
-    highlights once the display curve is reapplied.
 
-    blue_blur: optional Gaussian sigma applied to the blue channel of the final result.
-    zoom_blur: multiplier on the global zoom-blur pass (1.0 = default).
+def _ca_band_weights(samples: int) -> np.ndarray:
+    """Per-channel spectral sensitivity for each spectral sample t in [0, 1].
+
+    Smooth Gaussian bands centred at t=0 (red), 0.5 (green), 1 (blue); the
+    caller normalises per channel so a neutral input stays neutral. Matches the
+    band() helper in ca_tex.wgsl. Returns an (samples, 3) float32 array.
     """
+    t = (np.linspace(0.0, 1.0, samples, dtype=np.float32) if samples > 1
+         else np.zeros(1, dtype=np.float32))
+    s2 = 2.0 * 0.25 * 0.25
+    return np.stack([
+        np.exp(-(t - 0.0) ** 2 / s2),
+        np.exp(-(t - 0.5) ** 2 / s2),
+        np.exp(-(t - 1.0) ** 2 / s2),
+    ], axis=1).astype(np.float32)
+
+
+def _bilinear_sample_edge(image, map_x, map_y):
+    """Bilinear sample with clamp-to-edge, matching ca_tex.wgsl's sample_edge.
+
+    True float bilinear (numpy), unlike cv2.remap which quantises the sub-pixel
+    fraction to 1/32 px and so drifts from the GPU at hard edges. Coords are in
+    pixel space; integer coords are texel centres.
+    """
+    h, w = image.shape[:2]
+    x = np.clip(map_x, 0.0, w - 1.0)
+    y = np.clip(map_y, 0.0, h - 1.0)
+    x0 = np.floor(x).astype(np.int32)
+    y0 = np.floor(y).astype(np.int32)
+    x1 = np.minimum(x0 + 1, w - 1)
+    y1 = np.minimum(y0 + 1, h - 1)
+    fx = (x - x0)[..., None]
+    fy = (y - y0)[..., None]
+    c00 = image[y0, x0]; c10 = image[y0, x1]
+    c01 = image[y1, x0]; c11 = image[y1, x1]
+    cx0 = c00 + (c10 - c00) * fx
+    cx1 = c01 + (c11 - c01) * fx
+    return cx0 + (cx1 - cx0) * fy
+
+
+def apply_chromatic_aberration(image, scale, samples=CA_SPECTRAL_SAMPLES):
+    """Spectral chromatic aberration — numpy oracle / no-GPU fallback for
+    gpu.ca_frame (the resident path the render pipeline normally takes).
+
+    Models lateral CA by integrating ``samples`` points across the spectrum,
+    each radially magnified from 1.0 (red, ~unshifted) to 1.0 + ``scale`` (blue)
+    and weighted by that band's RGB sensitivity, giving a smooth purple->green
+    fringe that grows with radius. Runs on the post-LUT display-sRGB image
+    (gamma-encoded), not linear, so the fringing stays localised to bright edges
+    the way real glass behaves. ``scale`` is ca_pixels_to_scale(ca_pixels, w).
+    """
+    if scale <= 0:
+        return image.astype(np.float32, copy=True)
     start_total = time.time()
 
     h, w = image.shape[:2]
-    center = (w / 2.0, h / 2.0)
+    cx, cy = w * 0.5, h * 0.5          # matches the GPU centre / cv2 convention
+    ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+    dx, dy = xs - cx, ys - cy
 
-    # --- PHASE 1: Color Splitting ---
-    r_acc = np.zeros((h, w), dtype=np.float32)
-    g_acc = np.zeros((h, w), dtype=np.float32)
-    b_acc = np.zeros((h, w), dtype=np.float32)
+    weights = _ca_band_weights(samples)
+    ts = (np.linspace(0.0, 1.0, samples, dtype=np.float32) if samples > 1
+          else np.zeros(1, dtype=np.float32))
 
-    for i in range(steps):
-        factor = i / max(1, steps - 1) if steps > 1 else 1.0
-
-        scale_r = 1.0
-        M_r = cv2.getRotationMatrix2D(center, 0, scale_r)
-        r_acc += cv2.warpAffine(image[:, :, 0], M_r, (w, h),
-                                flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-
-        scale_g = 1.0 + (strength/2 * factor)
-        M_g = cv2.getRotationMatrix2D(center, 0, scale_g)
-        g_acc += cv2.warpAffine(image[:, :, 1], M_g, (w, h),
-                                flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-
-        scale_b = 1.0 + (strength * factor)
-        M_b = cv2.getRotationMatrix2D(center, 0, scale_b)
-        b_acc += cv2.warpAffine(image[:, :, 2], M_b, (w, h),
-                                flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-
-    ca_result = np.empty_like(image, dtype=np.float32)
-    ca_result[:, :, 0] = r_acc / steps
-    ca_result[:, :, 1] = g_acc / steps
-    ca_result[:, :, 2] = b_acc / steps
-
-    # --- PHASE 2: Global Zoom Blur ---
-    zoom_acc = np.zeros_like(ca_result, dtype=np.float32)
-
-    for i in range(steps):
-        factor = i / max(1, steps - 1) if steps > 1 else 1.0
-        scale_z = 1.0 + (strength/6 * zoom_blur * factor)
-        M_z = cv2.getRotationMatrix2D(center, 0, scale_z)
-        zoom_acc += cv2.warpAffine(ca_result, M_z, (w, h),
-                                   flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-
-    final_result = zoom_acc / steps
-
-    if blue_blur > 0:
-        final_result[:, :, 2] = gaussian_blur(final_result[:, :, 2], blue_blur)
+    acc = np.zeros((h, w, 3), dtype=np.float32)
+    for t, wband in zip(ts, weights):
+        sc = 1.0 + scale * t
+        acc += _bilinear_sample_edge(image, cx + dx * sc, cy + dy * sc) * wband
+    result = (acc / weights.sum(axis=0)).astype(np.float32)
 
     total_time = time.time() - start_total
     _timing_print(f"    [Chromatic Aberration] Total: {total_time*1000:.2f}ms (display sRGB)")
-
-    return final_result
+    return result
 
 
 # ACEScg (AP1, D60) <-> XYZ_D60 matrices for Lab CNR round-trip.

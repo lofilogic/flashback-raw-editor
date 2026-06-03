@@ -70,6 +70,8 @@ class GPUPipeline:
         self._unsharp_tex_bg_layout = None
         self._grain_tex_pipeline = None    # texture-resident grain blend
         self._grain_tex_bg_layout = None
+        self._ca_tex_pipeline = None       # texture-resident spectral CA
+        self._ca_tex_bg_layout = None
         self._lut_buf = None   # persistent GPU LUT buffer
         self._lut_size = 0
 
@@ -291,6 +293,17 @@ class GPUPipeline:
         self._unsharp_tex_pipeline = dev.create_compute_pipeline(
             layout=dev.create_pipeline_layout(bind_group_layouts=[self._unsharp_tex_bg_layout]),
             compute={'module': unsharp_tex_mod, 'entry_point': 'main'})
+
+        # --- Spectral chromatic aberration (texture-resident) pipeline ---
+        ca_tex_mod = dev.create_shader_module(code=_read_shader('ca_tex.wgsl'))
+        self._ca_tex_bg_layout = dev.create_bind_group_layout(entries=[
+            {'binding': 0, 'visibility': _C, 'texture': _tex},
+            {'binding': 1, 'visibility': _C, 'storage_texture': _store},
+            {'binding': 2, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.uniform}},
+        ])
+        self._ca_tex_pipeline = dev.create_compute_pipeline(
+            layout=dev.create_pipeline_layout(bind_group_layouts=[self._ca_tex_bg_layout]),
+            compute={'module': ca_tex_mod, 'entry_point': 'main'})
 
         # --- Grain blend (texture-resident) pipeline ---
         grain_tex_mod = dev.create_shader_module(code=_read_shader('grain_tex.wgsl'))
@@ -671,6 +684,31 @@ class GPUPipeline:
             {'binding': 3, 'resource': {'buffer': uni, 'offset': 0, 'size': uni.size}},
         ])
         self._run2d(self._grain_tex_pipeline, bg, w, h)
+        return Frame.from_gpu(dst, frame.shape, self)
+
+    def ca_frame(self, frame: "Frame", scale: float, samples: int = 16):
+        """Spectral chromatic aberration, texture-resident: Frame in -> Frame out.
+
+        Resident twin of effects.apply_chromatic_aberration (the spectral model):
+        integrates ``samples`` points across the spectrum, each radially
+        displaced by its own magnification (red at 1.0, blue at 1.0 + ``scale``)
+        and weighted by that band's RGB sensitivity. ``scale`` is the same value
+        the per-op path takes (ca_pixels_to_scale). Returns None if the GPU is
+        unavailable, or the input Frame unchanged when there's nothing to do.
+        """
+        if not self._init():
+            return None
+        if scale <= 0:
+            return frame
+        h, w = frame.shape[:2]
+        dst = self._create_tex(frame.shape)
+        uni = self._uniform(struct.pack('4f', float(scale), float(samples), 0.0, 0.0))
+        bg = self._device.create_bind_group(layout=self._ca_tex_bg_layout, entries=[
+            {'binding': 0, 'resource': frame.gpu().create_view()},
+            {'binding': 1, 'resource': dst.create_view()},
+            {'binding': 2, 'resource': {'buffer': uni, 'offset': 0, 'size': uni.size}},
+        ])
+        self._run2d(self._ca_tex_pipeline, bg, w, h)
         return Frame.from_gpu(dst, frame.shape, self)
 
     def _uniform(self, data: bytes):

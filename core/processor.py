@@ -485,16 +485,18 @@ class FlashbackProcessor:
         return out
 
     def _resident_post_lut_stages(self, v, shape, grain_driver):
-        """Build the post-LUT resident tail (softness -> grain -> sharpen) as a
-        list of Frame->Frame stages, matching the per-op order and parameters in
-        _render's per-op block.
+        """Build the post-LUT resident tail (CA -> softness -> grain -> sharpen)
+        as a list of Frame->Frame stages, matching the per-op order and
+        parameters in _render's per-op block.
 
         Returns (stages, grain_layer). The grain layer is generated here (CPU,
         random tiles) when grain is enabled so it exists regardless of which path
-        ultimately runs. Chromatic aberration is intentionally excluded: it is a
-        cv2 stage that breaks residency and runs on the CPU before this tail.
+        ultimately runs.
         """
         stages = []
+        if v.enable_chromatic_aberration and v.ca_pixels > 0:
+            ca_scale = ca_pixels_to_scale(v.ca_pixels, shape[1])
+            stages.append(lambda fr, s=ca_scale: gpu.ca_frame(fr, s))
         if v.enable_softness and v.softness_sigma > 0:
             sigma = v.softness_sigma
             stages.append(lambda fr, s=sigma: gpu.softness_frame(fr, s))
@@ -766,14 +768,12 @@ class FlashbackProcessor:
                 with _timed("CNR"):
                     img = reduce_color_noise_chroma(img, sigma=cnr_pct_to_sigma(v.cnr_amount_pct))
             img_max = np.maximum(img, 1e-10)
-            ca_on = v.enable_chromatic_aberration and v.ca_pixels > 0
 
             img_display = None
-            # No CA: fuse the entire back half — ACEScct-encode -> LUT -> tail —
-            # into one resident chain (single upload, single readback). With CA
-            # on, the tail still goes resident, just after the CPU CA stage (see
-            # the post-LUT block below). Any GPU miss returns None -> fallback.
-            if not downscale and not ca_on:
+            # Fuse the entire back half — ACEScct-encode -> LUT -> CA -> softness
+            # -> grain -> sharpen — into one resident chain (single upload, single
+            # readback). Any GPU miss returns None -> the per-op fallback below.
+            if not downscale:
                 with _timed("encode+LUT+tail (resident)"):
                     img_display = run_resident(
                         img_max, [gpu.encode_frame, gpu.lut_frame, *post_tail])
@@ -799,16 +799,11 @@ class FlashbackProcessor:
             lin_srgb = (prophoto.reshape(-1, 3) @ PROPHOTO_TO_LINSRGB).reshape(prophoto.shape)
             img_display = _srgb_oetf(np.clip(lin_srgb, 0.0, 1.0))
 
-        # Post-LUT tail. Skipped when the fused chain already ran it (tail_done).
-        # Otherwise CA runs on the CPU (cv2 warpAffine) and the softness/grain/
-        # sharpen tail runs as one resident sub-chain (single upload/readback),
-        # falling back to the per-op path on a GPU miss.
+        # Post-LUT tail. Skipped when the fused chain already ran it (tail_done);
+        # reached for the non-LUT display path, or as the no-GPU fallback. Try
+        # the resident tail (CA -> softness -> grain -> sharpen) as one sub-chain
+        # first, then fall back to the per-op CPU stages on a GPU miss.
         if not downscale and not tail_done:
-            if v.enable_chromatic_aberration and v.ca_pixels > 0:
-                ca_scale = ca_pixels_to_scale(v.ca_pixels, img_display.shape[1])
-                img_display = apply_chromatic_aberration(
-                    img_display, ca_scale, v.ca_steps, v.ca_blue_blur,
-                    zoom_blur=pct(v.ca_zoom_blur_pct))
             resident_tail = None
             if post_tail:
                 with _timed("tail (resident)"):
@@ -816,6 +811,9 @@ class FlashbackProcessor:
             if resident_tail is not None:
                 img_display = resident_tail
             else:
+                if v.enable_chromatic_aberration and v.ca_pixels > 0:
+                    ca_scale = ca_pixels_to_scale(v.ca_pixels, img_display.shape[1])
+                    img_display = apply_chromatic_aberration(img_display, ca_scale)
                 if v.enable_softness and v.softness_sigma > 0:
                     with _timed("softness"):
                         img_display = apply_softness(img_display, v.softness_sigma)

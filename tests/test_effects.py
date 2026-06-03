@@ -39,7 +39,7 @@ def test_bloom_strength_zero_is_noop(neutral_gray):
 # =============================================================================
 
 @pytest.mark.parametrize("fn,args", [
-    (apply_chromatic_aberration, (0.005, 4, 0.3)),
+    (apply_chromatic_aberration, (0.005,)),
     (apply_softness, (0.5,)),
     (apply_sharpen, (0.5, 1.0)),
     (apply_vignette, (0.5, 0.05, 1.0)),

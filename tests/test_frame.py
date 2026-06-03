@@ -186,6 +186,32 @@ def test_grain_frame_matches_buffer_blend(img):
 
 
 @requires_gpu
+def test_ca_frame_matches_spectral_oracle():
+    """Resident spectral CA matches the numpy spectral oracle (manual bilinear
+    + clamp-to-edge vs cv2.remap), within perceptual tol on a fringe-y image."""
+    from core.effects import apply_chromatic_aberration
+    rng = np.random.default_rng(3)
+    # An edge-rich image is the worst case for sampling differences.
+    a = rng.random((48, 72, 3), dtype=np.float32)
+    a[:, 36:, :] *= 0.2                      # hard vertical edge -> visible fringe
+    for scale in (0.004, 0.012):
+        def oracle(x, s=scale):
+            return apply_chromatic_aberration(x, s)
+
+        def resident(x, s=scale):
+            return gpu.ca_frame(Frame.from_cpu(x), s).cpu()
+
+        assert_parity(oracle, resident, a, tol=PERCEPTUAL_TOL, label="ca_frame")
+
+
+@requires_gpu
+def test_ca_frame_noop_when_scale_zero(img):
+    """scale<=0 returns the input Frame unchanged (no fringe applied)."""
+    out = gpu.ca_frame(Frame.from_cpu(img), 0.0).cpu()
+    assert max_abs_err(out, img) <= PERCEPTUAL_TOL
+
+
+@requires_gpu
 def test_resident_tail_chains_without_readback(img):
     """encode -> LUT -> softness -> grain -> sharpen as one resident chain
     matches running the same stages with a readback between each."""
