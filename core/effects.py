@@ -34,6 +34,7 @@ from .config import (
     _timing_print,
     HALATION_BLUR_RADIUS,
     SOFTNESS_SIGMA, SHARPEN_RADIUS,
+    cnr_sigma_color,
 )
 
 # =============================================================================
@@ -208,9 +209,10 @@ def reduce_color_noise_chroma(image, sigma=0.7):
     d = max(5, int(sigma) * 2 + 3)
     if d % 2 == 0:
         d += 1
-    # sigmaColor in Lab units (a*/b* range ~±80): smooths noise-level variation
-    # (typically < 8 Lab units) while stopping at real colour edges (> 20 units).
-    sigma_color = 15.0
+    # sigmaColor in Lab units (a*/b* range ~±80), scaled with sigma so high
+    # settings denoise harder (see config.cnr_sigma_color); floor 15 keeps low
+    # settings edge-preserving.
+    sigma_color = cnr_sigma_color(sigma)
     lab[:, :, 1] = cv2.bilateralFilter(lab[:, :, 1], d, sigma_color, sigma)
     lab[:, :, 2] = cv2.bilateralFilter(lab[:, :, 2], d, sigma_color, sigma)
     return _lab_to_acescg(lab)

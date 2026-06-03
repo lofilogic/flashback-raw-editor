@@ -933,10 +933,12 @@ class GPUPipeline:
         if d % 2 == 0:
             d += 1
         radius = d // 2
+        from .config import cnr_sigma_color
+        sigma_color = cnr_sigma_color(sigma)
 
         lab = self._cnr_io(self._cnr_to_lab_pipeline, frame.gpu(), frame.shape)
         filt = self._create_tex(frame.shape)
-        uni = self._uniform(struct.pack('4f', float(sigma), 15.0, float(radius), 0.0))
+        uni = self._uniform(struct.pack('4f', float(sigma), float(sigma_color), float(radius), 0.0))
         bg = self._device.create_bind_group(layout=self._cnr_bil_bg_layout, entries=[
             {'binding': 0, 'resource': lab.create_view()},
             {'binding': 1, 'resource': filt.create_view()},

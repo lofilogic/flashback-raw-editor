@@ -105,17 +105,17 @@ GRAIN_TILE_SCALE = 0.8     # <1.0 makes grain finer (tiles render denser); >1.0 
 GRAIN_HIGHLIGHT_BIAS = 0.3 # 1.0 = grain biased to highlights, 0.0 = shadows, 0.5 = flat.
 SHARPEN_STRENGTH_PCT = 50.0
 SHARPEN_RADIUS = 1.0       # px
-CNR_AMOUNT_PCT = 40.0
+CNR_AMOUNT_PCT = 50.0      # default ~ old "200%" strength (sigma 10 at _CNR_SIGMA_MAX=20)
 VIGNETTE_STRENGTH_PCT = 50.0
 VIGNETTE_COLOR_PCT = 25.0
 VIGNETTE_CURVE = 0.0       # -100…+100, higher = more feathered (softer)
 BLOOM_STRENGTH_PCT = 30.0
-BLOOM_THRESHOLD_STOPS = 4.0      # EV above middle grey
+BLOOM_THRESHOLD_STOPS = 3.0      # EV above middle grey
 
 # Internal scalar maxima — the user-facing percent fields map 0–100 onto
 # 0–MAX. Keeping these explicit makes the migration buckets trivial to
 # write and makes the panel/pipeline agree on the same conversion.
-_CNR_SIGMA_MAX = 5.0
+_CNR_SIGMA_MAX = 20.0
 _VIGNETTE_COLOR_MAX = 0.2
 
 
@@ -159,6 +159,20 @@ def vignette_curve_to_power(curve: float) -> float:
 
 def cnr_pct_to_sigma(amount_pct: float) -> float:
     return pct(amount_pct) * _CNR_SIGMA_MAX
+
+
+def cnr_sigma_color(sigma: float) -> float:
+    """Bilateral range sigma for chroma NR, scaled with the spatial sigma.
+
+    A fixed range sigma capped the strength: the bilateral preserved chroma
+    variation near edges, so cranking the spatial sigma plateaued (it never
+    removed the last ~12% of chroma noise). Scaling the range tolerance with the
+    spatial sigma lets high settings approach a near-Gaussian chroma blur (much
+    stronger), while a floor of 15 keeps low settings edge-preserving (no colour
+    bleed across saturated boundaries). Single source of truth for both the
+    numpy/cv2 path and gpu.cnr_frame.
+    """
+    return max(15.0, float(sigma) * 3.0)
 
 
 def vignette_color_pct_to_shift(color_pct: float) -> float:
@@ -413,7 +427,7 @@ def resolve_lut_ref(ref: str):
 # and flashback_classic_v1 substantially. They remain available as a
 # user-facing slider in the Advanced (CA) section.
 VIBE_PRESETS = {
-    'disposable':           {'enable_ca': True,  'ca_pixels': 8.0, 'ca_zoom_blur_pct': 150.0, 'softness': 0.3, 'sharpness_pct': 200.0, 'sharpen_radius': 0.5, 'grain_pct': 120.0, 'vignette_pct': 10.0, 'vignette_curve':  66.0, 'bloom_pct': 10.0, 'lut': 'factory:disposable'},
+    'disposable':           {'enable_ca': True,  'ca_pixels': 8.0, 'ca_zoom_blur_pct': 150.0, 'softness': 0.3, 'sharpness_pct': 200.0, 'sharpen_radius': 0.5, 'grain_pct': 120.0, 'vignette_pct': 10.0, 'vignette_curve':  66.0, 'bloom_pct': 15.0, 'lut': 'factory:disposable'},
     'flashback_classic_v1': {'enable_ca': True,  'ca_pixels':  5.0, 'ca_zoom_blur_pct': 200.0, 'softness': 0.3, 'sharpness_pct':  80.0, 'sharpen_radius': 0.5, 'grain_pct': 200.0, 'vignette_pct': 10.0, 'vignette_curve':  66.0, 'bloom_pct':  3.0, 'lut': 'factory:flashback_classic_v1', 'base_exposure_offset_v2': 0.0},
     'point_shoot':          {'enable_ca': True,  'ca_pixels':  2.0, 'ca_zoom_blur_pct': 100.0, 'softness': 0.3, 'sharpness_pct':  50.0, 'sharpen_radius': 1.0, 'grain_pct':  80.0, 'vignette_pct': 10.0, 'vignette_curve':   0.0, 'bloom_pct': 10.0, 'lut': 'factory:point_shoot'},
     'rangefinder':          {'enable_ca': False, 'ca_pixels':  0.0, 'ca_zoom_blur_pct': 100.0, 'softness': 0.1, 'sharpness_pct':  80.0, 'sharpen_radius': 1.0, 'grain_pct':  50.0, 'vignette_pct':  5.0, 'vignette_curve':   0.0, 'bloom_pct':  5.0, 'lut': 'factory:rangefinder'},
