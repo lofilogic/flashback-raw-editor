@@ -15,6 +15,13 @@ Apple Silicon from ~0.48 s to ~0.11 s. The migration itself is output-neutral
 as the oracle and as an automatic fallback when no usable GPU is present. The
 look changes below are separate and intentional.
 
+A follow-up pass cut the steady-state cost further: GPU textures and uniform
+buffers are now drawn from a per-render arena instead of being reallocated
+every frame (the allocation churn, not GPU compute, was the main remaining
+interactive cost), and image loading is faster — load-time halation reuses the
+same arena and blurs its glow at half resolution (imperceptible for a soft
+glow), roughly a third quicker.
+
 ### Chromatic aberration is now spectral
 
 CA was rebuilt as a spectral model: instead of three discrete red/green/blue

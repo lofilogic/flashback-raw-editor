@@ -246,14 +246,26 @@ def apply_halation(img, threshold=0.65, blur_radius=HALATION_BLUR_RADIUS, streng
     img_f = img.astype(np.float32)
 
     # Resident path: the whole two-pass halation runs on the GPU with one
-    # upload/readback instead of ~9 CPU<->GPU round-trips. Bit-identical to the
-    # per-op path below (validated max abs diff ~1e-7). Falls back on any GPU
-    # issue so a bad driver can only slow a render, never break it.
+    # upload/readback instead of ~9 CPU<->GPU round-trips. It blurs the glow at
+    # half resolution for speed, so it APPROXIMATES the full-res per-op path
+    # below (perceptually identical — the glow is low-frequency; ~sub-code-value
+    # end to end), rather than matching bit-for-bit. Falls back on any GPU issue
+    # so a bad driver can only slow a render, never break it.
     if HAS_GPU:
         try:
-            res = gpu.halation_frame(Frame.from_cpu(img_f), threshold, blur_radius, strength)
-            if res is not None:
-                out = res.cpu()   # combine shader already clamps to >= 0
+            # Draw halation's ~13 full-res scratch textures from the per-render
+            # arena (the same mechanism the live render uses) so repeat image
+            # loads reuse them instead of allocating fresh each time — texture
+            # allocation is pure CPU-side driver cost, not GPU compute. The
+            # readback must happen inside the scope, before end_render releases
+            # the arena (mirrors kernels.run_resident).
+            gpu.begin_render()
+            try:
+                res = gpu.halation_frame(Frame.from_cpu(img_f), threshold, blur_radius, strength)
+                out = res.cpu() if res is not None else None   # combine clamps to >= 0
+            finally:
+                gpu.end_render()
+            if out is not None:
                 _timing_print(f"    [Halation] Total (resident): {(time.time()-start_total)*1000:.2f}ms")
                 return out
         except Exception:
