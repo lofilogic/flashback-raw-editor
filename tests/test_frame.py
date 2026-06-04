@@ -132,8 +132,14 @@ def test_blur_frame_matches_buffer_blur(img):
 
 
 @requires_gpu
-def test_halation_frame_matches_per_op():
-    """Resident two-pass halation matches the per-op numpy/buffer path."""
+def test_halation_frame_approximates_per_op():
+    """Resident halation blurs its glow at HALF resolution for speed (downsample
+    -> blur at half sigma -> bilinear upsample); the numpy fallback keeps the
+    full-res blur. So the resident path is a deliberate APPROXIMATION, not a
+    bit-match. The glow is low-frequency, so the error stays tiny — measured max
+    ~0.02 (linear ACEScg) on this hard-edged synthetic worst case, and
+    sub-code-value end-to-end on real images. Perceptual bar, not bit-exact;
+    0.03 leaves headroom over the measured worst case."""
     from core import effects
     rng = np.random.default_rng(5)
     img = rng.random((40, 60, 3), dtype=np.float32) * 0.5
@@ -142,14 +148,14 @@ def test_halation_frame_matches_per_op():
 
     resident = gpu.halation_frame(Frame.from_cpu(img), th, br, st).cpu()
 
-    saved = gpu.halation_frame                       # force the per-op reference
+    saved = gpu.halation_frame                       # force the full-res per-op reference
     gpu.halation_frame = lambda *a, **k: None
     try:
         ref = effects.apply_halation(img, th, br, st)
     finally:
         gpu.halation_frame = saved
 
-    assert max_abs_err(resident, ref) <= 1e-4
+    assert max_abs_err(resident, ref) <= 0.03
 
 
 # --- post-LUT resident tail stages vs their per-op oracles ------------------
@@ -391,7 +397,7 @@ def test_arena_reuses_textures_across_renders():
     """Inside a render scope, distinct allocations get distinct textures
     (write-once slots); across two scopes the same slot returns the *same*
     physical texture — i.e. no per-frame allocation. That reuse is the whole
-    point of Phase 1."""
+    point of the per-render arena."""
     shape = (32, 48, 3)
 
     gpu.begin_render()
@@ -418,8 +424,9 @@ def test_arena_reuses_textures_across_renders():
 def test_dirty_arena_parity():
     """A full resident render must produce the same pixels whether or not the
     arena was just used by a *different* render that left stale data in the
-    pooled textures (Trap #3). Exercises bloom's small downsample texture and
-    the full-res pool across two distinct chains on the same thread."""
+    pooled textures — the leak a single-render parity test can't catch.
+    Exercises bloom's small downsample texture and the full-res pool across two
+    distinct chains on the same thread."""
     from core.kernels import run_resident
     gpu.upload_lut(_smooth_lut())
 

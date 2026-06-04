@@ -246,9 +246,11 @@ def apply_halation(img, threshold=0.65, blur_radius=HALATION_BLUR_RADIUS, streng
     img_f = img.astype(np.float32)
 
     # Resident path: the whole two-pass halation runs on the GPU with one
-    # upload/readback instead of ~9 CPU<->GPU round-trips. Bit-identical to the
-    # per-op path below (validated max abs diff ~1e-7). Falls back on any GPU
-    # issue so a bad driver can only slow a render, never break it.
+    # upload/readback instead of ~9 CPU<->GPU round-trips. It blurs the glow at
+    # half resolution for speed, so it APPROXIMATES the full-res per-op path
+    # below (perceptually identical — the glow is low-frequency; ~sub-code-value
+    # end to end), rather than matching bit-for-bit. Falls back on any GPU issue
+    # so a bad driver can only slow a render, never break it.
     if HAS_GPU:
         try:
             # Draw halation's ~13 full-res scratch textures from the per-render

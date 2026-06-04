@@ -230,6 +230,8 @@ class GPUPipeline:
         ('lut_tex.wgsl',           'TRSU',  '_lut_tex_bg_layout',     (('_lut_tex_pipeline', 'main'),)),
         ('gaussian_blur_tex.wgsl', 'TRS',   '_gauss_tex_bg_layout',   (('_gauss_tex_pipeline_h', 'main_h'),
                                                                        ('_gauss_tex_pipeline_v', 'main_v'))),
+        ('downsample_tex.wgsl',    'TS',    '_downsample_bg_layout',  (('_downsample_pipeline', 'main'),)),
+        ('upsample_tex.wgsl',      'TS',    '_upsample_bg_layout',    (('_upsample_pipeline', 'main'),)),
         ('halation_mask.wgsl',     'TSU',   '_hal_mask_bg_layout',    (('_hal_mask_pipeline', 'main'),)),
         ('halation_highlights.wgsl', 'TTS', '_hal_hi_bg_layout',      (('_hal_hi_pipeline', 'main'),)),
         ('halation_combine.wgsl',  'TTTSU', '_hal_combine_bg_layout', (('_hal_combine_pipeline', 'main'),)),
@@ -540,6 +542,33 @@ class GPUPipeline:
         cp.end()
         self._device.queue.submit([enc.finish()])
 
+    def _downsample(self, frame: "Frame", factor: int):
+        """Area-average downsample by ``factor``, texture-resident. Used to shrink
+        a layer before a wide blur (halation glow); floors at 4 px so a tiny
+        preview can't collapse to nothing."""
+        h, w = frame.shape[:2]
+        small_shape = (max(4, h // factor), max(4, w // factor), 3)
+        sh, sw = small_shape[:2]
+        dst = self._create_tex(small_shape)
+        bg = self._device.create_bind_group(layout=self._downsample_bg_layout, entries=[
+            {'binding': 0, 'resource': frame.gpu().create_view()},
+            {'binding': 1, 'resource': dst.create_view()},
+        ])
+        self._run2d(self._downsample_pipeline, bg, sw, sh)
+        return Frame.from_gpu(dst, small_shape, self)
+
+    def _upsample(self, frame: "Frame", target_shape):
+        """Bilinear upsample to ``target_shape``, texture-resident (the inverse of
+        _downsample for the downsample -> blur -> upsample glow path)."""
+        th, tw = target_shape[:2]
+        dst = self._create_tex(target_shape)
+        bg = self._device.create_bind_group(layout=self._upsample_bg_layout, entries=[
+            {'binding': 0, 'resource': frame.gpu().create_view()},
+            {'binding': 1, 'resource': dst.create_view()},
+        ])
+        self._run2d(self._upsample_pipeline, bg, tw, th)
+        return Frame.from_gpu(dst, target_shape, self)
+
     def _halation_mask(self, frame: "Frame", threshold: float, k: float):
         h, w = frame.shape[:2]
         dst = self._create_tex(frame.shape)
@@ -593,7 +622,18 @@ class GPUPipeline:
             mask = self._halation_mask(frame, thresh, k)
             mask = self.blur_frame(mask, 2.0)
             hi = self._halation_highlights(frame, mask)
-            return self.blur_frame(hi, br)
+            # Halation glow is intrinsically low-frequency, so blur it at half
+            # resolution: quarter the pixels and half the sigma make the wide
+            # pass ~8x cheaper, then bilinear-upsample. Imperceptible for a soft
+            # glow; the channel weighting is already baked into `hi` upstream, so
+            # the downsample preserves it. (The numpy fallback keeps the full-res
+            # blur — it only runs without a GPU, where speed is moot; this is why
+            # the resident-vs-per-op parity bar is perceptual, not bit-exact.)
+            small = self._downsample(hi, 2)
+            small = self.blur_frame(small, br * 0.5)
+            if small is None:
+                return None
+            return self._upsample(small, frame.shape)
 
         g1 = glow(threshold, blur_radius)
         g2 = glow(min(threshold + 0.15, 0.98), blur_radius * 3.0)
