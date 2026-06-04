@@ -123,6 +123,41 @@ def test_encode_then_lut_matches_production_path(img):
 
 
 @requires_gpu
+def test_encode_lut_frame_matches_split_chain(img):
+    """The fused encode+LUT pass (Phase 3) matches the split
+    encode_frame -> lut_frame chain. Same GPU math, only the intermediate
+    texture round-trip is removed, so the bar is bit-level not perceptual."""
+    n = 17
+    axis = np.linspace(0.0, 1.0, n, dtype=np.float32)
+    r, g, b = np.meshgrid(axis, axis, axis, indexing='ij')
+    lut_table = np.stack([
+        np.clip(r ** 1.1 * 0.95 + 0.03 * g, 0, 1),
+        np.clip(g ** 0.95,                  0, 1),
+        np.clip(b ** 1.05 * 0.97 + 0.02 * r, 0, 1),
+    ], axis=-1).astype(np.float32)
+    gpu.upload_lut(lut_table)
+
+    img_max = np.maximum(img, 1e-10)
+
+    def split(a):
+        return gpu.lut_frame(gpu.encode_frame(Frame.from_cpu(a))).cpu()
+
+    def fused(a):
+        return gpu.encode_lut_frame(Frame.from_cpu(a)).cpu()
+
+    assert max_abs_err(fused(img_max), split(img_max)) <= 1e-6
+
+
+@requires_gpu
+def test_encode_lut_frame_opts_out_without_lut():
+    """No LUT uploaded -> fused stage returns None so run_resident can fall back,
+    matching lut_frame's contract."""
+    gpu._lut_buf = None
+    assert gpu.encode_lut_frame(Frame.from_cpu(
+        np.full((8, 8, 3), 0.5, dtype=np.float32))) is None
+
+
+@requires_gpu
 def test_blur_frame_matches_buffer_blur(img):
     """Texture-resident separable blur matches the buffer Gaussian (bit-exact)."""
     for sigma in (2.0, 4.0, 12.0):
@@ -431,8 +466,7 @@ def test_dirty_arena_parity():
 
     chain_a = [
         lambda f: gpu.bloom_frame(f, 0.3, 0.55),       # pre-LUT, fills small pool
-        gpu.encode_frame,
-        gpu.lut_frame,
+        gpu.encode_lut_frame,                          # fused, the production path
         lambda f: gpu.softness_frame(f, 2.0),
         lambda f: gpu.grain_frame(f, grain, 0.3, 0.2, 0.4),
         lambda f: gpu.sharpen_frame(f, 0.5, 2.0),

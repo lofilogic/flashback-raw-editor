@@ -228,6 +228,7 @@ class GPUPipeline:
         # texture-resident pipelines
         ('encode_tex.wgsl',        'TS',    '_encode_tex_bg_layout',  (('_encode_tex_pipeline', 'main'),)),
         ('lut_tex.wgsl',           'TRSU',  '_lut_tex_bg_layout',     (('_lut_tex_pipeline', 'main'),)),
+        ('encode_lut_tex.wgsl',    'TRSU',  '_encode_lut_bg_layout',  (('_encode_lut_pipeline', 'main'),)),
         ('gaussian_blur_tex.wgsl', 'TRS',   '_gauss_tex_bg_layout',   (('_gauss_tex_pipeline_h', 'main_h'),
                                                                        ('_gauss_tex_pipeline_v', 'main_v'))),
         ('halation_mask.wgsl',     'TSU',   '_hal_mask_bg_layout',    (('_hal_mask_pipeline', 'main'),)),
@@ -481,6 +482,34 @@ class GPUPipeline:
         enc = self._device.create_command_encoder()
         cp = enc.begin_compute_pass()
         cp.set_pipeline(self._lut_tex_pipeline)
+        cp.set_bind_group(0, bg)
+        cp.dispatch_workgroups((w + 7) // 8, (h + 7) // 8)
+        cp.end()
+        self._device.queue.submit([enc.finish()])
+        return Frame.from_gpu(dst, frame.shape, self)
+
+    def encode_lut_frame(self, frame: "Frame"):
+        """Fused ACEScct-encode + tetrahedral LUT in one pass (GPU V2 Phase 3).
+
+        Equivalent to ``lut_frame(encode_frame(frame))`` but does both in a single
+        compute dispatch, skipping the intermediate texture round-trip — encode
+        and LUT are the only always-adjacent point-op pair in the default render.
+        Returns None if the GPU is unavailable or no LUT is loaded (caller falls
+        back to the split encode/LUT stages or the CPU path)."""
+        if not self._init() or self._lut_buf is None:
+            return None
+        h, w = frame.shape[:2]
+        dst = self._create_tex(frame.shape)
+        uni = self._uniform(struct.pack('4I', self._lut_size, 0, 0, 0))
+        bg = self._device.create_bind_group(layout=self._encode_lut_bg_layout, entries=[
+            {'binding': 0, 'resource': frame.gpu().create_view()},
+            {'binding': 1, 'resource': {'buffer': self._lut_buf, 'offset': 0, 'size': self._lut_buf.size}},
+            {'binding': 2, 'resource': dst.create_view()},
+            {'binding': 3, 'resource': {'buffer': uni, 'offset': 0, 'size': uni.size}},
+        ])
+        enc = self._device.create_command_encoder()
+        cp = enc.begin_compute_pass()
+        cp.set_pipeline(self._encode_lut_pipeline)
         cp.set_bind_group(0, bg)
         cp.dispatch_workgroups((w + 7) // 8, (h + 7) // 8)
         cp.end()

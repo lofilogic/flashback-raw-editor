@@ -76,6 +76,26 @@ shape exactly.)
 - **Acceptance:** perceptual parity within the agreed tolerance (Trap #2),
   side-by-side visual confirmation, parity + dirty-arena tests pass.
 
+**Implementation finding (June 2026) — fusion is narrower than it looks.**
+Point-ops only fuse where *adjacent*, and in the **default** config the enabled
+neighborhood ops split them apart: `vignette → bloom → cnr` (bloom/cnr break the
+pre-LUT run), then `encode → lut`, then `ca → softness → grain → sharpen` (grain
+is sandwiched). So the **only** always-adjacent point-op pair in the default
+render is **encode + LUT**. The RapidRaw-style "one big pass" only fully collapses
+in *lean presets* (bloom/cnr/softness off). Done: **encode+LUT fused** into one
+pass (`encode_lut_tex.wgsl`, `gpu.encode_lut_frame`) — correct (bit-level vs the
+split chain), but **neutral on M3** (median 111.0 vs 111.5 ms; M3 has the
+bandwidth to hide one fewer texture round-trip). Remaining Phase-3 ideas, both
+**deferred pending a slow-box profile** because the M3 can't measure their
+payoff:
+- **Fold `gain` (the per-frame numpy `img*gain`, ~180 MB alloc + 45M mul) onto
+  the GPU** — removes *CPU* work, so it's the item most likely to help the
+  CPU-bound Windows box. Risk: branchy across the GPU→CPU fallback (must not
+  double-apply or skip gain). Do this only if a profile shows gain dominating.
+- **General point-op grouping (uber-shader)** — removes more *GPU* work but only
+  in lean presets; optimizes the side that isn't the slow-box bottleneck. Likely
+  the overengineering this plan warns about — drop unless a profile says otherwise.
+
 ### Phase 4 — Render-to-surface  ·  confidence: medium  ·  risk: high  ·  SEPARATE DECISION
 **Goal:** present the preview to a wgpu surface to drop the **final** readback —
 the biggest end-state win, but it requires the preview widget to become a GPU
