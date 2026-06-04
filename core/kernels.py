@@ -68,10 +68,9 @@ def color_transform(img: np.ndarray, M: np.ndarray) -> np.ndarray:
 
 
 def encode_then_lut(img: np.ndarray) -> np.ndarray | None:
-    """ACEScct-encode then apply the LUT as one fused resident pass (one upload,
-    one readback). Returns None if unavailable so the caller can use the CPU
-    path."""
-    return run_resident(img, [gpu.encode_lut_frame])
+    """ACEScct-encode then apply the LUT as one resident chain (one upload, one
+    readback). Returns None if unavailable so the caller can use the CPU path."""
+    return run_resident(img, [gpu.encode_frame, gpu.lut_frame])
 
 # Rotation uses OpenCV — fast, correct, and rotation happens rarely
 def rotate_90_clockwise(img: np.ndarray) -> np.ndarray:

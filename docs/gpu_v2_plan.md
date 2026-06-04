@@ -76,25 +76,33 @@ shape exactly.)
 - **Acceptance:** perceptual parity within the agreed tolerance (Trap #2),
   side-by-side visual confirmation, parity + dirty-arena tests pass.
 
-**Implementation finding (June 2026) — fusion is narrower than it looks.**
-Point-ops only fuse where *adjacent*, and in the **default** config the enabled
-neighborhood ops split them apart: `vignette → bloom → cnr` (bloom/cnr break the
-pre-LUT run), then `encode → lut`, then `ca → softness → grain → sharpen` (grain
-is sandwiched). So the **only** always-adjacent point-op pair in the default
-render is **encode + LUT**. The RapidRaw-style "one big pass" only fully collapses
-in *lean presets* (bloom/cnr/softness off). Done: **encode+LUT fused** into one
-pass (`encode_lut_tex.wgsl`, `gpu.encode_lut_frame`) — correct (bit-level vs the
-split chain), but **neutral on M3** (median 111.0 vs 111.5 ms; M3 has the
-bandwidth to hide one fewer texture round-trip). Remaining Phase-3 ideas, both
-**deferred pending a slow-box profile** because the M3 can't measure their
-payoff:
-- **Fold `gain` (the per-frame numpy `img*gain`, ~180 MB alloc + 45M mul) onto
-  the GPU** — removes *CPU* work, so it's the item most likely to help the
-  CPU-bound Windows box. Risk: branchy across the GPU→CPU fallback (must not
-  double-apply or skip gain). Do this only if a profile shows gain dominating.
-- **General point-op grouping (uber-shader)** — removes more *GPU* work but only
-  in lean presets; optimizes the side that isn't the slow-box bottleneck. Likely
-  the overengineering this plan warns about — drop unless a profile says otherwise.
+**OUTCOME — tried and REVERTED (June 2026).** Two findings killed this phase:
+1. **Fusion is narrow.** In the default config the enabled neighborhood ops split
+   the point-ops apart (`vignette→bloom→cnr`, then `encode→lut`, then
+   `ca→softness→grain→sharpen`), so **encode+LUT is the only always-adjacent
+   pair**. The RapidRaw "one big pass" only collapses in lean presets.
+2. **Fusing encode+LUT was a measured REGRESSION on the RTX3090: +12 ms (+8%) on
+   the resident render, +11 ms on wall** (steady-state medians, same DNG; neutral
+   on M3). Likely cause: merging the tiny memory-bound encode into the heavy,
+   register-hungry, branch-divergent tetrahedral-LUT kernel cut occupancy; the
+   ~0.1 ms saved texture round-trip didn't come close to paying for it.
+
+   **Lesson (high confidence): "fewer GPU passes" is NOT a win on this hardware.**
+   The render path is already fast (~165 ms resident on the 3090) and out of cheap
+   wins — the arena (Phase 1) was the big one. Do NOT pursue the gain/grain/general
+   uber-shader fusions; they optimize GPU passes (not the bottleneck) and would
+   likely regress the same way. The remaining render lever is Phase 4
+   (render-to-surface, ~60 ms readback), high-risk and deferred.
+
+**Pivot: LOAD is the real cost (~1.7 s vs ~0.17 s render on the 3090).** Trace:
+`raw_develop` ~270 ms (libraw demosaic, `half_size=True` → quarter-area; ~fixed),
+`raw→ACEScg` ~685 ms (mostly CPU highlight recovery — kept on CPU **on purpose**,
+GPU gave no benefit at small sizes), `halation` ~710 ms. The halation number is
+the lead: it runs **outside the Phase-1 arena** (`apply_halation` calls
+`gpu.halation_frame` directly, not via `run_resident`), so it allocates ~13 fresh
+full-res textures per load — the exact allocation churn the arena fixes elsewhere.
+First fix to try is the **free, no-perceptual-change arena wrap**, before the
+user's downsample-the-blur idea (a perceptual tradeoff, kept as lever #2).
 
 ### Phase 4 — Render-to-surface  ·  confidence: medium  ·  risk: high  ·  SEPARATE DECISION
 **Goal:** present the preview to a wgpu surface to drop the **final** readback —

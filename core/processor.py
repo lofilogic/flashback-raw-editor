@@ -801,7 +801,7 @@ class FlashbackProcessor:
         if not downscale and lut_path:
             with _timed("full render (resident)"):
                 img_display = run_resident(
-                    img, [*pre_stages, gpu.encode_lut_frame, *post_tail])
+                    img, [*pre_stages, gpu.encode_frame, gpu.lut_frame, *post_tail])
             fully_fused = img_display is not None
 
         if not fully_fused:
@@ -820,7 +820,7 @@ class FlashbackProcessor:
                 img_max = np.maximum(img, 1e-10)
                 with _timed("encode+LUT+tail (resident)"):
                     img_display = run_resident(
-                        img_max, [gpu.encode_lut_frame, *post_tail])
+                        img_max, [gpu.encode_frame, gpu.lut_frame, *post_tail])
                 tail_done = img_display is not None
                 if img_display is None:
                     with _timed("encode+LUT (resident)"):
