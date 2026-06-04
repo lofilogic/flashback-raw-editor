@@ -207,303 +207,84 @@ class GPUPipeline:
             self._device = None
             return False
 
+    # Bind-group layout catalogue. Each row drives one shader's pipeline(s):
+    #   (shader file, layout spec, bgl attribute, ((pipeline attr, entry point), ...))
+    # The spec is one char per binding, in binding order (see _bgl). wgpu
+    # validates the spec against the WGSL at pipeline creation, so a wrong spec
+    # fails loudly at init rather than miswiring silently — that defect surface
+    # is exactly what this table replaces ~300 lines of hand-written layouts to
+    # shrink. Shapes recur (e.g. RRWU x4, TSU x5, TTSU x4), which the table makes
+    # visible at a glance.
+    _PIPELINE_TABLE = (
+        # buffer (legacy per-op) pipelines
+        ('lut.wgsl',               'RRWU',  '_lut_bg_layout',         (('_lut_pipeline', 'main'),)),
+        ('acescct.wgsl',           'RW',    '_acescct_bg_layout',     (('_acescct_pipeline_decode', 'main_decode'),
+                                                                       ('_acescct_pipeline_encode', 'main_encode'))),
+        ('grain.wgsl',             'RRWU',  '_grain_bg_layout',       (('_grain_pipeline', 'main'),)),
+        ('blend.wgsl',             'RRWU',  '_blend_bg_layout',       (('_screen_pipeline', 'main_screen'),
+                                                                       ('_unsharp_pipeline', 'main_unsharp'))),
+        ('gaussian_blur.wgsl',     'RRWU',  '_gauss_bg_layout',       (('_gauss_pipeline_h', 'main_h'),
+                                                                       ('_gauss_pipeline_v', 'main_v'))),
+        # texture-resident pipelines
+        ('encode_tex.wgsl',        'TS',    '_encode_tex_bg_layout',  (('_encode_tex_pipeline', 'main'),)),
+        ('lut_tex.wgsl',           'TRSU',  '_lut_tex_bg_layout',     (('_lut_tex_pipeline', 'main'),)),
+        ('gaussian_blur_tex.wgsl', 'TRS',   '_gauss_tex_bg_layout',   (('_gauss_tex_pipeline_h', 'main_h'),
+                                                                       ('_gauss_tex_pipeline_v', 'main_v'))),
+        ('halation_mask.wgsl',     'TSU',   '_hal_mask_bg_layout',    (('_hal_mask_pipeline', 'main'),)),
+        ('halation_highlights.wgsl', 'TTS', '_hal_hi_bg_layout',      (('_hal_hi_pipeline', 'main'),)),
+        ('halation_combine.wgsl',  'TTTSU', '_hal_combine_bg_layout', (('_hal_combine_pipeline', 'main'),)),
+        ('unsharp_tex.wgsl',       'TTSU',  '_unsharp_tex_bg_layout', (('_unsharp_tex_pipeline', 'main'),)),
+        ('ca_tex.wgsl',            'TSU',   '_ca_tex_bg_layout',      (('_ca_tex_pipeline', 'main'),)),
+        ('grain_tex.wgsl',         'TTSU',  '_grain_tex_bg_layout',   (('_grain_tex_pipeline', 'main'),)),
+        ('edge_softness_tex.wgsl', 'TTSU',  '_edge_soft_bg_layout',   (('_edge_soft_pipeline', 'main'),)),
+        ('vignette_tex.wgsl',      'TSU',   '_vignette_bg_layout',    (('_vignette_pipeline', 'main'),)),
+        ('bloom_downmask.wgsl',    'TSU',   '_bloom_dm_bg_layout',    (('_bloom_dm_pipeline', 'main'),)),
+        ('bloom_upadd.wgsl',       'TTSU',  '_bloom_ua_bg_layout',    (('_bloom_ua_pipeline', 'main'),)),
+        ('cnr.wgsl',               'TS',    '_cnr_io_bg_layout',      (('_cnr_to_lab_pipeline', 'main_to_lab'),
+                                                                       ('_cnr_to_acescg_pipeline', 'main_to_acescg'))),
+        ('cnr.wgsl',               'TSU',   '_cnr_bil_bg_layout',     (('_cnr_bil_pipeline', 'main_bilateral'),)),
+        ('color_matmul.wgsl',      'RWU',   '_colormat_bg_layout',    (('_colormat_pipeline', 'main'),)),
+    )
+
+    def _bgl(self, spec: str):
+        """Create a COMPUTE bind-group layout from a compact spec: one char per
+        binding, in binding order —
+            R read-only-storage buffer   W storage buffer   U uniform buffer
+            T sampled texture (unfilterable f32, 2d)
+            S write-only storage texture (_TEX_FORMAT, 2d)
+        """
+        kind = {
+            'R': {'buffer': {'type': wgpu.BufferBindingType.read_only_storage}},
+            'W': {'buffer': {'type': wgpu.BufferBindingType.storage}},
+            'U': {'buffer': {'type': wgpu.BufferBindingType.uniform}},
+            'T': {'texture': {'sample_type': wgpu.TextureSampleType.unfilterable_float,
+                              'view_dimension': wgpu.TextureViewDimension.d2}},
+            'S': {'storage_texture': {'access': wgpu.StorageTextureAccess.write_only,
+                                      'format': self._TEX_FORMAT,
+                                      'view_dimension': wgpu.TextureViewDimension.d2}},
+        }
+        return self._device.create_bind_group_layout(entries=[
+            {'binding': i, 'visibility': wgpu.ShaderStage.COMPUTE, **kind[ch]}
+            for i, ch in enumerate(spec)
+        ])
+
     def _build_pipelines(self):
+        """Compile every compute pipeline from _PIPELINE_TABLE: build each bind-
+        group layout from its spec, store it on its attribute, then create the
+        pipeline(s) that share it. Shader modules are cached so a file used by
+        two rows (cnr.wgsl) compiles once."""
         dev = self._device
-
-        # --- LUT pipeline ---
-        lut_src = _read_shader('lut.wgsl')
-        lut_mod = dev.create_shader_module(code=lut_src)
-        self._lut_bg_layout = dev.create_bind_group_layout(entries=[
-            {'binding': 0, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'buffer': {'type': wgpu.BufferBindingType.read_only_storage}},
-            {'binding': 1, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'buffer': {'type': wgpu.BufferBindingType.read_only_storage}},
-            {'binding': 2, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'buffer': {'type': wgpu.BufferBindingType.storage}},
-            {'binding': 3, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'buffer': {'type': wgpu.BufferBindingType.uniform}},
-        ])
-        pl = dev.create_pipeline_layout(bind_group_layouts=[self._lut_bg_layout])
-        self._lut_pipeline = dev.create_compute_pipeline(
-            layout=pl, compute={'module': lut_mod, 'entry_point': 'main'})
-
-        # --- ACEScct pipeline ---
-        acescct_src = _read_shader('acescct.wgsl')
-        acescct_mod = dev.create_shader_module(code=acescct_src)
-        self._acescct_bg_layout = dev.create_bind_group_layout(entries=[
-            {'binding': 0, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'buffer': {'type': wgpu.BufferBindingType.read_only_storage}},
-            {'binding': 1, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'buffer': {'type': wgpu.BufferBindingType.storage}},
-        ])
-        pl2 = dev.create_pipeline_layout(bind_group_layouts=[self._acescct_bg_layout])
-        self._acescct_pipeline_decode = dev.create_compute_pipeline(
-            layout=pl2, compute={'module': acescct_mod, 'entry_point': 'main_decode'})
-        self._acescct_pipeline_encode = dev.create_compute_pipeline(
-            layout=pl2, compute={'module': acescct_mod, 'entry_point': 'main_encode'})
-
-        # --- Grain pipeline ---
-        grain_src = _read_shader('grain.wgsl')
-        grain_mod = dev.create_shader_module(code=grain_src)
-        self._grain_bg_layout = dev.create_bind_group_layout(entries=[
-            {'binding': 0, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'buffer': {'type': wgpu.BufferBindingType.read_only_storage}},
-            {'binding': 1, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'buffer': {'type': wgpu.BufferBindingType.read_only_storage}},
-            {'binding': 2, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'buffer': {'type': wgpu.BufferBindingType.storage}},
-            {'binding': 3, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'buffer': {'type': wgpu.BufferBindingType.uniform}},
-        ])
-        pl3 = dev.create_pipeline_layout(bind_group_layouts=[self._grain_bg_layout])
-        self._grain_pipeline = dev.create_compute_pipeline(
-            layout=pl3, compute={'module': grain_mod, 'entry_point': 'main'})
-
-        # --- Screen blend + unsharp mask pipeline ---
-        blend_src = _read_shader('blend.wgsl')
-        blend_mod = dev.create_shader_module(code=blend_src)
-        self._blend_bg_layout = dev.create_bind_group_layout(entries=[
-            {'binding': 0, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'buffer': {'type': wgpu.BufferBindingType.read_only_storage}},
-            {'binding': 1, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'buffer': {'type': wgpu.BufferBindingType.read_only_storage}},
-            {'binding': 2, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'buffer': {'type': wgpu.BufferBindingType.storage}},
-            {'binding': 3, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'buffer': {'type': wgpu.BufferBindingType.uniform}},
-        ])
-        pl4 = dev.create_pipeline_layout(bind_group_layouts=[self._blend_bg_layout])
-        self._screen_pipeline = dev.create_compute_pipeline(
-            layout=pl4, compute={'module': blend_mod, 'entry_point': 'main_screen'})
-        self._unsharp_pipeline = dev.create_compute_pipeline(
-            layout=pl4, compute={'module': blend_mod, 'entry_point': 'main_unsharp'})
-
-        # --- Gaussian blur pipeline ---
-        gauss_src = _read_shader('gaussian_blur.wgsl')
-        gauss_mod = dev.create_shader_module(code=gauss_src)
-        # Same layout as blend (img_in, kernel, img_out, uniforms) but bindings 0+1
-        # are both read-only storage.
-        self._gauss_bg_layout = dev.create_bind_group_layout(entries=[
-            {'binding': 0, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'buffer': {'type': wgpu.BufferBindingType.read_only_storage}},
-            {'binding': 1, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'buffer': {'type': wgpu.BufferBindingType.read_only_storage}},
-            {'binding': 2, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'buffer': {'type': wgpu.BufferBindingType.storage}},
-            {'binding': 3, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'buffer': {'type': wgpu.BufferBindingType.uniform}},
-        ])
-        pl5 = dev.create_pipeline_layout(bind_group_layouts=[self._gauss_bg_layout])
-        self._gauss_pipeline_h = dev.create_compute_pipeline(
-            layout=pl5, compute={'module': gauss_mod, 'entry_point': 'main_h'})
-        self._gauss_pipeline_v = dev.create_compute_pipeline(
-            layout=pl5, compute={'module': gauss_mod, 'entry_point': 'main_v'})
-
-        # --- ACEScct encode (texture-resident) pipeline ---
-        enc_src = _read_shader('encode_tex.wgsl')
-        enc_mod = dev.create_shader_module(code=enc_src)
-        self._encode_tex_bg_layout = dev.create_bind_group_layout(entries=[
-            {'binding': 0, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'texture': {'sample_type': wgpu.TextureSampleType.unfilterable_float,
-                         'view_dimension': wgpu.TextureViewDimension.d2}},
-            {'binding': 1, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'storage_texture': {'access': wgpu.StorageTextureAccess.write_only,
-                                 'format': self._TEX_FORMAT,
-                                 'view_dimension': wgpu.TextureViewDimension.d2}},
-        ])
-        pl6 = dev.create_pipeline_layout(bind_group_layouts=[self._encode_tex_bg_layout])
-        self._encode_tex_pipeline = dev.create_compute_pipeline(
-            layout=pl6, compute={'module': enc_mod, 'entry_point': 'main'})
-
-        # --- LUT (texture-resident tetrahedral) pipeline ---
-        lut_tex_src = _read_shader('lut_tex.wgsl')
-        lut_tex_mod = dev.create_shader_module(code=lut_tex_src)
-        self._lut_tex_bg_layout = dev.create_bind_group_layout(entries=[
-            {'binding': 0, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'texture': {'sample_type': wgpu.TextureSampleType.unfilterable_float,
-                         'view_dimension': wgpu.TextureViewDimension.d2}},
-            {'binding': 1, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'buffer': {'type': wgpu.BufferBindingType.read_only_storage}},
-            {'binding': 2, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'storage_texture': {'access': wgpu.StorageTextureAccess.write_only,
-                                 'format': self._TEX_FORMAT,
-                                 'view_dimension': wgpu.TextureViewDimension.d2}},
-            {'binding': 3, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'buffer': {'type': wgpu.BufferBindingType.uniform}},
-        ])
-        pl7 = dev.create_pipeline_layout(bind_group_layouts=[self._lut_tex_bg_layout])
-        self._lut_tex_pipeline = dev.create_compute_pipeline(
-            layout=pl7, compute={'module': lut_tex_mod, 'entry_point': 'main'})
-
-        # --- Gaussian blur (texture-resident, separable) pipeline ---
-        gauss_tex_src = _read_shader('gaussian_blur_tex.wgsl')
-        gauss_tex_mod = dev.create_shader_module(code=gauss_tex_src)
-        self._gauss_tex_bg_layout = dev.create_bind_group_layout(entries=[
-            {'binding': 0, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'texture': {'sample_type': wgpu.TextureSampleType.unfilterable_float,
-                         'view_dimension': wgpu.TextureViewDimension.d2}},
-            {'binding': 1, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'buffer': {'type': wgpu.BufferBindingType.read_only_storage}},
-            {'binding': 2, 'visibility': wgpu.ShaderStage.COMPUTE,
-             'storage_texture': {'access': wgpu.StorageTextureAccess.write_only,
-                                 'format': self._TEX_FORMAT,
-                                 'view_dimension': wgpu.TextureViewDimension.d2}},
-        ])
-        pl8 = dev.create_pipeline_layout(bind_group_layouts=[self._gauss_tex_bg_layout])
-        self._gauss_tex_pipeline_h = dev.create_compute_pipeline(
-            layout=pl8, compute={'module': gauss_tex_mod, 'entry_point': 'main_h'})
-        self._gauss_tex_pipeline_v = dev.create_compute_pipeline(
-            layout=pl8, compute={'module': gauss_tex_mod, 'entry_point': 'main_v'})
-
-        # --- Halation (texture-resident) passes: mask, highlights, combine ---
-        _tex = {'sample_type': wgpu.TextureSampleType.unfilterable_float,
-                'view_dimension': wgpu.TextureViewDimension.d2}
-        _store = {'access': wgpu.StorageTextureAccess.write_only,
-                  'format': self._TEX_FORMAT, 'view_dimension': wgpu.TextureViewDimension.d2}
-        _C = wgpu.ShaderStage.COMPUTE
-
-        hal_mask_mod = dev.create_shader_module(code=_read_shader('halation_mask.wgsl'))
-        self._hal_mask_bg_layout = dev.create_bind_group_layout(entries=[
-            {'binding': 0, 'visibility': _C, 'texture': _tex},
-            {'binding': 1, 'visibility': _C, 'storage_texture': _store},
-            {'binding': 2, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.uniform}},
-        ])
-        self._hal_mask_pipeline = dev.create_compute_pipeline(
-            layout=dev.create_pipeline_layout(bind_group_layouts=[self._hal_mask_bg_layout]),
-            compute={'module': hal_mask_mod, 'entry_point': 'main'})
-
-        hal_hi_mod = dev.create_shader_module(code=_read_shader('halation_highlights.wgsl'))
-        self._hal_hi_bg_layout = dev.create_bind_group_layout(entries=[
-            {'binding': 0, 'visibility': _C, 'texture': _tex},
-            {'binding': 1, 'visibility': _C, 'texture': _tex},
-            {'binding': 2, 'visibility': _C, 'storage_texture': _store},
-        ])
-        self._hal_hi_pipeline = dev.create_compute_pipeline(
-            layout=dev.create_pipeline_layout(bind_group_layouts=[self._hal_hi_bg_layout]),
-            compute={'module': hal_hi_mod, 'entry_point': 'main'})
-
-        hal_comb_mod = dev.create_shader_module(code=_read_shader('halation_combine.wgsl'))
-        self._hal_combine_bg_layout = dev.create_bind_group_layout(entries=[
-            {'binding': 0, 'visibility': _C, 'texture': _tex},
-            {'binding': 1, 'visibility': _C, 'texture': _tex},
-            {'binding': 2, 'visibility': _C, 'texture': _tex},
-            {'binding': 3, 'visibility': _C, 'storage_texture': _store},
-            {'binding': 4, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.uniform}},
-        ])
-        self._hal_combine_pipeline = dev.create_compute_pipeline(
-            layout=dev.create_pipeline_layout(bind_group_layouts=[self._hal_combine_bg_layout]),
-            compute={'module': hal_comb_mod, 'entry_point': 'main'})
-
-        # --- Unsharp mask (texture-resident) pipeline: img + (img-blur)*k ---
-        unsharp_tex_mod = dev.create_shader_module(code=_read_shader('unsharp_tex.wgsl'))
-        self._unsharp_tex_bg_layout = dev.create_bind_group_layout(entries=[
-            {'binding': 0, 'visibility': _C, 'texture': _tex},
-            {'binding': 1, 'visibility': _C, 'texture': _tex},
-            {'binding': 2, 'visibility': _C, 'storage_texture': _store},
-            {'binding': 3, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.uniform}},
-        ])
-        self._unsharp_tex_pipeline = dev.create_compute_pipeline(
-            layout=dev.create_pipeline_layout(bind_group_layouts=[self._unsharp_tex_bg_layout]),
-            compute={'module': unsharp_tex_mod, 'entry_point': 'main'})
-
-        # --- Spectral chromatic aberration (texture-resident) pipeline ---
-        ca_tex_mod = dev.create_shader_module(code=_read_shader('ca_tex.wgsl'))
-        self._ca_tex_bg_layout = dev.create_bind_group_layout(entries=[
-            {'binding': 0, 'visibility': _C, 'texture': _tex},
-            {'binding': 1, 'visibility': _C, 'storage_texture': _store},
-            {'binding': 2, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.uniform}},
-        ])
-        self._ca_tex_pipeline = dev.create_compute_pipeline(
-            layout=dev.create_pipeline_layout(bind_group_layouts=[self._ca_tex_bg_layout]),
-            compute={'module': ca_tex_mod, 'entry_point': 'main'})
-
-        # --- Grain blend (texture-resident) pipeline ---
-        grain_tex_mod = dev.create_shader_module(code=_read_shader('grain_tex.wgsl'))
-        self._grain_tex_bg_layout = dev.create_bind_group_layout(entries=[
-            {'binding': 0, 'visibility': _C, 'texture': _tex},
-            {'binding': 1, 'visibility': _C, 'texture': _tex},
-            {'binding': 2, 'visibility': _C, 'storage_texture': _store},
-            {'binding': 3, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.uniform}},
-        ])
-        self._grain_tex_pipeline = dev.create_compute_pipeline(
-            layout=dev.create_pipeline_layout(bind_group_layouts=[self._grain_tex_bg_layout]),
-            compute={'module': grain_tex_mod, 'entry_point': 'main'})
-
-        # --- Edge (corner) softness (texture-resident) pipeline ---
-        edge_soft_mod = dev.create_shader_module(code=_read_shader('edge_softness_tex.wgsl'))
-        self._edge_soft_bg_layout = dev.create_bind_group_layout(entries=[
-            {'binding': 0, 'visibility': _C, 'texture': _tex},
-            {'binding': 1, 'visibility': _C, 'texture': _tex},
-            {'binding': 2, 'visibility': _C, 'storage_texture': _store},
-            {'binding': 3, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.uniform}},
-        ])
-        self._edge_soft_pipeline = dev.create_compute_pipeline(
-            layout=dev.create_pipeline_layout(bind_group_layouts=[self._edge_soft_bg_layout]),
-            compute={'module': edge_soft_mod, 'entry_point': 'main'})
-
-        # --- Vignette (texture-resident, pre-LUT linear) pipeline ---
-        vig_mod = dev.create_shader_module(code=_read_shader('vignette_tex.wgsl'))
-        self._vignette_bg_layout = dev.create_bind_group_layout(entries=[
-            {'binding': 0, 'visibility': _C, 'texture': _tex},
-            {'binding': 1, 'visibility': _C, 'storage_texture': _store},
-            {'binding': 2, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.uniform}},
-        ])
-        self._vignette_pipeline = dev.create_compute_pipeline(
-            layout=dev.create_pipeline_layout(bind_group_layouts=[self._vignette_bg_layout]),
-            compute={'module': vig_mod, 'entry_point': 'main'})
-
-        # --- Bloom (texture-resident, pre-LUT linear): downmask + upadd ---
-        bloom_dm_mod = dev.create_shader_module(code=_read_shader('bloom_downmask.wgsl'))
-        self._bloom_dm_bg_layout = dev.create_bind_group_layout(entries=[
-            {'binding': 0, 'visibility': _C, 'texture': _tex},
-            {'binding': 1, 'visibility': _C, 'storage_texture': _store},
-            {'binding': 2, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.uniform}},
-        ])
-        self._bloom_dm_pipeline = dev.create_compute_pipeline(
-            layout=dev.create_pipeline_layout(bind_group_layouts=[self._bloom_dm_bg_layout]),
-            compute={'module': bloom_dm_mod, 'entry_point': 'main'})
-
-        bloom_ua_mod = dev.create_shader_module(code=_read_shader('bloom_upadd.wgsl'))
-        self._bloom_ua_bg_layout = dev.create_bind_group_layout(entries=[
-            {'binding': 0, 'visibility': _C, 'texture': _tex},
-            {'binding': 1, 'visibility': _C, 'texture': _tex},
-            {'binding': 2, 'visibility': _C, 'storage_texture': _store},
-            {'binding': 3, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.uniform}},
-        ])
-        self._bloom_ua_pipeline = dev.create_compute_pipeline(
-            layout=dev.create_pipeline_layout(bind_group_layouts=[self._bloom_ua_bg_layout]),
-            compute={'module': bloom_ua_mod, 'entry_point': 'main'})
-
-        # --- CNR (texture-resident, pre-LUT linear): Lab transforms + bilateral ---
-        cnr_mod = dev.create_shader_module(code=_read_shader('cnr.wgsl'))
-        self._cnr_io_bg_layout = dev.create_bind_group_layout(entries=[
-            {'binding': 0, 'visibility': _C, 'texture': _tex},
-            {'binding': 1, 'visibility': _C, 'storage_texture': _store},
-        ])
-        cnr_io_pl = dev.create_pipeline_layout(bind_group_layouts=[self._cnr_io_bg_layout])
-        self._cnr_to_lab_pipeline = dev.create_compute_pipeline(
-            layout=cnr_io_pl, compute={'module': cnr_mod, 'entry_point': 'main_to_lab'})
-        self._cnr_to_acescg_pipeline = dev.create_compute_pipeline(
-            layout=cnr_io_pl, compute={'module': cnr_mod, 'entry_point': 'main_to_acescg'})
-        self._cnr_bil_bg_layout = dev.create_bind_group_layout(entries=[
-            {'binding': 0, 'visibility': _C, 'texture': _tex},
-            {'binding': 1, 'visibility': _C, 'storage_texture': _store},
-            {'binding': 2, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.uniform}},
-        ])
-        self._cnr_bil_pipeline = dev.create_compute_pipeline(
-            layout=dev.create_pipeline_layout(bind_group_layouts=[self._cnr_bil_bg_layout]),
-            compute={'module': cnr_mod, 'entry_point': 'main_bilateral'})
-
-        # --- Color-space matrix transform (buffer, load-time raw->ACEScg) ---
-        colormat_mod = dev.create_shader_module(code=_read_shader('color_matmul.wgsl'))
-        self._colormat_bg_layout = dev.create_bind_group_layout(entries=[
-            {'binding': 0, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.read_only_storage}},
-            {'binding': 1, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.storage}},
-            {'binding': 2, 'visibility': _C, 'buffer': {'type': wgpu.BufferBindingType.uniform}},
-        ])
-        self._colormat_pipeline = dev.create_compute_pipeline(
-            layout=dev.create_pipeline_layout(bind_group_layouts=[self._colormat_bg_layout]),
-            compute={'module': colormat_mod, 'entry_point': 'main'})
+        modules = {}
+        for shader, spec, bgl_attr, pipes in self._PIPELINE_TABLE:
+            layout = self._bgl(spec)
+            setattr(self, bgl_attr, layout)
+            pl = dev.create_pipeline_layout(bind_group_layouts=[layout])
+            if shader not in modules:
+                modules[shader] = dev.create_shader_module(code=_read_shader(shader))
+            mod = modules[shader]
+            for pipe_attr, entry in pipes:
+                setattr(self, pipe_attr, dev.create_compute_pipeline(
+                    layout=pl, compute={'module': mod, 'entry_point': entry}))
 
     # ------------------------------------------------------------------
     # LUT management
