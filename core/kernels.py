@@ -28,6 +28,11 @@ def run_resident(img: np.ndarray, stages) -> np.ndarray | None:
     """
     if not HAS_GPU:
         return None
+    # A render scope draws each stage's textures/uniforms from a reuse arena
+    # instead of allocating fresh per frame. The readback (frame.cpu()) happens
+    # inside the scope; end_render only flips the arena off afterwards, so the
+    # final texture is still valid when it's read back.
+    gpu.begin_render()
     try:
         frame = Frame.from_cpu(img)
         for stage in stages:
@@ -37,6 +42,8 @@ def run_resident(img: np.ndarray, stages) -> np.ndarray | None:
         return frame.cpu()
     except Exception:
         return None
+    finally:
+        gpu.end_render()
 
 
 # Below this the numpy BLAS matmul is as fast as the GPU path once the

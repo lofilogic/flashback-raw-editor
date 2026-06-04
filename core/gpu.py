@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 import struct
+import threading
 import numpy as np
 
 try:
@@ -33,6 +34,86 @@ def _read_shader(name: str) -> str:
     shader_dir = os.path.join(os.path.dirname(__file__), 'shaders')
     with open(os.path.join(shader_dir, name), 'r') as f:
         return f.read()
+
+
+class _RenderArena:
+    """Thread-local bump allocator for per-render GPU textures and uniforms.
+
+    The shipped pipeline keeps pixels GPU-resident but still allocated a fresh
+    texture (~96 MB at 3 MP) and uniform buffer per stage, every frame. That
+    per-frame allocation churn — CPU-side driver work, not GPU compute — is the
+    top remaining interactive cost. This arena kills it: within one render
+    ``acquire`` hands out a distinct resource per call (a bump index advances),
+    and ``begin`` resets the indices to 0 so the *next* render on the same
+    thread reuses the same physical resources instead of allocating fresh.
+
+    Bump-arena, not a freeing pool, on purpose: each allocation in a render gets
+    its own slot, so no two live Frames in a render ever share a texture — that
+    preserves the write-once ``Frame`` invariant. It relies on no Frame
+    outliving its render (``run_resident`` reads back before ``end``); reused
+    textures hold stale data between renders, which is fine because every stage
+    fully overwrites its dst (see the dirty-arena parity test).
+
+    State is thread-local because RenderWorker (interactive scrub) and
+    VibeRefreshWorker (thumbnails) render concurrently on the shared GPU
+    singleton. Per-thread pools mean no lock and no cross-thread corruption;
+    peak retained memory is one render's worth of textures per render thread.
+    """
+
+    def __init__(self):
+        self._local = threading.local()
+
+    def _state(self):
+        s = self._local
+        if not hasattr(s, "depth"):
+            s.depth = 0
+            s.active = False
+            s.tex_pools = {}   # (h, w) -> list[texture]
+            s.tex_idx = {}     # (h, w) -> next slot
+            s.uni_pools = {}   # nbytes -> list[buffer]
+            s.uni_idx = {}     # nbytes -> next slot
+        return s
+
+    @property
+    def active(self) -> bool:
+        return self._state().active
+
+    def begin(self):
+        """Open a render scope (reentrant). Resets bump indices on the outermost
+        begin so this render reuses the pools from a clean start."""
+        s = self._state()
+        s.depth += 1
+        if s.depth == 1:
+            s.active = True
+            s.tex_idx = {}
+            s.uni_idx = {}
+
+    def end(self):
+        """Close a render scope. The pools persist for the next render; only the
+        active flag flips off, after the caller has read its result back."""
+        s = self._state()
+        s.depth = max(0, s.depth - 1)
+        if s.depth == 0:
+            s.active = False
+
+    def acquire_tex(self, shape, create_fn):
+        s = self._state()
+        key = tuple(shape[:2])
+        pool = s.tex_pools.setdefault(key, [])
+        i = s.tex_idx.get(key, 0)
+        if i >= len(pool):
+            pool.append(create_fn())   # grow once; reused on later renders
+        s.tex_idx[key] = i + 1
+        return pool[i]
+
+    def acquire_uni(self, nbytes, create_fn):
+        s = self._state()
+        pool = s.uni_pools.setdefault(nbytes, [])
+        i = s.uni_idx.get(nbytes, 0)
+        if i >= len(pool):
+            pool.append(create_fn())
+        s.uni_idx[nbytes] = i + 1
+        return pool[i]
 
 
 class GPUPipeline:
@@ -89,6 +170,22 @@ class GPUPipeline:
         self._colormat_bg_layout = None
         self._lut_buf = None   # persistent GPU LUT buffer
         self._lut_size = 0
+        self._arena = _RenderArena()   # per-render texture/uniform bump allocator
+
+    # ------------------------------------------------------------------
+    # Per-render arena scope
+    # ------------------------------------------------------------------
+
+    def begin_render(self):
+        """Open a render scope: subsequent texture/uniform allocations are drawn
+        from the (thread-local) reuse arena instead of being freshly created.
+        Bracket a resident chain with begin_render/end_render (see run_resident)."""
+        self._arena.begin()
+
+    def end_render(self):
+        """Close the render scope opened by begin_render. Call after the chain's
+        result has been read back; reused resources persist for the next render."""
+        self._arena.end()
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -491,6 +588,14 @@ class GPUPipeline:
     _TEX_FORMAT = 'rgba32float'
 
     def _create_tex(self, shape):
+        # Inside a render scope, reuse a pooled texture of this shape (kills the
+        # per-frame allocation churn); otherwise allocate a fresh one as before
+        # (per-op paths and tests are unaffected).
+        if self._arena.active:
+            return self._arena.acquire_tex(shape, lambda: self._alloc_tex(shape))
+        return self._alloc_tex(shape)
+
+    def _alloc_tex(self, shape):
         h, w = shape[:2]
         return self._device.create_texture(
             size=(w, h, 1),
@@ -952,6 +1057,17 @@ class GPUPipeline:
     def _uniform(self, data: bytes):
         # Uniform buffers must be multiples of 16 bytes
         padded = data + b'\x00' * (16 - len(data) % 16) if len(data) % 16 else data
+        # Inside a render scope, reuse a pooled buffer of this size and rewrite it
+        # in place (write_buffer) instead of allocating a fresh one per stage. The
+        # pool is keyed by byte length, so the returned buffer's .size matches the
+        # data — callers that bind {'size': uni.size} stay correct unchanged.
+        if self._arena.active:
+            buf = self._arena.acquire_uni(len(padded), lambda n=len(padded): self._device.create_buffer(
+                size=n,
+                usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST,
+            ))
+            self._device.queue.write_buffer(buf, 0, padded)
+            return buf
         return self._device.create_buffer_with_data(
             data=padded,
             usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST,

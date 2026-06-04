@@ -374,6 +374,92 @@ def test_resident_tail_chains_without_readback(img):
                   tol=1e-5, label="resident_tail")
 
 
+# --- per-render arena (reuse + dirty-arena safety) --------------------------
+
+def _smooth_lut(n=17):
+    axis = np.linspace(0.0, 1.0, n, dtype=np.float32)
+    r, g, b = np.meshgrid(axis, axis, axis, indexing='ij')
+    return np.stack([
+        np.clip(r ** 1.1 * 0.95 + 0.03 * g, 0, 1),
+        np.clip(g ** 0.95,                  0, 1),
+        np.clip(b ** 1.05 * 0.97 + 0.02 * r, 0, 1),
+    ], axis=-1).astype(np.float32)
+
+
+@requires_gpu
+def test_arena_reuses_textures_across_renders():
+    """Inside a render scope, distinct allocations get distinct textures
+    (write-once slots); across two scopes the same slot returns the *same*
+    physical texture — i.e. no per-frame allocation. That reuse is the whole
+    point of Phase 1."""
+    shape = (32, 48, 3)
+
+    gpu.begin_render()
+    try:
+        a0 = gpu._create_tex(shape)
+        a1 = gpu._create_tex(shape)
+        assert a0 is not a1            # two live Frames never share a texture
+    finally:
+        gpu.end_render()
+
+    gpu.begin_render()
+    try:
+        b0 = gpu._create_tex(shape)
+        b1 = gpu._create_tex(shape)
+        assert b0 is a0 and b1 is a1   # next render reuses the same textures
+    finally:
+        gpu.end_render()
+
+    # Outside any scope, allocation is fresh (per-op / test paths unaffected).
+    assert gpu._create_tex(shape) is not a0
+
+
+@requires_gpu
+def test_dirty_arena_parity():
+    """A full resident render must produce the same pixels whether or not the
+    arena was just used by a *different* render that left stale data in the
+    pooled textures (Trap #3). Exercises bloom's small downsample texture and
+    the full-res pool across two distinct chains on the same thread."""
+    from core.kernels import run_resident
+    gpu.upload_lut(_smooth_lut())
+
+    rng = np.random.default_rng(99)
+    # divisible by 4 so bloom's area-downsample blocks line up
+    img_a = (rng.random((64, 96, 3), dtype=np.float32) * 0.4).astype(np.float32)
+    img_a[20:32, 30:50, :] += 3.0                      # highlights drive bloom
+    grain = rng.random(img_a.shape, dtype=np.float32)
+
+    chain_a = [
+        lambda f: gpu.bloom_frame(f, 0.3, 0.55),       # pre-LUT, fills small pool
+        gpu.encode_frame,
+        gpu.lut_frame,
+        lambda f: gpu.softness_frame(f, 2.0),
+        lambda f: gpu.grain_frame(f, grain, 0.3, 0.2, 0.4),
+        lambda f: gpu.sharpen_frame(f, 0.5, 2.0),
+    ]
+
+    clean = run_resident(img_a, chain_a)
+    assert clean is not None
+
+    # Dirty the pools: a different chain on a different image of the same shape,
+    # leaving unrelated values in every reused texture (incl. the small one).
+    img_b = (rng.random((64, 96, 3), dtype=np.float32) * 2.0).astype(np.float32)
+    dirty_chain = [
+        lambda f: gpu.cnr_frame(f, 4.0),
+        lambda f: gpu.bloom_frame(f, 0.6, 0.2),
+        gpu.encode_frame,
+        gpu.lut_frame,
+        lambda f: gpu.softness_frame(f, 5.0),
+    ]
+    assert run_resident(img_b, dirty_chain) is not None
+
+    after_dirty = run_resident(img_a, chain_a)
+    assert after_dirty is not None
+    # Same GPU math, same input — any difference is stale data leaking from a
+    # recycled texture, so the bar is bit-level, not perceptual.
+    assert max_abs_err(after_dirty, clean) <= 1e-6
+
+
 # --- the parity gate itself --------------------------------------------------
 
 def test_assert_parity_passes_on_equivalent(img):
