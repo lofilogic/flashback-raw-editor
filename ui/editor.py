@@ -1700,14 +1700,32 @@ class FlashbackEditor(QMainWindow):
 
         lower_exts = [f"*{ext}" for ext in self.SUPPORTED_EXTENSIONS]
         upper_exts = [f"*{ext.upper()}" for ext in self.SUPPORTED_EXTENSIONS]
-        filter_string = f"Supported Images ({' '.join(lower_exts + upper_exts)})"
+        filter_string = (f"Supported Images ({' '.join(lower_exts + upper_exts + ['*.zip'])});;"
+                         f"Flashback V1 Roll (*.zip)")
 
         files, _ = QFileDialog.getOpenFileNames(self, "Select Image Files", start_dir, filter_string)
 
         if files:
             new_dir = str(Path(files[0]).parent)
             self.app_settings.setValue("last_open_dir", new_dir)
-            self.load_image_files([Path(f) for f in files])
+            self.load_image_files(self._resolve_input_paths(files))
+
+    def _stop_thumbnail_workers(self):
+        """Stop and join any running thumbnail workers so their QThreads never
+        outlive the Python owner — that aborts with "QThread: Destroyed while
+        thread is still running". signals are blocked first so a stale
+        ``finished`` emission can't fire its slot against a replacement worker.
+        V1 negatives develop slowly, widening the window where a worker is
+        mid-flight on close/reload."""
+        for attr in ('thumbnail_worker', 'add_thumbnail_worker'):
+            w = getattr(self, attr, None)
+            if w is None:
+                continue
+            w.blockSignals(True)
+            w._is_running = False
+            if w.isRunning():
+                w.wait()
+            setattr(self, attr, None)
 
     def load_image_files(self, image_files, export_sources=None,
                           image_rotations=None, current_path=None):
@@ -1717,6 +1735,9 @@ class FlashbackEditor(QMainWindow):
         if self._vibe_refresh_worker and self._vibe_refresh_worker.isRunning():
             self._vibe_refresh_worker.stop()
             self._vibe_refresh_worker.wait()
+        # Retire any in-flight thumbnail pass before we replace the worker
+        # reference below, or the old QThread is orphaned while still running.
+        self._stop_thumbnail_workers()
 
         # Always present in alphabetical order (by filename, case-insensitive)
         # regardless of source ordering or OS settings.
@@ -1806,6 +1827,11 @@ class FlashbackEditor(QMainWindow):
         log.info("✓ Thumbnail generation complete!")
         self.thumbnail_strip.container.setUpdatesEnabled(True)
         if self.thumbnail_worker:
+            # ThumbnailWorker emits its own `finished` as the LAST line of run(),
+            # i.e. while the QThread is still technically running. wait() blocks
+            # until run() has actually returned (instant here) so the queued
+            # deleteLater can't destroy a still-running QThread -> qFatal/abort.
+            self.thumbnail_worker.wait()
             self.thumbnail_worker.deleteLater()
             self.thumbnail_worker = None
         try:
@@ -1857,6 +1883,9 @@ class FlashbackEditor(QMainWindow):
     def _on_add_thumbnails_finished(self):
         log.info("✓ Add-images thumbnail generation complete!")
         if hasattr(self, 'add_thumbnail_worker') and self.add_thumbnail_worker:
+            # See _on_thumbnails_finished: join the thread before deleteLater so
+            # the DeferredDelete can't hit a QThread that's still running.
+            self.add_thumbnail_worker.wait()
             self.add_thumbnail_worker.deleteLater()
             self.add_thumbnail_worker = None
         try:
@@ -2682,6 +2711,14 @@ class FlashbackEditor(QMainWindow):
             QTimer.singleShot(0, _do_apply)
 
     def closeEvent(self, event):
+        # Join every background QThread before teardown — any still running when
+        # its Python owner is destroyed aborts the process ("QThread: Destroyed
+        # while thread is still running"). Slow V1 thumbnail passes make this
+        # easy to hit on close.
+        if self._vibe_refresh_worker and self._vibe_refresh_worker.isRunning():
+            self._vibe_refresh_worker.stop()
+            self._vibe_refresh_worker.wait()
+        self._stop_thumbnail_workers()
         self._render_worker.stop()
         self._render_worker.wait()
         super().closeEvent(event)
@@ -2724,10 +2761,37 @@ class FlashbackEditor(QMainWindow):
             self.drag_overlay.setStyleSheet(self._drag_style_active)
             self.drag_overlay_add.setStyleSheet(self._drag_style_dim)
 
+    def _negatives_from_zip(self, zip_path):
+        """Extract a Flashback V1 roll zip to paired negative files under the
+        output dir and return the raw paths (sorted). Empty list on failure."""
+        from core.v1_negative import extract_negatives_from_zip
+        try:
+            dest = (Path(self.output_dir) / '_v1_imports' / Path(zip_path).stem
+                    if self.output_dir else None)
+            raws = extract_negatives_from_zip(zip_path, dest)
+            if not raws:
+                log.warning("[editor] no V1 negatives found in zip: %s", zip_path)
+            return raws
+        except Exception:
+            log.exception("[editor] failed to read V1 roll zip: %s", zip_path)
+            return []
+
+    def _resolve_input_paths(self, paths):
+        """Expand any dropped/opened .zip rolls into their V1 negative paths;
+        pass every other path through unchanged."""
+        resolved = []
+        for p in paths:
+            if str(p).lower().endswith('.zip'):
+                resolved.extend(self._negatives_from_zip(str(p)))
+            else:
+                resolved.append(Path(p))
+        return resolved
+
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
-                if url.isLocalFile() and url.toLocalFile().lower().endswith(self.SUPPORTED_EXTENSIONS):
+                if url.isLocalFile() and url.toLocalFile().lower().endswith(
+                        self.SUPPORTED_EXTENSIONS + ('.zip',)):
                     self._update_drag_overlay_geometry()
                     self.drag_overlay.raise_()
                     self.drag_overlay.show()
@@ -2755,12 +2819,13 @@ class FlashbackEditor(QMainWindow):
         self.drag_overlay_add.setStyleSheet(self._drag_style_dim)
 
         urls = event.mimeData().urls()
-        image_files = []
+        dropped = []
         for url in urls:
             if url.isLocalFile():
                 file_path = url.toLocalFile()
-                if file_path.lower().endswith(self.SUPPORTED_EXTENSIONS):
-                    image_files.append(Path(file_path))
+                if file_path.lower().endswith(self.SUPPORTED_EXTENSIONS + ('.zip',)):
+                    dropped.append(file_path)
+        image_files = self._resolve_input_paths(dropped)
 
         if not image_files:
             event.ignore()
