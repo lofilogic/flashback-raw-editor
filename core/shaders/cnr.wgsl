@@ -1,7 +1,9 @@
 // Chroma noise reduction in CIE Lab, texture-resident.
 //
-// Twin of effects.reduce_color_noise_chroma. Three passes:
+// Twin of effects.reduce_color_noise_chroma. Four passes:
 //   main_to_lab     : linear ACEScg -> Lab (L, a, b) in rgb
+//   main_despike    : optional 3x3-median outlier clamp on a*/b* (kills colour
+//                     fireflies that the edge-preserving bilateral protects)
 //   main_bilateral  : edge-preserving bilateral on a* and b* only; L* copied
 //                     through untouched, so luma is preserved by construction
 //   main_to_acescg  : Lab -> linear ACEScg
@@ -74,17 +76,80 @@ fn main_to_acescg(@builtin(global_invocation_id) gid: vec3u) {
     textureStore(dst_a, p, vec4f(to_acescg(textureLoad(src_a, p, 0).rgb), 1.0));
 }
 
-// ---- pass 2: bilateral on a*/b* ----
+// ---- shared uniform for the despike + bilateral passes ----
+// One struct so both entry points can bind the single binding-2 uniform var.
+// Each pass reads only the fields it needs; the Python side zero-fills the rest.
 struct U {
-    sigma_space: f32,
-    sigma_color: f32,
-    radius:      f32,
-    _pad:        f32,
+    sigma_space: f32,   // bilateral spatial sigma
+    sigma_color: f32,   // bilateral range sigma
+    radius:      f32,   // bilateral window radius
+    thr_green:   f32,   // despike clamp limit for the green direction (-a*)
+    thr_other:   f32,   // despike clamp limit for every other direction
+    _pad0:       f32,
+    _pad1:       f32,
+    _pad2:       f32,
 }
 
 @group(0) @binding(0) var          src_b: texture_2d<f32>;
 @group(0) @binding(1) var          dst_b: texture_storage_2d<rgba32float, write>;
 @group(0) @binding(2) var<uniform> u:     U;
+
+// Sort a pair so *a <= *b (the swap primitive of the median network).
+fn s2(a: ptr<function, f32>, b: ptr<function, f32>) {
+    let lo = min(*a, *b);
+    let hi = max(*a, *b);
+    *a = lo;
+    *b = hi;
+}
+
+// Median of 9 values via the classic 19-comparison selection network.
+fn med9(v: array<f32, 9>) -> f32 {
+    var p = v;
+    s2(&p[1], &p[2]); s2(&p[4], &p[5]); s2(&p[7], &p[8]);
+    s2(&p[0], &p[1]); s2(&p[3], &p[4]); s2(&p[6], &p[7]);
+    s2(&p[1], &p[2]); s2(&p[4], &p[5]); s2(&p[7], &p[8]);
+    s2(&p[0], &p[3]); s2(&p[5], &p[8]); s2(&p[4], &p[7]);
+    s2(&p[3], &p[6]); s2(&p[1], &p[4]); s2(&p[2], &p[5]);
+    s2(&p[4], &p[7]); s2(&p[4], &p[2]); s2(&p[6], &p[4]);
+    s2(&p[4], &p[2]);
+    return p[4];
+}
+
+// ---- pass 2a: despike (3x3-median outlier clamp on a*/b*) ----
+// A bilateral filter is edge-preserving, so an isolated colour spike (firefly)
+// looks like a one-pixel edge and survives. Here each chroma channel is clamped
+// into [median +/- thr] of its 3x3 neighbourhood: a smooth region equals its own
+// median (deviation ~0, untouched) while a spike is pulled back toward its
+// neighbours. The green direction (a* below the median) uses thr_green; magenta
+// (a* above) and both b* directions use thr_other, so a green bias clamps green
+// harder while leaving other colours alone. The bilateral then mops up the rest.
+@compute @workgroup_size(8, 8)
+fn main_despike(@builtin(global_invocation_id) gid: vec3u) {
+    let dims = vec2i(textureDimensions(src_b));
+    if gid.x >= u32(dims.x) || gid.y >= u32(dims.y) { return; }
+    let p = vec2i(i32(gid.x), i32(gid.y));
+    let center = textureLoad(src_b, p, 0).rgb;     // (L, a, b)
+
+    var va: array<f32, 9>;
+    var vb: array<f32, 9>;
+    var idx = 0;
+    for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+            let q = clamp(p + vec2i(dx, dy), vec2i(0), dims - vec2i(1));
+            let s = textureLoad(src_b, q, 0).rgb;
+            va[idx] = s.y;
+            vb[idx] = s.z;
+            idx++;
+        }
+    }
+    let med_a = med9(va);
+    let med_b = med9(vb);
+    let a = clamp(center.y, med_a - u.thr_green, med_a + u.thr_other);
+    let b = clamp(center.z, med_b - u.thr_other, med_b + u.thr_other);
+    textureStore(dst_b, p, vec4f(center.x, a, b, 1.0));
+}
+
+// ---- pass 2b: bilateral on a*/b* ----
 
 @compute @workgroup_size(8, 8)
 fn main_bilateral(@builtin(global_invocation_id) gid: vec3u) {

@@ -41,7 +41,7 @@ from .config import (
     PROFILE_TONE_CURVE,
     VibeConfig, ImageAdjustments,
     pct, ca_pixels_to_scale, vignette_curve_to_power,
-    cnr_pct_to_sigma, vignette_color_pct_to_shift,
+    cnr_pct_to_sigma, cnr_despike_thresholds, vignette_color_pct_to_shift,
     stops_above_mid_grey_to_acescct,
     resolve_lut_ref,
     _timing_print,
@@ -505,10 +505,11 @@ class FlashbackProcessor:
                   stops_above_mid_grey_to_acescct(v.bloom_threshold_stops))
             stages.append(lambda fr, a=ba: gpu.bloom_frame(fr, *a))
             cpu_ops.append(lambda im, a=ba: apply_bloom(im, *a, linear=True))
-        if lut_path and v.enable_cnr and v.cnr_amount_pct > 0:
-            cs = cnr_pct_to_sigma(v.cnr_amount_pct)
-            stages.append(lambda fr, s=cs: gpu.cnr_frame(fr, s))
-            cpu_ops.append(lambda im, s=cs: reduce_color_noise_chroma(im, sigma=s))
+        if lut_path and v.enable_cnr and (v.cnr_amount_pct > 0 or v.cnr_despike_pct > 0):
+            cs = cnr_pct_to_sigma(v.cnr_amount_pct) if v.cnr_amount_pct > 0 else 0.0
+            ds = cnr_despike_thresholds(v.cnr_despike_pct, v.cnr_despike_bias_pct)
+            stages.append(lambda fr, s=cs, d=ds: gpu.cnr_frame(fr, s, despike=d))
+            cpu_ops.append(lambda im, s=cs, d=ds: reduce_color_noise_chroma(im, sigma=s, despike=d))
         return stages, cpu_ops
 
     def _resident_post_lut_stages(self, v, shape, grain_driver):
@@ -928,8 +929,10 @@ def export_image(processor, output_path, quality=95, as_tiff=False,
             base_ev = vibe.base_exposure_offset_v2
             if not np.isclose(base_ev, 0.0):
                 img = img * (2.0 ** base_ev)
-        if vibe.enable_cnr and vibe.cnr_amount_pct > 0:
-            img = reduce_color_noise_chroma(img, sigma=cnr_pct_to_sigma(vibe.cnr_amount_pct))
+        if vibe.enable_cnr and (vibe.cnr_amount_pct > 0 or vibe.cnr_despike_pct > 0):
+            cs = cnr_pct_to_sigma(vibe.cnr_amount_pct) if vibe.cnr_amount_pct > 0 else 0.0
+            ds = cnr_despike_thresholds(vibe.cnr_despike_pct, vibe.cnr_despike_bias_pct)
+            img = reduce_color_noise_chroma(img, sigma=cs, despike=ds)
         img_acescct = acescct_encode(np.maximum(img, 1e-10))
         img16 = np.clip(img_acescct * 65535.0, 0, 65535).astype(np.uint16)
         bgr   = cv2.cvtColor(img16, cv2.COLOR_RGB2BGR)

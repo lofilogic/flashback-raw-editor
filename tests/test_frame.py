@@ -294,6 +294,56 @@ def test_cnr_frame_vs_cv2_interior_sanity():
     assert max_abs_err(ref, cand) <= 2e-2
 
 
+def test_cnr_despike_removes_green_firefly():
+    """The despike clamp pulls an isolated green spike back toward its
+    neighbours (what the edge-preserving bilateral can't do), while a clean
+    pixel far away stays put. CPU oracle — no GPU needed."""
+    from core.effects import reduce_color_noise_chroma, _acescg_to_lab
+    from core.config import cnr_despike_thresholds
+    img = np.full((16, 16, 3), 0.2, dtype=np.float32)
+    img[8, 8] = [0.04, 0.7, 0.04]               # bright green firefly (very -a*)
+    a_before = _acescg_to_lab(img)[8, 8, 1]
+    out = reduce_color_noise_chroma(img, sigma=0.0,
+                                    despike=cnr_despike_thresholds(100.0, 60.0))
+    a_after = _acescg_to_lab(out)[8, 8, 1]
+    assert a_before < -50.0                       # genuinely a strong green spike
+    assert abs(a_after) < 0.2 * abs(a_before)     # clamped most of the way back
+    assert np.allclose(img[0, 0], out[0, 0], atol=1e-4)   # clean field untouched
+
+
+def test_cnr_despike_green_bias_spares_magenta():
+    """At 100% green bias, thr_other is open so a magenta spike survives while
+    a matching green spike is clamped — the bias targets one direction of a*."""
+    from core.effects import reduce_color_noise_chroma, _acescg_to_lab
+    from core.config import cnr_despike_thresholds
+    despike = cnr_despike_thresholds(100.0, 100.0)
+    green = np.full((16, 16, 3), 0.2, dtype=np.float32); green[8, 8] = [0.04, 0.7, 0.04]
+    magenta = np.full((16, 16, 3), 0.2, dtype=np.float32); magenta[8, 8] = [0.7, 0.04, 0.7]
+    g_out = reduce_color_noise_chroma(green, sigma=0.0, despike=despike)
+    m_out = reduce_color_noise_chroma(magenta, sigma=0.0, despike=despike)
+    g_red = abs(_acescg_to_lab(green)[8, 8, 1]) - abs(_acescg_to_lab(g_out)[8, 8, 1])
+    m_red = abs(_acescg_to_lab(magenta)[8, 8, 1]) - abs(_acescg_to_lab(m_out)[8, 8, 1])
+    assert g_red > 50.0          # green spike strongly clamped
+    assert m_red < 1.0           # magenta spike essentially preserved
+
+
+@requires_gpu
+def test_cnr_despike_frame_vs_cv2_interior():
+    """Resident despike tracks the cv2/numpy oracle in the interior (borders
+    differ: clamp-to-edge vs cv2 BORDER_REPLICATE — same intent, loose tol)."""
+    from core.effects import reduce_color_noise_chroma
+    from core.config import cnr_despike_thresholds
+    rng = np.random.default_rng(24)
+    a = (rng.random((48, 64, 3), dtype=np.float32) * 0.3 + 0.1)
+    # sprinkle a few green fireflies for the clamp to bite on
+    for y, x in [(10, 12), (20, 40), (33, 25), (41, 55)]:
+        a[y, x] = [0.03, 0.8, 0.03]
+    d = cnr_despike_thresholds(80.0, 60.0)
+    ref = reduce_color_noise_chroma(a, sigma=0.0, despike=d)[2:-2, 2:-2]
+    cand = gpu.cnr_frame(Frame.from_cpu(a), sigma=0.0, despike=d).cpu()[2:-2, 2:-2]
+    assert max_abs_err(ref, cand) <= 2e-2
+
+
 @requires_gpu
 def test_bloom_frame_matches_oracle():
     """Resident bloom matches the numpy/cv2 oracle within perceptual tol.

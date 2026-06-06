@@ -197,26 +197,43 @@ def _lab_to_acescg(lab):
     return (xyz.reshape(-1, 3) @ _XYZ_D60_TO_ACESCG.T).reshape(h, w, 3)
 
 
-def reduce_color_noise_chroma(image, sigma=0.7):
+def reduce_color_noise_chroma(image, sigma=0.7, despike=(0.0, 0.0)):
     """Chroma noise reduction in CIE Lab space (linear ACEScg in/out).
 
     Blurs a* and b* with a bilateral filter while leaving L* untouched.
     Bilateral filtering stops at color edges (unlike Gaussian), preventing
     chroma from bleeding across sharp luma boundaries which causes moiré on
     fine periodic patterns like textiles.
+
+    ``despike`` = the (thr_green, thr_other) pair from
+    config.cnr_despike_thresholds. When thr_green>0 a 3x3-median outlier clamp
+    runs first, pulling isolated colour spikes (fireflies) back toward their
+    neighbours — the bilateral is edge-preserving and protects such spikes, so
+    this is what actually removes them without washing out colour detail.
     """
     lab = _acescg_to_lab(image)
-    # d must be a positive odd integer; keep it small so the filter stays fast.
-    # sigma=0.7→5, sigma=2→7, sigma=4→11
-    d = max(5, int(sigma) * 2 + 3)
-    if d % 2 == 0:
-        d += 1
-    # sigmaColor in Lab units (a*/b* range ~±80), scaled with sigma so high
-    # settings denoise harder (see config.cnr_sigma_color); floor 15 keeps low
-    # settings edge-preserving.
-    sigma_color = cnr_sigma_color(sigma)
-    lab[:, :, 1] = cv2.bilateralFilter(lab[:, :, 1], d, sigma_color, sigma)
-    lab[:, :, 2] = cv2.bilateralFilter(lab[:, :, 2], d, sigma_color, sigma)
+    thr_green, thr_other = despike
+    if thr_green > 0:
+        # cv2.medianBlur supports float32 single-channel at ksize 3/5 and uses
+        # BORDER_REPLICATE (= the GPU clamp-to-edge). Clamp each chroma channel
+        # into [median +/- thr]: green (a* below median) by thr_green, magenta
+        # and both b* directions by thr_other.
+        med_a = cv2.medianBlur(lab[:, :, 1], 3)
+        med_b = cv2.medianBlur(lab[:, :, 2], 3)
+        lab[:, :, 1] = np.clip(lab[:, :, 1], med_a - thr_green, med_a + thr_other)
+        lab[:, :, 2] = np.clip(lab[:, :, 2], med_b - thr_other, med_b + thr_other)
+    if sigma > 0:
+        # d must be a positive odd integer; keep it small so the filter stays fast.
+        # sigma=0.7→5, sigma=2→7, sigma=4→11
+        d = max(5, int(sigma) * 2 + 3)
+        if d % 2 == 0:
+            d += 1
+        # sigmaColor in Lab units (a*/b* range ~±80), scaled with sigma so high
+        # settings denoise harder (see config.cnr_sigma_color); floor 15 keeps low
+        # settings edge-preserving.
+        sigma_color = cnr_sigma_color(sigma)
+        lab[:, :, 1] = cv2.bilateralFilter(lab[:, :, 1], d, sigma_color, sigma)
+        lab[:, :, 2] = cv2.bilateralFilter(lab[:, :, 2], d, sigma_color, sigma)
     return _lab_to_acescg(lab)
 
 

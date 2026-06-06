@@ -14,7 +14,8 @@ from core.config import (
     HALATION_THRESHOLD_STOPS, HALATION_BLUR_RADIUS, HALATION_STRENGTH_PCT,
     CA_PIXELS, CA_STEPS, CA_BLUE_BLUR, CA_ZOOM_BLUR_PCT,
     SOFTNESS_SIGMA, GRAIN_STRENGTH_PCT, SHARPEN_STRENGTH_PCT, SHARPEN_RADIUS,
-    CNR_AMOUNT_PCT, VIGNETTE_STRENGTH_PCT, VIGNETTE_COLOR_PCT, VIGNETTE_CURVE,
+    CNR_AMOUNT_PCT, CNR_DESPIKE_PCT, CNR_DESPIKE_BIAS_PCT,
+    VIGNETTE_STRENGTH_PCT, VIGNETTE_COLOR_PCT, VIGNETTE_CURVE,
     BLOOM_STRENGTH_PCT, BLOOM_THRESHOLD_STOPS,
 )
 
@@ -150,6 +151,20 @@ class DebugPanel(QWidget):
         self.spin_cnr = self._create_double_spin(0.0, 100.0, CNR_AMOUNT_PCT, 1.0, suffix=" %")
         self.spin_cnr.valueChanged.connect(self.update_preview)
         live_layout.addRow("CNR Amount:", self.spin_cnr)
+
+        # Despike: 3x3-median chroma outlier clamp for fireflies/green spikes.
+        self.spin_cnr_despike = self._create_double_spin(0.0, 100.0, CNR_DESPIKE_PCT, 1.0, suffix=" %")
+        self.spin_cnr_despike.setToolTip(
+            "Clamps isolated colour spikes (fireflies) toward their neighbours — "
+            "removes green/colour noise spikes the CNR bilateral leaves behind.")
+        self.spin_cnr_despike.valueChanged.connect(self.update_preview)
+        live_layout.addRow("CNR Despike:", self.spin_cnr_despike)
+
+        self.spin_cnr_despike_bias = self._create_double_spin(0.0, 100.0, CNR_DESPIKE_BIAS_PCT, 1.0, suffix=" %")
+        self.spin_cnr_despike_bias.setToolTip(
+            "0 = clamp all colours equally; 100 = clamp green (-a*) only.")
+        self.spin_cnr_despike_bias.valueChanged.connect(self.update_preview)
+        live_layout.addRow("Despike Green Bias:", self.spin_cnr_despike_bias)
 
         live_layout.addRow(self._create_separator())
 
@@ -400,6 +415,8 @@ class DebugPanel(QWidget):
             'sharpen_strength_pct': self.spin_sharpen_str,
             'sharpen_radius': self.spin_sharpen_rad,
             'cnr_amount_pct': self.spin_cnr,
+            'cnr_despike_pct': self.spin_cnr_despike,
+            'cnr_despike_bias_pct': self.spin_cnr_despike_bias,
             'vignette_strength_pct': self.spin_vignette_str,
             'vignette_color_pct': self.spin_vignette_color,
             'vignette_curve': self.spin_vignette_feather,

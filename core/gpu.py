@@ -164,6 +164,7 @@ class GPUPipeline:
         self._cnr_to_lab_pipeline = None   # texture-resident CNR (Lab + bilateral)
         self._cnr_to_acescg_pipeline = None
         self._cnr_bil_pipeline = None
+        self._cnr_despike_pipeline = None
         self._cnr_io_bg_layout = None
         self._cnr_bil_bg_layout = None
         self._colormat_pipeline = None     # buffer 3x3 colour transform (load-time)
@@ -244,7 +245,8 @@ class GPUPipeline:
         ('bloom_upadd.wgsl',       'TTSU',  '_bloom_ua_bg_layout',    (('_bloom_ua_pipeline', 'main'),)),
         ('cnr.wgsl',               'TS',    '_cnr_io_bg_layout',      (('_cnr_to_lab_pipeline', 'main_to_lab'),
                                                                        ('_cnr_to_acescg_pipeline', 'main_to_acescg'))),
-        ('cnr.wgsl',               'TSU',   '_cnr_bil_bg_layout',     (('_cnr_bil_pipeline', 'main_bilateral'),)),
+        ('cnr.wgsl',               'TSU',   '_cnr_bil_bg_layout',     (('_cnr_bil_pipeline', 'main_bilateral'),
+                                                                       ('_cnr_despike_pipeline', 'main_despike'))),
         ('color_matmul.wgsl',      'RWU',   '_colormat_bg_layout',    (('_colormat_pipeline', 'main'),)),
     )
 
@@ -842,37 +844,52 @@ class GPUPipeline:
         self._run2d(pipeline, bg, w, h)
         return dst
 
-    def cnr_frame(self, frame: "Frame", sigma: float):
+    def _cnr_lab_pass(self, pipeline, src_tex, shape, uni):
+        """Run a Lab->Lab CNR pass (despike or bilateral) with a uniform."""
+        h, w = shape[:2]
+        dst = self._create_tex(shape)
+        bg = self._device.create_bind_group(layout=self._cnr_bil_bg_layout, entries=[
+            {'binding': 0, 'resource': src_tex.create_view()},
+            {'binding': 1, 'resource': dst.create_view()},
+            {'binding': 2, 'resource': {'buffer': uni, 'offset': 0, 'size': uni.size}},
+        ])
+        self._run2d(pipeline, bg, w, h)
+        return dst
+
+    def cnr_frame(self, frame: "Frame", sigma: float, despike=(0.0, 0.0)):
         """Chroma noise reduction in Lab, texture-resident: Frame in -> Frame out.
 
         Resident twin of effects.reduce_color_noise_chroma: ACEScg -> Lab, an
-        edge-preserving bilateral on a*/b* only (L* untouched, so luma is
-        preserved), then Lab -> ACEScg. Window/sigmas mirror the cv2 call
-        (d = max(5, int(sigma)*2+3) odd, range sigma 15). Returns the input
-        unchanged when sigma<=0, or None if the GPU is unavailable.
+        optional 3x3-median outlier clamp on a*/b* (``despike`` = the
+        (thr_green, thr_other) pair from config.cnr_despike_thresholds; skipped
+        when thr_green<=0), then an edge-preserving bilateral on a*/b* only (L*
+        untouched, so luma is preserved), then Lab -> ACEScg. Window/sigmas
+        mirror the cv2 call (d = max(5, int(sigma)*2+3) odd, range sigma 15).
+        Returns the input unchanged when sigma<=0 and despike is off, or None if
+        the GPU is unavailable.
         """
         if not self._init():
             return None
-        if sigma <= 0:
+        thr_green, thr_other = despike
+        if sigma <= 0 and thr_green <= 0:
             return frame
-        d = max(5, int(sigma) * 2 + 3)
-        if d % 2 == 0:
-            d += 1
-        radius = d // 2
         from .config import cnr_sigma_color
-        sigma_color = cnr_sigma_color(sigma)
 
         lab = self._cnr_io(self._cnr_to_lab_pipeline, frame.gpu(), frame.shape)
-        filt = self._create_tex(frame.shape)
-        uni = self._uniform(struct.pack('4f', float(sigma), float(sigma_color), float(radius), 0.0))
-        bg = self._device.create_bind_group(layout=self._cnr_bil_bg_layout, entries=[
-            {'binding': 0, 'resource': lab.create_view()},
-            {'binding': 1, 'resource': filt.create_view()},
-            {'binding': 2, 'resource': {'buffer': uni, 'offset': 0, 'size': uni.size}},
-        ])
-        h, w = frame.shape[:2]
-        self._run2d(self._cnr_bil_pipeline, bg, w, h)
-        out = self._cnr_io(self._cnr_to_acescg_pipeline, filt, frame.shape)
+        if thr_green > 0:
+            uni_d = self._uniform(struct.pack(
+                '8f', 0.0, 0.0, 0.0, float(thr_green), float(thr_other), 0.0, 0.0, 0.0))
+            lab = self._cnr_lab_pass(self._cnr_despike_pipeline, lab, frame.shape, uni_d)
+        if sigma > 0:
+            d = max(5, int(sigma) * 2 + 3)
+            if d % 2 == 0:
+                d += 1
+            radius = d // 2
+            sigma_color = cnr_sigma_color(sigma)
+            uni = self._uniform(struct.pack(
+                '8f', float(sigma), float(sigma_color), float(radius), 0.0, 0.0, 0.0, 0.0, 0.0))
+            lab = self._cnr_lab_pass(self._cnr_bil_pipeline, lab, frame.shape, uni)
+        out = self._cnr_io(self._cnr_to_acescg_pipeline, lab, frame.shape)
         return Frame.from_gpu(out, frame.shape, self)
 
     def _uniform(self, data: bytes):

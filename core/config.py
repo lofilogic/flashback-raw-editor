@@ -109,7 +109,9 @@ GRAIN_TILE_SCALE = 0.8     # <1.0 makes grain finer (tiles render denser); >1.0 
 GRAIN_HIGHLIGHT_BIAS = 0.3 # 1.0 = grain biased to highlights, 0.0 = shadows, 0.5 = flat.
 SHARPEN_STRENGTH_PCT = 50.0
 SHARPEN_RADIUS = 1.0       # px
-CNR_AMOUNT_PCT = 40.0      # sigma 8 at _CNR_SIGMA_MAX=20 (a touch under old "200%")
+CNR_AMOUNT_PCT = 20.0      # sigma 8 at _CNR_SIGMA_MAX=20 (a touch under old "200%")
+CNR_DESPIKE_PCT = 60.0        # chroma firefly/outlier clamp; 0 = off
+CNR_DESPIKE_BIAS_PCT = 75.0  # 0 = symmetric, 100 = green (-a*) only
 VIGNETTE_STRENGTH_PCT = 50.0
 VIGNETTE_COLOR_PCT = 25.0
 VIGNETTE_CURVE = 0.0       # -100…+100, higher = more feathered (softer)
@@ -120,6 +122,10 @@ BLOOM_THRESHOLD_STOPS = 3.0      # EV above middle grey
 # 0–MAX. Keeping these explicit makes the migration buckets trivial to
 # write and makes the panel/pipeline agree on the same conversion.
 _CNR_SIGMA_MAX = 20.0
+# Despike clamp limits in Lab a*/b* units: gentle band at amount→0+, tight at
+# amount→100. Smooth colour stays inside the band; only spikes get pulled back.
+_CNR_DESPIKE_T_HI = 40.0
+_CNR_DESPIKE_T_LO = 4.0
 _VIGNETTE_COLOR_MAX = 0.2
 
 
@@ -177,6 +183,32 @@ def cnr_sigma_color(sigma: float) -> float:
     numpy/cv2 path and gpu.cnr_frame.
     """
     return max(15.0, float(sigma) * 3.0)
+
+
+def cnr_despike_thresholds(amount_pct: float, bias_pct: float) -> tuple:
+    """Per-direction Lab clamp limits for the chroma despike prepass.
+
+    Returns ``(thr_green, thr_other)`` in a*/b* units. The prepass clamps each
+    chroma channel into ``[median +/- thr]`` of its 3x3 neighbourhood, killing
+    isolated colour spikes (fireflies) while leaving smooth colour untouched (a
+    smooth region equals its own median, so the deviation is ~0). A bilateral
+    filter is edge-preserving and treats a one-pixel spike as an edge to keep,
+    which is why cranking cnr_amount washes out detail before it removes the
+    spike — this is the tool that actually removes it.
+
+    The green direction (a* below the median) uses ``thr_green``; magenta (a*
+    above) and both b* directions use ``thr_other``. ``bias`` widens
+    ``thr_other`` so 100% acts on green only while 0% is symmetric. ``amount<=0``
+    returns ``(0, 0)`` = off. Single source of truth for the cv2 path and
+    gpu.cnr_frame.
+    """
+    amt = pct(amount_pct)
+    if amt <= 0.0:
+        return (0.0, 0.0)
+    thr_green = _CNR_DESPIKE_T_HI - amt * (_CNR_DESPIKE_T_HI - _CNR_DESPIKE_T_LO)
+    bias = min(0.999, max(0.0, pct(bias_pct)))
+    thr_other = thr_green / (1.0 - bias)
+    return (thr_green, thr_other)
 
 
 def vignette_color_pct_to_shift(color_pct: float) -> float:
@@ -266,6 +298,8 @@ class VibeConfig:
     sharpen_strength_pct: float = SHARPEN_STRENGTH_PCT          # 0–500
     sharpen_radius: float = SHARPEN_RADIUS                      # px
     cnr_amount_pct: float = CNR_AMOUNT_PCT                      # 0–100
+    cnr_despike_pct: float = CNR_DESPIKE_PCT                    # 0–100 (chroma firefly clamp)
+    cnr_despike_bias_pct: float = CNR_DESPIKE_BIAS_PCT          # 0 sym … 100 green-only
     vignette_strength_pct: float = VIGNETTE_STRENGTH_PCT        # 0–100
     vignette_color_pct: float = VIGNETTE_COLOR_PCT              # 0–100
     vignette_curve: float = VIGNETTE_CURVE                      # -100…+100
