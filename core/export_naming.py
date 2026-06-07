@@ -6,10 +6,10 @@ sidecar). Keeping it stateless is what lets the processed-check recompute an
 export's name in a later session without any saved mapping.
 
 Naming:
-  V2 DNGs   (``SN<serial>_<frame>``)  -> ``FBV2_<frame4>``  (e.g. FBV2_0042)
+  V2 DNGs   (``SN<serial>_<frame>``)  -> ``FBV2_<frame5>``  (e.g. FBV2_00042)
   other V2 files                      -> the original stem, unchanged
-  V1 negatives                        -> ``FBV1_<roll4>_<frame4>``
-                                         (e.g. FBV1_3f9c_0007)
+  V1 negatives                        -> ``FBV1_<roll4>_<frame5>``
+                                         (e.g. FBV1_3f9c_00007)
 
 For V1 the roll token is a short hash of the roll identifier (the negative's
 parent folder, which is the import/zip name). The camera's roll id carries no
@@ -40,9 +40,9 @@ def _roll_token(roll_id: str) -> str:
 
 
 def _frame_token(stem: str) -> str:
-    """Zero-pad a numeric stem to 4 digits; pass non-numeric stems through."""
+    """Zero-pad a numeric stem to 5 digits; pass non-numeric stems through."""
     try:
-        return f"{int(stem):04d}"
+        return f"{int(stem):05d}"
     except ValueError:
         return stem
 
@@ -54,5 +54,5 @@ def export_basename(file_path) -> str:
         return f"FBV1_{_roll_token(p.parent.name)}_{_frame_token(p.stem)}"
     m = _V2_FRAME_RE.match(p.stem)
     if m:
-        return f"FBV2_{int(m.group(1)):04d}"
+        return f"FBV2_{int(m.group(1)):05d}"
     return p.stem

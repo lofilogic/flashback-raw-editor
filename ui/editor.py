@@ -2860,13 +2860,38 @@ class FlashbackEditor(QMainWindow):
             log.exception("[editor] failed to read V1 roll zip: %s", zip_path)
             return []
 
+    def _images_from_folder(self, folder):
+        """Collect loadable images from an already-imported folder: supported
+        raws plus V1 negatives (extensionless raw + .json sidecar). Loaded in
+        place — no copy, so re-dragging a folder never overwrites it.
+        Non-recursive; sorted by name."""
+        found = []
+        try:
+            entries = sorted(Path(folder).iterdir(), key=lambda x: x.name.lower())
+        except OSError:
+            return found
+        for entry in entries:
+            if not entry.is_file() or entry.name.lower().endswith('.json'):
+                continue  # .json is a V1 sidecar, picked up with its raw
+            if entry.name.lower().endswith(self.SUPPORTED_EXTENSIONS) \
+                    or is_v1_negative(str(entry)):
+                found.append(entry)
+        if not found:
+            log.warning("[editor] no loadable images in folder: %s", folder)
+        return found
+
     def _resolve_input_paths(self, paths):
-        """Expand any dropped/opened .zip rolls into their V1 negative paths;
-        pass every other path through unchanged."""
+        """Expand dropped/opened inputs into loadable image paths:
+          - .zip rolls   -> extracted V1 negatives (idempotent; existing reused)
+          - directories  -> the supported raws / V1 negatives they contain
+          - everything else passes through unchanged."""
         resolved = []
         for p in paths:
-            if str(p).lower().endswith('.zip'):
-                resolved.extend(self._negatives_from_zip(str(p)))
+            sp = str(p)
+            if sp.lower().endswith('.zip'):
+                resolved.extend(self._negatives_from_zip(sp))
+            elif os.path.isdir(sp):
+                resolved.extend(self._images_from_folder(sp))
             else:
                 resolved.append(Path(p))
         return resolved
@@ -2874,8 +2899,9 @@ class FlashbackEditor(QMainWindow):
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
-                if url.isLocalFile() and url.toLocalFile().lower().endswith(
-                        self.SUPPORTED_EXTENSIONS + ('.zip',)):
+                if url.isLocalFile() and (
+                        url.toLocalFile().lower().endswith(self.SUPPORTED_EXTENSIONS + ('.zip',))
+                        or os.path.isdir(url.toLocalFile())):
                     self._update_drag_overlay_geometry()
                     self.drag_overlay.raise_()
                     self.drag_overlay.show()
@@ -2907,7 +2933,8 @@ class FlashbackEditor(QMainWindow):
         for url in urls:
             if url.isLocalFile():
                 file_path = url.toLocalFile()
-                if file_path.lower().endswith(self.SUPPORTED_EXTENSIONS + ('.zip',)):
+                if file_path.lower().endswith(self.SUPPORTED_EXTENSIONS + ('.zip',)) \
+                        or os.path.isdir(file_path):
                     dropped.append(file_path)
         image_files = self._resolve_input_paths(dropped)
 

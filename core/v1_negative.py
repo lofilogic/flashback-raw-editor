@@ -188,8 +188,15 @@ def extract_negatives_from_zip(zip_path, dest_dir=None) -> list:
                             stem, len(data), w, h)
                 continue
             raw_out = dest_dir / stem
+            json_out = dest_dir / f"{stem}.json"
+            # Idempotent like the V2 camera import: if this frame was already
+            # extracted here (right-sized raw + sidecar present), reuse it
+            # instead of overwriting, so re-importing a roll is a no-op.
+            if raw_out.exists() and raw_out.stat().st_size == w * h and json_out.exists():
+                raws.append(raw_out)
+                continue
             raw_out.write_bytes(data)
-            (dest_dir / f"{stem}.json").write_bytes(zf.read(jn))
+            json_out.write_bytes(zf.read(jn))
             raws.append(raw_out)
     return sorted(raws, key=lambda p: p.name.lower())
 
