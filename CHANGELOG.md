@@ -56,6 +56,41 @@ substantially more chroma noise (the previous fixed value plateaued early)
 while low settings stay edge-preserving. The strength slider range was
 rescaled to match.
 
+### New: Flashback ONE35 V1 negative support
+
+The editor now opens **V1 "negatives"** — the headerless 8-bit raw the
+first-generation ONE35 exports (it can't write DNGs). Each frame is a raw
+Bayer dump plus a JSON sidecar, bundled per roll in a zip. V1 frames are
+developed to the same ACEScg intermediate as V2 DNGs, so every slider,
+halation, LUT, grain pass and every vibe behaves identically — a V1 roll
+looks like a V2 roll.
+
+- Import a roll by dropping or opening its `.zip`. The negatives are
+  extracted into dated `Flashback_Output/<date>/_v1_imports/<roll>/`
+  folders, with the date taken from the frame timestamps inside the zip,
+  so an old roll exported later still lands on its shoot date.
+- An already-extracted roll **folder** can be dragged straight in, and
+  re-importing a roll (zip or folder) never overwrites existing files —
+  matching the V2 camera import's skip-already-imported behaviour.
+- The **disposable** vibe uses a V1-tuned LUT (`disposable_V1`) for V1
+  negatives, so the disposable look holds up on V1's flatter capture; the
+  other vibes share their V2 LUT. DNG export stays V2-only — a V1 negative
+  has no raw DNG to round-trip.
+
+### Cleaner, stable export filenames
+
+Exports are renamed to short, sortable names derived only from the source
+file, so the same image always produces the same name and the "already
+processed" check keeps working:
+
+- V2: `FBV2_<frame>` — the camera serial prefix is dropped, e.g.
+  `FBV2_00042_disp.jpg`.
+- V1: `FBV1_<roll>_<frame>` — a short tag for the roll plus the frame's
+  sequence number, e.g. `FBV1_3f9c_00007_disp.jpg`.
+
+Frame numbers are zero-padded to five digits. The per-vibe suffix
+(`_disp`, `_ps`, `_rf`, `_mono`, `_v1`, or `_clean.dng`) is unchanged.
+
 ### Fixes
 
 - Vignette no longer blackens the extreme corner pixels on some GPUs (a NaN
