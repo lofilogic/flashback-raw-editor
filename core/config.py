@@ -412,6 +412,7 @@ class ImageAdjustments:
 
 FACTORY_LUTS = {
     'disposable':           'assets/luts/disposable.cube',
+    'disposable_v1':        'assets/luts/disposable_V1.cube',
     'flashback_classic_v1': 'assets/luts/V1.cube',
     'point_shoot':          'assets/luts/pointandshoot.cube',
     'rangefinder':          'assets/luts/rangefinder.cube',
@@ -422,6 +423,26 @@ FACTORY_LUTS = {
 # of truth — sites that build or parse refs must use the constants below.
 LUT_REF_FACTORY = 'factory:'
 LUT_REF_USER = 'user:'
+
+# Per-file-type LUT overrides. V1 negatives have a flatter, lower-DR capture
+# than V2 DNGs, so the disposable look needs a LUT tuned for them. The override
+# is transient (display/export only) — it never gets written back into the
+# saved vibe, and it only swaps a *factory* ref, never a user-imported LUT.
+_V1_LUT_OVERRIDES = {
+    LUT_REF_FACTORY + 'disposable': LUT_REF_FACTORY + 'disposable_v1',
+}
+
+
+def effective_lut_ref(base_ref: str, is_v1: bool) -> str:
+    """Resolve the LUT ref actually used to render a frame.
+
+    For V1 negatives, swap in the V1-tuned variant of a factory look where one
+    exists; everything else (V2 files, user LUTs, looks without a V1 variant)
+    passes through unchanged.
+    """
+    if is_v1:
+        return _V1_LUT_OVERRIDES.get(base_ref, base_ref)
+    return base_ref
 
 
 def resolve_lut_ref(ref: str):

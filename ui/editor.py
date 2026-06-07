@@ -45,8 +45,11 @@ from core.gpu import gpu
 from core.processor import FlashbackProcessor, export_image
 from core.config import (
     _timing_print, VIBE_PRESETS, VIBE_EXPORT_SUFFIX,
-    VibeConfig, ImageAdjustments, vibe_config_for,
+    VibeConfig, ImageAdjustments, vibe_config_for, effective_lut_ref,
 )
+from core.export_naming import export_basename
+from core.v1_negative import is_v1_negative
+from core.camera_import import date_folder_name
 from core import vibe_state
 
 from .widgets import (
@@ -154,6 +157,11 @@ class FlashbackEditor(QMainWindow):
         self._vibe_refresh_worker = None
         self._thumbnails_dirty = set()
         self._lut_cache: dict = {}
+        # The LUT ref currently uploaded to the GPU / set on the processor —
+        # may be a transient V1 override of current_vibe.lut_ref (see
+        # _apply_effective_lut), so it's tracked separately to avoid redundant
+        # re-uploads when scrubbing between frames.
+        self._active_lut_ref = None
 
         self._tint_manual_offset = 0.0  # user's manual tint correction on top of WB coupling
 
@@ -293,6 +301,7 @@ class FlashbackEditor(QMainWindow):
             self.processor.lut = custom_lut
             gpu.upload_lut(custom_lut.table)
             self.current_vibe.lut_ref = f"user:{file_path}"
+            self._active_lut_ref = self.current_vibe.lut_ref
             # User just imported a fresh LUT — any preserved pre-1.5 path
             # is no longer the active choice, so drop the breadcrumb.
             self.current_vibe.legacy_user_lut = ''
@@ -835,7 +844,7 @@ class FlashbackEditor(QMainWindow):
         self.processor.vibe = self.current_vibe
         # Tag the per-image record with the new vibe id (for future Save Project).
         self.processor.adjustments.active_vibe_id = vibe_id
-        self._load_lut_from_ref(self.current_vibe.lut_ref)
+        self._apply_effective_lut()
         if hasattr(self, 'debug_panel'):
             self.debug_panel.sync_from_config()
             self.debug_panel.update_modified_indicator()
@@ -843,7 +852,49 @@ class FlashbackEditor(QMainWindow):
         if refresh_thumbnails:
             self._refresh_all_thumbnails()
 
-    def _load_lut_from_ref(self, lut_ref: str):
+    def _apply_effective_lut(self, file_path: str = None):
+        """Load the LUT actually used to render `file_path` (the current image
+        if omitted), applying any V1 per-file override of the active vibe's LUT.
+
+        The override is transient: it's pushed to the processor/GPU but never
+        written back into current_vibe.lut_ref, so saving the vibe keeps its
+        canonical (V2) LUT. No-ops when the effective ref is already loaded."""
+        if file_path is None and self.image_files:
+            file_path = str(self.image_files[self.current_index])
+        is_v1 = bool(file_path) and is_v1_negative(file_path)
+        base = self.current_vibe.lut_ref
+        eff = effective_lut_ref(base, is_v1)
+        if eff == self._active_lut_ref:
+            return
+        # Persist only when no override is in play, preserving the existing
+        # user-LUT fallback bookkeeping for the canonical case.
+        self._load_lut_from_ref(eff, persist=(eff == base))
+
+    def _lut_obj(self, ref: str):
+        """Resolve a tagged LUT ref to a cached `colour` LUT object, or None."""
+        from core.config import resolve_lut_ref
+        if not ref:
+            return None
+        resolved, _ = resolve_lut_ref(ref)
+        if not resolved:
+            return None
+        if resolved not in self._lut_cache:
+            try:
+                self._lut_cache[resolved] = colour.io.read_LUT(resolved)
+            except Exception as e:
+                log.warning("⚠ Could not load LUT '%s': %s", resolved, e)
+                return None
+        return self._lut_cache[resolved]
+
+    def _v1_variant_lut(self):
+        """The V1-tuned LUT object for the active vibe (e.g. disposable_V1), or
+        None when the vibe's LUT has no V1 variant. Passed to thumbnail workers
+        so V1 negatives in a mixed roll render with the right LUT."""
+        base = self.current_vibe.lut_ref
+        v1_ref = effective_lut_ref(base, True)
+        return self._lut_obj(v1_ref) if v1_ref != base else None
+
+    def _load_lut_from_ref(self, lut_ref: str, persist: bool = True):
         """Resolve a tagged LUT ref (`factory:<id>` or `user:<path>`) to an
         absolute path via core.config.resolve_lut_ref, load + cache, push
         into processor + GPU. Empty ref clears the LUT so the tone-curve
@@ -858,6 +909,7 @@ class FlashbackEditor(QMainWindow):
         from core.config import resolve_lut_ref, vibe_config_for, LUT_REF_FACTORY
         if not lut_ref:
             self.processor.lut = None
+            self._active_lut_ref = None
             return
         resolved, origin = resolve_lut_ref(lut_ref)
         if resolved is None and origin == 'user':
@@ -868,13 +920,15 @@ class FlashbackEditor(QMainWindow):
             except (KeyError, AttributeError):
                 fallback_ref = ''
             if fallback_ref and fallback_ref != lut_ref:
-                self._load_lut_from_ref(fallback_ref)
+                self._load_lut_from_ref(fallback_ref, persist=persist)
             else:
                 self.processor.lut = None
+                self._active_lut_ref = None
             return
         if resolved is None:
             log.warning("⚠ Could not resolve LUT ref %r", lut_ref)
             self.processor.lut = None
+            self._active_lut_ref = None
             return
         try:
             if resolved not in self._lut_cache:
@@ -882,7 +936,9 @@ class FlashbackEditor(QMainWindow):
             lut = self._lut_cache[resolved]
             self.processor.lut = lut
             gpu.upload_lut(lut.table)
-            self.current_vibe.lut_ref = lut_ref
+            self._active_lut_ref = lut_ref
+            if persist:
+                self.current_vibe.lut_ref = lut_ref
         except Exception as e:
             log.warning("⚠ Could not load LUT '%s': %s", resolved, e)
 
@@ -937,10 +993,11 @@ class FlashbackEditor(QMainWindow):
             cache_snapshot=cache_snapshot,
             image_settings=self.image_settings.copy(),
             current_index=self.current_index,
-            lut=self.processor.lut,
+            lut=self._lut_obj(self.current_vibe.lut_ref),
             grain_tiles=self.processor.grain_tiles,
             default_settings=self._DEFAULT_USER_SETTINGS.copy(),
             vibe=self.current_vibe.copy(),
+            lut_v1=self._v1_variant_lut(),
         )
         self._vibe_refresh_worker.thumbnail_ready.connect(self._on_vibe_refresh_thumbnail)
         self._vibe_refresh_worker.start()
@@ -1411,7 +1468,7 @@ class FlashbackEditor(QMainWindow):
                 if file_path in self.image_settings:
                     self.processor.set_settings(self.image_settings[file_path])
 
-                base_name = Path(file_path).stem
+                base_name = export_basename(file_path)
                 output_path = os.path.join(output_dir, f"{base_name}_lut_profile.tif")
                 if export_image(self.processor, output_path, as_tiff=True, lut_profiling=True):
                     success_count += 1
@@ -1700,14 +1757,32 @@ class FlashbackEditor(QMainWindow):
 
         lower_exts = [f"*{ext}" for ext in self.SUPPORTED_EXTENSIONS]
         upper_exts = [f"*{ext.upper()}" for ext in self.SUPPORTED_EXTENSIONS]
-        filter_string = f"Supported Images ({' '.join(lower_exts + upper_exts)})"
+        filter_string = (f"Supported Images ({' '.join(lower_exts + upper_exts + ['*.zip'])});;"
+                         f"Flashback V1 Roll (*.zip)")
 
         files, _ = QFileDialog.getOpenFileNames(self, "Select Image Files", start_dir, filter_string)
 
         if files:
             new_dir = str(Path(files[0]).parent)
             self.app_settings.setValue("last_open_dir", new_dir)
-            self.load_image_files([Path(f) for f in files])
+            self.load_image_files(self._resolve_input_paths(files))
+
+    def _stop_thumbnail_workers(self):
+        """Stop and join any running thumbnail workers so their QThreads never
+        outlive the Python owner — that aborts with "QThread: Destroyed while
+        thread is still running". signals are blocked first so a stale
+        ``finished`` emission can't fire its slot against a replacement worker.
+        V1 negatives develop slowly, widening the window where a worker is
+        mid-flight on close/reload."""
+        for attr in ('thumbnail_worker', 'add_thumbnail_worker'):
+            w = getattr(self, attr, None)
+            if w is None:
+                continue
+            w.blockSignals(True)
+            w._is_running = False
+            if w.isRunning():
+                w.wait()
+            setattr(self, attr, None)
 
     def load_image_files(self, image_files, export_sources=None,
                           image_rotations=None, current_path=None):
@@ -1717,6 +1792,9 @@ class FlashbackEditor(QMainWindow):
         if self._vibe_refresh_worker and self._vibe_refresh_worker.isRunning():
             self._vibe_refresh_worker.stop()
             self._vibe_refresh_worker.wait()
+        # Retire any in-flight thumbnail pass before we replace the worker
+        # reference below, or the old QThread is orphaned while still running.
+        self._stop_thumbnail_workers()
 
         # Always present in alphabetical order (by filename, case-insensitive)
         # regardless of source ordering or OS settings.
@@ -1777,9 +1855,10 @@ class FlashbackEditor(QMainWindow):
 
         self.thumbnail_worker = ThumbnailWorker(
             self.image_files,
-            self.processor.lut,
+            self._lut_obj(self.current_vibe.lut_ref),
             export_sources=export_sources,
             rotations=self.image_rotations,
+            lut_v1=self._v1_variant_lut(),
         )
 
         self.thumbnail_worker.progress.connect(self.loader_overlay.update_progress)
@@ -1806,6 +1885,11 @@ class FlashbackEditor(QMainWindow):
         log.info("✓ Thumbnail generation complete!")
         self.thumbnail_strip.container.setUpdatesEnabled(True)
         if self.thumbnail_worker:
+            # ThumbnailWorker emits its own `finished` as the LAST line of run(),
+            # i.e. while the QThread is still technically running. wait() blocks
+            # until run() has actually returned (instant here) so the queued
+            # deleteLater can't destroy a still-running QThread -> qFatal/abort.
+            self.thumbnail_worker.wait()
             self.thumbnail_worker.deleteLater()
             self.thumbnail_worker = None
         try:
@@ -1845,7 +1929,8 @@ class FlashbackEditor(QMainWindow):
 
         self.add_thumbnail_worker = ThumbnailWorker(
             files_to_add,
-            self.processor.lut,
+            self._lut_obj(self.current_vibe.lut_ref),
+            lut_v1=self._v1_variant_lut(),
         )
         self.add_thumbnail_worker.progress.connect(self.loader_overlay.update_progress)
         self.add_thumbnail_worker.thumbnail_ready.connect(
@@ -1857,6 +1942,9 @@ class FlashbackEditor(QMainWindow):
     def _on_add_thumbnails_finished(self):
         log.info("✓ Add-images thumbnail generation complete!")
         if hasattr(self, 'add_thumbnail_worker') and self.add_thumbnail_worker:
+            # See _on_thumbnails_finished: join the thread before deleteLater so
+            # the DeferredDelete can't hit a QThread that's still running.
+            self.add_thumbnail_worker.wait()
             self.add_thumbnail_worker.deleteLater()
             self.add_thumbnail_worker = None
         try:
@@ -1893,12 +1981,25 @@ class FlashbackEditor(QMainWindow):
             try:
                 if file_path in self.image_cache:
                     temp_processor = _processor or FlashbackProcessor(vibe=self.current_vibe)
+                    restore_lut = None
                     if _processor is None:
-                        temp_processor.lut = self.processor.lut
+                        # Pick this file's LUT (V1 negatives may differ from the
+                        # active image). The GPU LUT is thread-local and holds the
+                        # active image's LUT, so swap in, render, then restore.
+                        base = self._lut_obj(self.current_vibe.lut_ref)
+                        v1 = self._v1_variant_lut()
+                        chosen = v1 if (v1 is not None and is_v1_negative(file_path)) else base
+                        temp_processor.lut = chosen
+                        if chosen is not self.processor.lut:
+                            if chosen is not None:
+                                gpu.upload_lut(chosen.table)
+                            restore_lut = self.processor.lut
                     temp_processor.intermediate_acescg = self.image_cache[file_path].copy()
                     temp_processor.current_file = file_path
                     temp_processor.set_settings(settings)
                     img_display = temp_processor._render_fast(downscale=True)
+                    if restore_lut is not None:
+                        gpu.upload_lut(restore_lut.table)
                     if img_display is not None:
                         h, w = img_display.shape[:2]
                         scale = 70 / h
@@ -2076,6 +2177,10 @@ class FlashbackEditor(QMainWindow):
         self.label_counter.setText(f"{self.current_index + 1} / {len(self.image_files)}")
         if hasattr(self, 'thumbnail_strip'):
             self.thumbnail_strip.set_current_index(self.current_index)
+
+        # Swap in the V1-tuned LUT when this frame is a negative and the active
+        # vibe has a V1 variant (e.g. disposable) — before any render below.
+        self._apply_effective_lut(file_path)
 
         if file_path in self.image_settings:
             settings = self.image_settings[file_path]
@@ -2327,7 +2432,7 @@ class FlashbackEditor(QMainWindow):
     def _is_processed(self, file_path: str) -> bool:
         """True if an export file exists in output_dir for this source image."""
         try:
-            base = Path(file_path).stem
+            base = export_basename(file_path)
             candidates = ["_clean.dng", "_edit.jpg"]
             candidates += [f"_{s}.jpg" for s in VIBE_EXPORT_SUFFIX.values()]
             for suffix in candidates:
@@ -2539,10 +2644,12 @@ class FlashbackEditor(QMainWindow):
                     if file_path in self.image_settings:
                         self.processor.set_settings(self.image_settings[file_path])
 
-                base_name = Path(file_path).stem
+                base_name = export_basename(file_path)
                 if self.export_mode == 'dng':
                     output_path = os.path.join(self.output_dir, f"{base_name}_clean.dng")
                 else:
+                    # Per-file LUT (V1 negatives get the V1-tuned variant).
+                    self._apply_effective_lut(file_path)
                     vibe_id = self.processor.adjustments.active_vibe_id
                     suffix = VIBE_EXPORT_SUFFIX.get(vibe_id, 'edit')
                     output_path = os.path.join(self.output_dir, f"{base_name}_{suffix}.jpg")
@@ -2682,6 +2789,14 @@ class FlashbackEditor(QMainWindow):
             QTimer.singleShot(0, _do_apply)
 
     def closeEvent(self, event):
+        # Join every background QThread before teardown — any still running when
+        # its Python owner is destroyed aborts the process ("QThread: Destroyed
+        # while thread is still running"). Slow V1 thumbnail passes make this
+        # easy to hit on close.
+        if self._vibe_refresh_worker and self._vibe_refresh_worker.isRunning():
+            self._vibe_refresh_worker.stop()
+            self._vibe_refresh_worker.wait()
+        self._stop_thumbnail_workers()
         self._render_worker.stop()
         self._render_worker.wait()
         super().closeEvent(event)
@@ -2724,10 +2839,69 @@ class FlashbackEditor(QMainWindow):
             self.drag_overlay.setStyleSheet(self._drag_style_active)
             self.drag_overlay_add.setStyleSheet(self._drag_style_dim)
 
+    def _negatives_from_zip(self, zip_path):
+        """Extract a Flashback V1 roll zip to paired negative files under the
+        output dir and return the raw paths (sorted). Empty list on failure."""
+        from core.v1_negative import extract_negatives_from_zip, roll_capture_date
+        from datetime import datetime
+        try:
+            # Mirror V2's date-foldered import layout: <output>/<date>/_v1_imports/<roll>.
+            # The date comes from the negatives' own timestamps inside the zip
+            # (old rolls can be exported anytime), falling back to import time.
+            roll_dt = roll_capture_date(zip_path) or datetime.now()
+            dest = (Path(self.output_dir) / date_folder_name(roll_dt)
+                    / '_v1_imports' / Path(zip_path).stem
+                    if self.output_dir else None)
+            raws = extract_negatives_from_zip(zip_path, dest)
+            if not raws:
+                log.warning("[editor] no V1 negatives found in zip: %s", zip_path)
+            return raws
+        except Exception:
+            log.exception("[editor] failed to read V1 roll zip: %s", zip_path)
+            return []
+
+    def _images_from_folder(self, folder):
+        """Collect loadable images from an already-imported folder: supported
+        raws plus V1 negatives (extensionless raw + .json sidecar). Loaded in
+        place — no copy, so re-dragging a folder never overwrites it.
+        Non-recursive; sorted by name."""
+        found = []
+        try:
+            entries = sorted(Path(folder).iterdir(), key=lambda x: x.name.lower())
+        except OSError:
+            return found
+        for entry in entries:
+            if not entry.is_file() or entry.name.lower().endswith('.json'):
+                continue  # .json is a V1 sidecar, picked up with its raw
+            if entry.name.lower().endswith(self.SUPPORTED_EXTENSIONS) \
+                    or is_v1_negative(str(entry)):
+                found.append(entry)
+        if not found:
+            log.warning("[editor] no loadable images in folder: %s", folder)
+        return found
+
+    def _resolve_input_paths(self, paths):
+        """Expand dropped/opened inputs into loadable image paths:
+          - .zip rolls   -> extracted V1 negatives (idempotent; existing reused)
+          - directories  -> the supported raws / V1 negatives they contain
+          - everything else passes through unchanged."""
+        resolved = []
+        for p in paths:
+            sp = str(p)
+            if sp.lower().endswith('.zip'):
+                resolved.extend(self._negatives_from_zip(sp))
+            elif os.path.isdir(sp):
+                resolved.extend(self._images_from_folder(sp))
+            else:
+                resolved.append(Path(p))
+        return resolved
+
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
-                if url.isLocalFile() and url.toLocalFile().lower().endswith(self.SUPPORTED_EXTENSIONS):
+                if url.isLocalFile() and (
+                        url.toLocalFile().lower().endswith(self.SUPPORTED_EXTENSIONS + ('.zip',))
+                        or os.path.isdir(url.toLocalFile())):
                     self._update_drag_overlay_geometry()
                     self.drag_overlay.raise_()
                     self.drag_overlay.show()
@@ -2755,12 +2929,14 @@ class FlashbackEditor(QMainWindow):
         self.drag_overlay_add.setStyleSheet(self._drag_style_dim)
 
         urls = event.mimeData().urls()
-        image_files = []
+        dropped = []
         for url in urls:
             if url.isLocalFile():
                 file_path = url.toLocalFile()
-                if file_path.lower().endswith(self.SUPPORTED_EXTENSIONS):
-                    image_files.append(Path(file_path))
+                if file_path.lower().endswith(self.SUPPORTED_EXTENSIONS + ('.zip',)) \
+                        or os.path.isdir(file_path):
+                    dropped.append(file_path)
+        image_files = self._resolve_input_paths(dropped)
 
         if not image_files:
             event.ignore()

@@ -49,6 +49,7 @@ from .config import (
 from .kernels import (acescct_encode, apply_grain, encode_then_lut, run_resident,
                       color_transform)
 from .gpu import gpu
+from .v1_negative import is_v1_negative, develop_v1
 from .auto_exposure_reverse import compute_reverse_gain
 from .effects import (
     apply_lut_fast,
@@ -406,6 +407,7 @@ class FlashbackProcessor:
         self.intermediate_acescg = None
         self.current_file = None
         self.is_flashback_file = False
+        self.is_v1 = False
         self._rev_gain = 1.0
         self._rev_gain_unconditional = 1.0
         self.highlight_mode = 1
@@ -681,11 +683,27 @@ class FlashbackProcessor:
             log.warning("[processor] TIFF import is not supported. Open the original DNG instead.")
             return None
 
-        is_flashback, exp_s = _read_dng_exif(dng_path)
+        # V1 negatives are headerless raw + sidecar JSON, not DNGs — detect
+        # them first and skip the (harmless but pointless) DNG EXIF probe.
+        is_v1 = is_v1_negative(dng_path)
+        self.is_v1 = is_v1
+        if is_v1:
+            is_flashback, exp_s = False, None
+        else:
+            is_flashback, exp_s = _read_dng_exif(dng_path)
         self.is_flashback_file = is_flashback
 
         try:
-            if is_flashback:
+            if is_v1:
+                # Develop the V1 negative to the same ACEScg intermediate the
+                # DNG path emits, then bake halation so it gets the full film
+                # look. AE already metered each frame to mid-grey, so exposure
+                # rides the generic path's neutral reverse-AE gain.
+                acescg = develop_v1(dng_path)
+                acescg = self._bake_halation(acescg)
+                self._rev_gain = 1.0
+                self._rev_gain_unconditional = 1.0
+            elif is_flashback:
                 t0 = time.time()
                 with rawpy.imread(dng_path) as raw:
                     # half_size=True performs 2x2 binning and skips demosaicing entirely,
