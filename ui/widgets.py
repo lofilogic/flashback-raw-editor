@@ -33,9 +33,19 @@ from PySide6.QtGui import (
 )
 
 from core import resource_path
+from core.gpu import gpu
 from core.processor import FlashbackProcessor
 from core.config import _timing_print
+from core.v1_negative import is_v1_negative
 from ui.theme import C, qcolor, register_theme_listener, ui_font
+
+
+def _choose_lut(file_path, lut, lut_v1):
+    """Per-file LUT: V1 negatives use the V1 variant when one was supplied;
+    everything else uses the base LUT."""
+    if lut_v1 is not None and is_v1_negative(str(file_path)):
+        return lut_v1
+    return lut
 
 
 # =============================================================================
@@ -55,10 +65,13 @@ class ThumbnailWorker(QThread):
     error = Signal(int, str)               # index, error_message
 
     def __init__(self, image_files, processor_lut, export_sources=None,
-                 rotations=None):
+                 rotations=None, lut_v1=None):
         super().__init__()
         self.image_files = image_files
         self.processor_lut = processor_lut
+        # V1-variant LUT (e.g. disposable_V1). When set, V1 negatives render
+        # with it instead of processor_lut; the base LUT covers everything else.
+        self.lut_v1 = lut_v1
         # Optional dict: target_path_str -> source_path_str. When a target path
         # appears here AND does not yet exist on disk, the worker exports the
         # source DNG to the target before loading the thumbnail. This is what
@@ -73,8 +86,11 @@ class ThumbnailWorker(QThread):
     def run(self):
         """Generate thumbnails in background."""
         processor = FlashbackProcessor(None)
-        if self.processor_lut is not None:
-            processor.lut = self.processor_lut
+        processor.lut = self.processor_lut
+        # This worker renders on its own thread, so the GPU LUT it uploads is
+        # private to it (thread-local) — it can swap per file without racing the
+        # main preview. Tracked so a homogeneous roll only uploads once.
+        uploaded = object()
 
         total = len(self.image_files)
         total_start = time.time()
@@ -84,6 +100,13 @@ class ThumbnailWorker(QThread):
                 break
 
             file_path_str = str(self.image_files[i])
+
+            chosen = _choose_lut(file_path_str, self.processor_lut, self.lut_v1)
+            if chosen is not uploaded:
+                if chosen is not None:
+                    gpu.upload_lut(chosen.table)
+                processor.lut = chosen
+                uploaded = chosen
 
             src = self.export_sources.get(file_path_str)
             preloaded_display = None
@@ -163,6 +186,7 @@ class RenderWorker(QThread):
         self._pending = None          # None | bool (downscale flag)
         self._epoch = 0               # bumped on invalidate(); in-flight result is dropped if epoch changed
         self._running = True
+        self._uploaded_lut = object()  # last LUT uploaded to THIS thread's GPU state
 
     def request(self, downscale: bool):
         with self._lock:
@@ -194,6 +218,15 @@ class RenderWorker(QThread):
                 self._pending = None
                 start_epoch = self._epoch
 
+            # The LUT buffer is thread-local, so this worker must mirror the
+            # processor's active LUT (set on the main thread, already V1-resolved)
+            # into its own GPU state before rendering. Re-upload only on change.
+            lut = self._processor.lut
+            if lut is not self._uploaded_lut:
+                if lut is not None:
+                    gpu.upload_lut(lut.table)
+                self._uploaded_lut = lut
+
             img = self._processor._render_fast(downscale=downscale)
 
             with self._lock:
@@ -222,13 +255,15 @@ class VibeRefreshWorker(QThread):
     finished = Signal()
 
     def __init__(self, image_files, cache_snapshot, image_settings,
-                 current_index, lut, grain_tiles, default_settings, vibe):
+                 current_index, lut, grain_tiles, default_settings, vibe,
+                 lut_v1=None):
         super().__init__()
         self.image_files = image_files
         self.cache_snapshot = cache_snapshot      # {path_str: acescg_array}
         self.image_settings = image_settings      # {path_str: settings_dict}
         self.current_index = current_index
         self.lut = lut
+        self.lut_v1 = lut_v1                       # V1-variant LUT (see ThumbnailWorker)
         self.grain_tiles = grain_tiles
         self.default_settings = default_settings
         self.vibe = vibe                          # snapshot of the active VibeConfig
@@ -238,6 +273,8 @@ class VibeRefreshWorker(QThread):
         processor = FlashbackProcessor(vibe=self.vibe)
         processor.lut = self.lut
         processor.grain_tiles = self.grain_tiles
+        # Thread-local GPU LUT: swap per file (V1 negatives get the V1 variant).
+        uploaded = object()
 
         for idx, path in enumerate(self.image_files):
             if not self._is_running:
@@ -248,6 +285,12 @@ class VibeRefreshWorker(QThread):
             cached = self.cache_snapshot.get(file_path)
             if cached is None:
                 continue
+            chosen = _choose_lut(file_path, self.lut, self.lut_v1)
+            if chosen is not uploaded:
+                if chosen is not None:
+                    gpu.upload_lut(chosen.table)
+                processor.lut = chosen
+                uploaded = chosen
             settings = self.image_settings.get(file_path, self.default_settings)
             try:
                 processor.intermediate_acescg = cached.copy()

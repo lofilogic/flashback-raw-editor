@@ -77,7 +77,7 @@ V1_EXPOSURE_EV = -1.2
 # colour instead of skewing. Runs on the pre-WB demosaiced RGB, BEFORE the
 # exposure trim — the trim scales clipped 1.0 values below the detection point.
 V1_HIGHLIGHT_RECOVERY = True
-V1_HIGHLIGHT_THRESHOLD = 0.98
+V1_HIGHLIGHT_THRESHOLD = 0.97
 
 # White-balance match to V2, baked as a post-matrix ACEScg gain (NOT in ASN: a
 # camera-space WB nudge gets remapped by the colour matrix and lands far weaker
@@ -192,6 +192,37 @@ def extract_negatives_from_zip(zip_path, dest_dir=None) -> list:
             (dest_dir / f"{stem}.json").write_bytes(zf.read(jn))
             raws.append(raw_out)
     return sorted(raws, key=lambda p: p.name.lower())
+
+
+def roll_capture_date(zip_path):
+    """Best-effort capture date for a V1 roll, read from the timestamps the
+    camera stamped on the negatives *inside* the zip — not the zip's own date.
+
+    Old rolls can be exported from the Flashback app at any later time, so the
+    archive's mtime is unreliable; the per-frame entry timestamps reflect when
+    the roll was actually shot. Returns the earliest valid entry datetime, or
+    None if the zip carries no usable timestamps (caller falls back).
+    """
+    import zipfile
+    from datetime import datetime
+
+    dates = []
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                dt = info.date_time  # (year, month, day, hour, min, sec)
+                # ZIP timestamps are DOS-epoch based (>= 1980); a 1980-01-01
+                # default usually means "no real timestamp", so skip it.
+                if dt and dt[0] > 1980:
+                    try:
+                        dates.append(datetime(*dt))
+                    except ValueError:
+                        pass
+    except Exception:
+        return None
+    return min(dates) if dates else None
 
 
 # =============================================================================

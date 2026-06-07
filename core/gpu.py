@@ -169,9 +169,29 @@ class GPUPipeline:
         self._cnr_bil_bg_layout = None
         self._colormat_pipeline = None     # buffer 3x3 colour transform (load-time)
         self._colormat_bg_layout = None
-        self._lut_buf = None   # persistent GPU LUT buffer
-        self._lut_size = 0
+        # The uploaded LUT is per-thread, like the render arena: RenderWorker,
+        # VibeRefreshWorker and ThumbnailWorker each render on their own thread
+        # and may need a *different* LUT than the main preview (V1 negatives get
+        # the V1-tuned variant). Thread-local buffers let each upload its own
+        # without a lock or cross-thread clobbering.
+        self._lut_local = threading.local()
         self._arena = _RenderArena()   # per-render texture/uniform bump allocator
+
+    @property
+    def _lut_buf(self):
+        return getattr(self._lut_local, 'buf', None)
+
+    @_lut_buf.setter
+    def _lut_buf(self, value):
+        self._lut_local.buf = value
+
+    @property
+    def _lut_size(self):
+        return getattr(self._lut_local, 'size', 0)
+
+    @_lut_size.setter
+    def _lut_size(self, value):
+        self._lut_local.size = value
 
     # ------------------------------------------------------------------
     # Per-render arena scope
