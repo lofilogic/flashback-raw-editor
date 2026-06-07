@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (targets 1.5.0-beta3)
+## 1.5.0-beta3 — 2026-06-07
 
 ### Performance: GPU-resident render pipeline
 
