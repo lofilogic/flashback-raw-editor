@@ -215,6 +215,36 @@ class FlashbackEditor(QMainWindow):
         if self._migration_report is not None:
             QTimer.singleShot(0, self._show_migration_notice)
 
+        # Probe how the GPU resolved once the window is up. Init is lazy and a
+        # little slow, so defer it off the constructor; if we landed on a
+        # software adapter or the CPU fallback, surface it instead of letting
+        # the user wonder why renders crawl on capable hardware.
+        QTimer.singleShot(0, self._check_gpu_health)
+
+    def _check_gpu_health(self):
+        try:
+            status = gpu.status()
+        except Exception:
+            log.exception("[gpu] status probe failed")
+            return
+        if status['mode'] == 'gpu':
+            return
+        if status['mode'] == 'software':
+            msg = (f"GPU not in use — running on a software renderer "
+                   f"({status['summary']}). Renders will be slow; update your "
+                   f"graphics drivers.")
+        elif not status['available']:
+            msg = ("GPU acceleration off — the 'wgpu' library is not installed. "
+                   "Renders will be slow. Install dependencies: "
+                   "pip install -r requirements.txt")
+        else:
+            msg = ("GPU not in use — running on the CPU fallback. Renders will "
+                   "be slow; check that GPU drivers are installed and current.")
+        log.warning("[gpu] %s", msg)
+        if hasattr(self, 'mode_label'):
+            self.mode_label.setText("⚠ " + msg)
+            self.mode_label.setStyleSheet(f"color: {C['accent']};")
+
     def _show_migration_notice(self):
         """Show the one-shot post-migration summary dialog (step 6).
 
@@ -1807,6 +1837,7 @@ class FlashbackEditor(QMainWindow):
 
         self.image_files = image_files
         self.image_cache.clear()
+        self.preview_cache.clear()
         self._file_is_flashback.clear()
         self.image_rotations = dict(image_rotations) if image_rotations else {}
         self.thumbnail_strip.clear()
@@ -2074,6 +2105,7 @@ class FlashbackEditor(QMainWindow):
         self.image_settings.pop(file_path, None)
         self.image_rotations.pop(file_path, None)
         self.image_cache.pop(file_path, None)
+        self.preview_cache.pop(file_path, None)
         self._file_is_flashback.pop(file_path, None)
         self.thumbnail_strip.remove_at(index)
 
@@ -2160,6 +2192,25 @@ class FlashbackEditor(QMainWindow):
     # IMAGE LOADING & DISPLAY
     # ===================================================================
 
+    def _preview_key(self):
+        """Identity of the downscaled preview for the current processor state.
+
+        A cached preview is reusable only if every input that the downscale
+        render depends on is unchanged: the source intermediate (id changes on
+        rotate/reload), the per-image sliders, the active vibe, and the LUT
+        (V1 negatives swap in a variant). Keying on these makes a stale preview
+        structurally impossible — any change yields a new key and a cache miss,
+        so no manual invalidation is needed when settings or vibe change."""
+        a = self.processor.adjustments
+        return (
+            id(self.processor.intermediate_acescg),
+            round(a.exposure_ev, 4), round(a.wb_temp, 4), round(a.tint, 4),
+            round(getattr(a, 'push_pull_ev', 0.0), 4),
+            getattr(a, 'rotation', 0),
+            self.current_vibe_id(),
+            id(self.processor.lut),
+        )
+
     def load_current_image(self):
         if not self.image_files:
             self.label_filename.setText("")
@@ -2203,7 +2254,20 @@ class FlashbackEditor(QMainWindow):
             # Restore Flashback status so DNG button reflects the correct state
             self.processor.is_flashback_file = self._file_is_flashback.get(file_path, False)
             self._update_dng_button_state()
-            img_array = self.processor.render_preview(downscale=True)
+            # Revisiting an image must be instant and must not block the UI
+            # thread on a GPU readback (that readback serialises behind any
+            # in-flight full-res render on the shared device — the freeze that
+            # made switching show the previous image for seconds). Reuse the
+            # cached downscaled preview when it still matches the current state;
+            # only render synchronously on a genuine miss (first visit / changed
+            # settings or vibe).
+            key = self._preview_key()
+            cached = self.preview_cache.get(file_path)
+            if cached is not None and cached[0] == key:
+                img_array = cached[1]
+            else:
+                img_array = self.processor.render_preview(downscale=True)
+                self.preview_cache[file_path] = (key, img_array)
             self.display_image(img_array, is_scrub=True)
             self.update_current_thumbnail(img_array)
             self.update_mode_label()
@@ -2228,6 +2292,7 @@ class FlashbackEditor(QMainWindow):
                     self.processor.adjustments.rotation = stored_rot
                     img_array = self.processor._apply_rotation_and_render()
                 self.image_cache[file_path] = self.processor.intermediate_acescg.copy()
+                self.preview_cache[file_path] = (self._preview_key(), img_array)
                 self.update_current_thumbnail(img_array)
                 self.display_image(img_array, is_scrub=True)
                 self.save_current_settings()
@@ -2303,6 +2368,13 @@ class FlashbackEditor(QMainWindow):
     def _on_render_done(self, img_array, was_downscaled):
         """Receive a completed render from the background RenderWorker."""
         self.display_image(img_array, is_scrub=was_downscaled)
+        # Keep the downscaled-preview cache warm with the latest look so a later
+        # revisit is instant. Safe even mid-scrub: the worker drops post-switch
+        # renders (epoch), so this only ever fires for the current image, and
+        # the key captures the live settings used to produce this frame.
+        if was_downscaled and self.image_files:
+            file_path = str(self.image_files[self.current_index])
+            self.preview_cache[file_path] = (self._preview_key(), img_array)
         if not was_downscaled and self._render_needs_commit:
             self._render_needs_commit = False
             self.update_current_thumbnail(img_array)
@@ -2729,6 +2801,7 @@ class FlashbackEditor(QMainWindow):
         file_path = str(self.image_files[self.current_index])
         if file_path in self.image_cache:
             del self.image_cache[file_path]
+        self.preview_cache.pop(file_path, None)
         self.load_current_image()
 
     # ===================================================================

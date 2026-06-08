@@ -21,13 +21,20 @@ import struct
 import threading
 import numpy as np
 
+log = logging.getLogger(__name__)
+
 try:
     import wgpu
     _WGPU_AVAILABLE = True
 except ImportError:
     _WGPU_AVAILABLE = False
-
-log = logging.getLogger(__name__)
+    # Without wgpu there is no GPU path at all — every render falls back to the
+    # slow numpy CPU pipeline. Say so loudly at import: a from-source run that
+    # skipped `pip install -r requirements.txt` is the common cause, and the
+    # symptom (seconds-long renders) otherwise looks like a GPU/driver problem.
+    log.warning("⚠ 'wgpu' is not installed — GPU acceleration is OFF and "
+                "rendering will be slow. Install dependencies with: "
+                "pip install -r requirements.txt")
 
 
 def _read_shader(name: str) -> str:
@@ -176,6 +183,16 @@ class GPUPipeline:
         # without a lock or cross-thread clobbering.
         self._lut_local = threading.local()
         self._arena = _RenderArena()   # per-render texture/uniform bump allocator
+        # How device selection resolved — populated by _init, read by status()
+        # so the UI/logs can tell whether we're actually on the GPU. A brand-new
+        # GPU with a too-old graphics runtime, missing drivers, or a VM/RDP
+        # session can silently land on a software adapter (WARP / lavapipe) or
+        # fail init entirely and fall back to the slow CPU numpy path; both look
+        # identical to "working" without this.
+        self.adapter_info = {}
+        self.adapter_summary = None
+        self.is_software_adapter = False
+        self.init_failed = False
 
     @property
     def _lut_buf(self):
@@ -192,6 +209,26 @@ class GPUPipeline:
     @_lut_size.setter
     def _lut_size(self, value):
         self._lut_local.size = value
+
+    def status(self) -> dict:
+        """Snapshot of how the GPU pipeline resolved, for diagnostics/UI.
+
+        Triggers lazy init so the adapter is actually selected. ``mode`` is one
+        of 'gpu' (hardware), 'software' (CPU adapter — slow), or 'cpu' (no GPU
+        device; numpy fallback path — slow)."""
+        ok = self._init()
+        if not ok or self._device is None:
+            mode = 'cpu'
+        elif self.is_software_adapter:
+            mode = 'software'
+        else:
+            mode = 'gpu'
+        return {
+            'mode': mode,
+            'available': _WGPU_AVAILABLE,
+            'summary': self.adapter_summary,
+            'info': dict(self.adapter_info),
+        }
 
     # ------------------------------------------------------------------
     # Per-render arena scope
@@ -218,26 +255,56 @@ class GPUPipeline:
         if not _WGPU_AVAILABLE:
             return False
         try:
-            # Restrict the wgpu instance to the "Primary" backends
-            # (Vulkan / Metal / DX12) — this excludes the GL/GLES backend,
-            # whose EGL init aborts the whole process on some Linux setups
-            # (e.g. Steam Deck: panic in wgpu-hal gles/egl.rs, "Aborted").
-            # The instance enables every backend by default and probes each
-            # at creation, so GL must be dropped here, before the instance
-            # exists — adapter-level backend selection happens too late.
-            # Primary covers the backend each OS actually uses (Metal on
-            # macOS, Vulkan/DX12 on Windows), so Mac/Windows are unaffected;
-            # only the never-selected GL backend stops being initialised.
+            # Choose which backends the wgpu instance enables (it probes each at
+            # creation, so this must happen before the instance exists — adapter
+            # -level selection happens too late).
+            #
+            # GL/GLES is excluded ONLY on Linux: its EGL init aborts the whole
+            # process on some setups (e.g. Steam Deck: panic in wgpu-hal
+            # gles/egl.rs, "Aborted"). On Windows (DX12/Vulkan) and macOS (Metal)
+            # GL is never the *selected* backend, but keeping it enabled there
+            # leaves it as a last-ditch fallback when the primary backends fail
+            # to bind a device — e.g. a brand-new GPU on a graphics runtime too
+            # old to drive it on Vulkan/DX12 — at negligible probe cost. So we
+            # widen compatibility off-Linux rather than excluding GL globally.
+            import sys as _sys
+            backends = (["Primary"] if _sys.platform.startswith("linux")
+                        else ["Primary", "GL"])
             from wgpu.backends.wgpu_native.extras import set_instance_extras
-            set_instance_extras(backends=["Primary"])
+            set_instance_extras(backends=backends)
             adapter = wgpu.gpu.request_adapter_sync(power_preference='high-performance')
+            info = dict(getattr(adapter, 'info', {}) or {})
+            self.adapter_info = info
+            self.adapter_summary = getattr(adapter, 'summary', None) or info.get('description', '?')
+            # power_preference is only a hint — it does not guarantee a hardware
+            # adapter. Flag software/CPU adapters (DX12 WARP, Vulkan lavapipe,
+            # SwiftShader, Microsoft Basic Render) so the slow path is visible
+            # rather than silently accepted as "GPU ready".
+            adapter_type = str(info.get('adapter_type', '')).lower()
+            sl = self.adapter_summary.lower()
+            self.is_software_adapter = (
+                adapter_type in ('cpu', 'software')
+                or any(s in sl for s in ('warp', 'lavapipe', 'llvmpipe',
+                                         'swiftshader', 'basic render', 'microsoft basic'))
+            )
             self._device = adapter.request_device_sync()
             self._build_pipelines()
-            log.info("✓ GPU pipeline ready: %s", adapter.summary)
+            self.init_failed = False
+            if self.is_software_adapter:
+                log.warning(
+                    "⚠ GPU pipeline bound to a SOFTWARE adapter (%s, backend=%s) — "
+                    "renders will be very slow. Check that GPU drivers are installed "
+                    "and current; on a brand-new GPU the graphics runtime may be too "
+                    "old to drive it.", self.adapter_summary, info.get('backend_type', '?'))
+            else:
+                log.info("✓ GPU pipeline ready: %s (type=%s, backend=%s)",
+                         self.adapter_summary, info.get('adapter_type', '?'),
+                         info.get('backend_type', '?'))
             return True
         except Exception as e:
             log.warning("⚠ GPU init failed (%s), using CPU fallbacks", e)
             self._device = None
+            self.init_failed = True
             return False
 
     # Bind-group layout catalogue. Each row drives one shader's pipeline(s):

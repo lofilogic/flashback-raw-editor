@@ -1,5 +1,13 @@
 # Changelog
 
+<!-- TODO before tagging stable 1.5.0:
+     Update the README's run-from-source instructions so `pip install -r
+     requirements.txt` is unmissable. A user ran the zip without installing
+     deps; `wgpu` was missing, so rendering silently fell back to the slow CPU
+     path (~5 s/frame) and looked like a GPU/driver fault. Point non-technical
+     users at the bundled build instead. Decide the wgpu version pin only after
+     confirming whether 0.24.0 drives recent GPUs (e.g. RTX 5080). -->
+
 ## 1.5.0-beta3 — 2026-06-08
 
 ### Performance: GPU-resident render pipeline
@@ -21,6 +29,26 @@ every frame (the allocation churn, not GPU compute, was the main remaining
 interactive cost), and image loading is faster — load-time halation reuses the
 same arena and blurs its glow at half resolution (imperceptible for a soft
 glow), roughly a third quicker.
+
+### GPU diagnostics + instant image switching
+
+The app now reports how the GPU resolved instead of silently degrading. At
+startup it logs the bound adapter (`✓ GPU pipeline ready: … via Vulkan`) and,
+if it lands on a software adapter (WARP / lavapipe), the CPU fallback, or a
+missing `wgpu` install, it warns both in the terminal and as an in-app banner
+with the fix. This turns "renders crawl for no visible reason" into an
+actionable message — the usual cause when running from source is skipping
+`pip install -r requirements.txt`.
+
+Switching back to an already-viewed image is now instant: its downscaled
+preview is cached (keyed on settings, vibe, and LUT so it can never go stale)
+and shown immediately, instead of re-rendering synchronously on the UI thread
+behind the in-flight full-res render — which was freezing the view on the
+previous image for the duration of a slow render.
+
+The GL backend is now excluded only on Linux (where its EGL init can abort,
+e.g. Steam Deck); on Windows and macOS it stays available as a last-ditch
+fallback if the primary backends fail to bind a device.
 
 ### Chromatic aberration is now spectral
 
