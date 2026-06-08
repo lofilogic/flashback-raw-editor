@@ -31,3 +31,32 @@ jobs:
 
       - name: Run pytest
         run: pytest -v
+
+  # Compiles every WGSL compute pipeline against a software Vulkan device
+  # (Mesa lavapipe) so shader-translation regressions are caught in CI. Naga
+  # emits SPIR-V regardless of the underlying driver, so lavapipe exercises the
+  # exact codegen path a real Vulkan GPU takes — e.g. the "Expression is not
+  # cached!" panic that crashed the app on Vulkan while D3D12 stayed fine.
+  shader-compile:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install Vulkan software renderer (lavapipe) + GL/Qt libs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools libgl1 libglib2.0-0
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Compile all GPU shaders (Naga SPIR-V smoke test)
+        run: pytest tests/test_shader_compile.py -v

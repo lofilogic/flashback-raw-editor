@@ -134,8 +134,11 @@ jobs:
           cp assets/icons/icon.png "$APPDIR/flashback.png"
           cp assets/icons/icon.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/flashback.png"
 
-          # AppRun launcher
-          printf '#!/bin/bash\nSELF="$(readlink -f "$0")"\nHERE="${SELF%%/*}"\nexec "${HERE}/usr/bin/Flashback One35" "$@"\n' > "$APPDIR/AppRun"
+          # AppRun launcher. HERE must be the directory of the mounted AppRun,
+          # so use dirname — `${SELF%%/*}` (greedy) wrongly strips everything to
+          # an empty string for an absolute path, making the AppImage exec the
+          # host's /usr/bin instead of its own and fail to launch on every Linux.
+          printf '#!/bin/bash\nHERE="$(dirname "$(readlink -f "$0")")"\nexec "${HERE}/usr/bin/Flashback One35" "$@"\n' > "$APPDIR/AppRun"
           chmod +x "$APPDIR/AppRun"
 
           # Download appimagetool

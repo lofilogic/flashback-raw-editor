@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.5.0-beta3 — 2026-06-07
+## 1.5.0-beta3 — 2026-06-08
 
 ### Performance: GPU-resident render pipeline
 
@@ -95,6 +95,23 @@ Frame numbers are zero-padded to five digits. The per-vibe suffix
 
 - Vignette no longer blackens the extreme corner pixels on some GPUs (a NaN
   from a corner-case power calculation).
+- Fixed a startup crash on the Vulkan GPU backend — the default on many Windows
+  PCs and on Linux — where the app aborted with an "Expression is not cached!"
+  shader-compiler panic. A code pattern in the chroma-noise-reduction shader
+  couldn't be translated to Vulkan SPIR-V and has been rewritten. The D3D12
+  backend was unaffected, so machines defaulting to D3D12 never hit it. Every
+  GPU shader is now compile-checked in CI against a software Vulkan device so
+  this class of regression is caught before release.
+- Linux AppImage: corrected the internal launcher so the AppImage runs from its
+  own bundled contents instead of looking on the host system.
+
+### Note for Linux / Steam Deck users
+
+Linux is a best-effort target, not a primary one: the AppImage is built in CI
+but is not yet tested on Linux hardware. On immutable systems such as the Steam
+Deck (SteamOS) it can additionally require `libfuse2`, which isn't installed by
+default — launching the AppImage with `--appimage-extract-and-run` avoids the
+FUSE requirement.
 
 ## 1.5.0-beta2 — 2026-06-01
 

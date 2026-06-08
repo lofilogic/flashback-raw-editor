@@ -94,24 +94,40 @@ struct U {
 @group(0) @binding(1) var          dst_b: texture_storage_2d<rgba32float, write>;
 @group(0) @binding(2) var<uniform> u:     U;
 
-// Sort a pair so *a <= *b (the swap primitive of the median network).
-fn s2(a: ptr<function, f32>, b: ptr<function, f32>) {
-    let lo = min(*a, *b);
-    let hi = max(*a, *b);
-    *a = lo;
-    *b = hi;
+// Sort a pair into (lo, hi) — the swap primitive of the median network.
+// Returns by value rather than taking `ptr<function, f32>` args: passing
+// pointers to array elements (`&p[i]`) into a function makes the Naga SPIR-V
+// backend (Vulkan, incl. Linux/RADV on Steam Deck) panic with "Expression is
+// not cached!". The value-returning form sidesteps that codegen path.
+fn so(a: f32, b: f32) -> vec2f {
+    return vec2f(min(a, b), max(a, b));
 }
 
 // Median of 9 values via the classic 19-comparison selection network.
+// Each step writes the lesser to the lower index and the greater to the higher,
+// matching the original s2(&p[i], &p[j]) semantics exactly.
 fn med9(v: array<f32, 9>) -> f32 {
     var p = v;
-    s2(&p[1], &p[2]); s2(&p[4], &p[5]); s2(&p[7], &p[8]);
-    s2(&p[0], &p[1]); s2(&p[3], &p[4]); s2(&p[6], &p[7]);
-    s2(&p[1], &p[2]); s2(&p[4], &p[5]); s2(&p[7], &p[8]);
-    s2(&p[0], &p[3]); s2(&p[5], &p[8]); s2(&p[4], &p[7]);
-    s2(&p[3], &p[6]); s2(&p[1], &p[4]); s2(&p[2], &p[5]);
-    s2(&p[4], &p[7]); s2(&p[4], &p[2]); s2(&p[6], &p[4]);
-    s2(&p[4], &p[2]);
+    var s: vec2f;
+    s = so(p[1], p[2]); p[1] = s.x; p[2] = s.y;
+    s = so(p[4], p[5]); p[4] = s.x; p[5] = s.y;
+    s = so(p[7], p[8]); p[7] = s.x; p[8] = s.y;
+    s = so(p[0], p[1]); p[0] = s.x; p[1] = s.y;
+    s = so(p[3], p[4]); p[3] = s.x; p[4] = s.y;
+    s = so(p[6], p[7]); p[6] = s.x; p[7] = s.y;
+    s = so(p[1], p[2]); p[1] = s.x; p[2] = s.y;
+    s = so(p[4], p[5]); p[4] = s.x; p[5] = s.y;
+    s = so(p[7], p[8]); p[7] = s.x; p[8] = s.y;
+    s = so(p[0], p[3]); p[0] = s.x; p[3] = s.y;
+    s = so(p[5], p[8]); p[5] = s.x; p[8] = s.y;
+    s = so(p[4], p[7]); p[4] = s.x; p[7] = s.y;
+    s = so(p[3], p[6]); p[3] = s.x; p[6] = s.y;
+    s = so(p[1], p[4]); p[1] = s.x; p[4] = s.y;
+    s = so(p[2], p[5]); p[2] = s.x; p[5] = s.y;
+    s = so(p[4], p[7]); p[4] = s.x; p[7] = s.y;
+    s = so(p[4], p[2]); p[4] = s.x; p[2] = s.y;
+    s = so(p[6], p[4]); p[6] = s.x; p[4] = s.y;
+    s = so(p[4], p[2]); p[4] = s.x; p[2] = s.y;
     return p[4];
 }
 
