@@ -218,6 +218,18 @@ class GPUPipeline:
         if not _WGPU_AVAILABLE:
             return False
         try:
+            # Restrict the wgpu instance to the "Primary" backends
+            # (Vulkan / Metal / DX12) — this excludes the GL/GLES backend,
+            # whose EGL init aborts the whole process on some Linux setups
+            # (e.g. Steam Deck: panic in wgpu-hal gles/egl.rs, "Aborted").
+            # The instance enables every backend by default and probes each
+            # at creation, so GL must be dropped here, before the instance
+            # exists — adapter-level backend selection happens too late.
+            # Primary covers the backend each OS actually uses (Metal on
+            # macOS, Vulkan/DX12 on Windows), so Mac/Windows are unaffected;
+            # only the never-selected GL backend stops being initialised.
+            from wgpu.backends.wgpu_native.extras import set_instance_extras
+            set_instance_extras(backends=["Primary"])
             adapter = wgpu.gpu.request_adapter_sync(power_preference='high-performance')
             self._device = adapter.request_device_sync()
             self._build_pipelines()
