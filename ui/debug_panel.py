@@ -325,14 +325,26 @@ class DebugPanel(QWidget):
         lut_prof_layout.setSpacing(6)
 
         lut_prof_info = QLabel(
-            "Exports the current image as a 16-bit ACEScct TIFF with full\n"
-            "reverse-AE and exposure boost applied — for use as training\n"
-            "input in DaVinci Resolve LUT creation."
+            "Exports the current image as a 16-bit ACEScct TIFF for building or\n"
+            "previewing LUTs in DaVinci Resolve. Default is the app's standard\n"
+            "exposure — what the app feeds the LUT — so a hand-graded LUT\n"
+            "previews accurately."
         )
         lut_prof_info.setStyleSheet("color: #888; font-size: 11px;")
         lut_prof_layout.addWidget(lut_prof_info)
 
-        self.btn_export_lut_tiff = QPushButton("Export LUT Profile TIFF…")
+        self.chk_lut_reverse_ae = QCheckBox("Apply reverse-AE (film-stock profiling)")
+        self.chk_lut_reverse_ae.setChecked(False)
+        self.chk_lut_reverse_ae.setToolTip(
+            "On: undo each frame's in-camera autoexposure (from EXIF ExposureTime)\n"
+            "so every frame sits at a common reference level — needed when profiling\n"
+            "a film stock. A normally-metered frame can drop several stops.\n\n"
+            "Off (default): export at the app's standard exposure — use this to\n"
+            "preview a LUT you graded by hand."
+        )
+        lut_prof_layout.addWidget(self.chk_lut_reverse_ae)
+
+        self.btn_export_lut_tiff = QPushButton("Export ACEScct TIFF…")
         self.btn_export_lut_tiff.setStyleSheet(btn_style)
         self.btn_export_lut_tiff.clicked.connect(self._on_export_lut_tiff)
         lut_prof_layout.addWidget(self.btn_export_lut_tiff)
@@ -571,7 +583,8 @@ class DebugPanel(QWidget):
             self, "Export LUT Profile TIFFs — Choose Output Folder")
         if not output_dir:
             return
-        success, total = self.parent_editor.export_lut_tiffs(output_dir)
+        success, total = self.parent_editor.export_lut_tiffs(
+            output_dir, reverse_ae=self.chk_lut_reverse_ae.isChecked())
         if total == 0:
             self.status_label.setText("No images to export.")
         else:

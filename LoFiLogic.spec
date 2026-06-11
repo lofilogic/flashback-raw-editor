@@ -5,8 +5,8 @@ from pathlib import Path
 
 block_cipher = None
 
-# Inject version from git tag (set by CI as FLASHBACK_VERSION=v0.1.0-beta7).
-_app_version = os.environ.get('FLASHBACK_VERSION', 'dev').lstrip('v')
+# Inject version from git tag (set by CI as LOFILOGIC_VERSION=v0.1.0-beta7).
+_app_version = os.environ.get('LOFILOGIC_VERSION', 'dev').lstrip('v')
 print(f"=== Building version: {_app_version} ===")
 with open('_version.py', 'w') as _vf:
     _vf.write(f'__version__ = "{_app_version}"\n')
@@ -17,13 +17,13 @@ with open('_version.py', 'w') as _vf:
 # so a parallel install of two releases registers as two distinct apps
 # in LaunchServices.
 _bundle_version_segment = 'v' + _app_version.replace('.', '-')
-_bundle_identifier = f'com.julian.flashback.{_bundle_version_segment}'
+_bundle_identifier = f'com.lofilogic.app.{_bundle_version_segment}'
 
 # Versioned .app filename so two releases can coexist in /Applications.
 # The Info.plist display name carries the same version, so the menu bar
 # and Dock label disambiguate them too.
-_bundle_name = f'Flashback One35 {_app_version}.app'
-_bundle_display_name = f'Flashback One35 v2 {_app_version}'
+_bundle_name = f'LoFi Logic {_app_version}.app'
+_bundle_display_name = f'LoFi Logic {_app_version}'
 
 import platform as _platform
 _system = _platform.system()
@@ -146,7 +146,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='Flashback One35',
+    name='LoFi Logic',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -167,7 +167,7 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='Flashback One35',
+    name='LoFi Logic',
 )
 
 if _system == 'Darwin':

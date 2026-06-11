@@ -1,4 +1,4 @@
-"""Minimal precision slider styled to match the Flashback handoff mockup.
+"""Minimal precision slider styled to match the LoFi Logic handoff mockup.
 
 - 2px track, 14px circular thumb
 - Dual (±) mode: fill grows from the center + a center tick

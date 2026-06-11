@@ -2,7 +2,7 @@
 
 Loads one DNG through the real FlashbackProcessor and runs the full-quality
 render several times, printing the built-in per-stage timing (the same
-FLASHBACK_DEBUG_TIMING output the app emits) plus a per-run wall time and a
+LOFILOGIC_DEBUG_TIMING output the app emits) plus a per-run wall time and a
 median. Run the identical command on the M3 and the Windows/3090 box to get an
 apples-to-apples, slider-free comparison of where the milliseconds go.
 
@@ -18,7 +18,7 @@ Vibes: flashback_classic_v1 (default), disposable, point_shoot, rangefinder,
 """
 import os
 # Must be set before any core.* import so core.config picks it up at module load.
-os.environ.setdefault("FLASHBACK_DEBUG_TIMING", "1")
+os.environ.setdefault("LOFILOGIC_DEBUG_TIMING", "1")
 
 import sys
 import time

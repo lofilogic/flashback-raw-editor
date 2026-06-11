@@ -15,8 +15,9 @@ def extract_exposure_seconds(path: str) -> Optional[float]:
     """Read EXIF ExposureTime in seconds. Returns None if unavailable."""
     try:
         with open(path, 'rb') as f:
-            tags = exifread.process_file(f, details=False, stop_tag='Image ExposureTime')
-        tag = tags.get('Image ExposureTime')
+            tags = exifread.process_file(f, details=False)
+        # Exif IFD (exported DNGs / Adobe convention) first, then IFD0 (camera).
+        tag = tags.get('EXIF ExposureTime') or tags.get('Image ExposureTime')
         if tag is None:
             return None
         # exifread returns a Ratio with numerator/denominator

@@ -73,7 +73,7 @@ from .theme import (
 # =============================================================================
 
 class FlashbackEditor(QMainWindow):
-    """Main application window for Flashback image editing."""
+    """Main application window for LoFi Logic image editing."""
 
     SUPPORTED_EXTENSIONS = (
         '.dng', '.raf', '.cr2', '.cr3', '.nef',
@@ -102,12 +102,12 @@ class FlashbackEditor(QMainWindow):
         # intermediate, so we keep our own running tally that survives reloads
         # and gets persisted in project files.
         self.image_rotations: dict = {}
-        # Path of the currently-open project file (.fbproj), or None if the
+        # Path of the currently-open project file (.lofi), or None if the
         # current image set didn't come from a project. Save reuses this;
         # Save As always prompts.
         self.current_project_path = None  # type: ignore[assignment]
 
-        self.app_settings = QSettings("Flashback", "Editor")
+        self.app_settings = QSettings("LoFi Logic", "Editor")
 
         # Two folders, two responsibilities:
         #   camera_import_dir — where the camera-import worker archives rolls
@@ -120,7 +120,7 @@ class FlashbackEditor(QMainWindow):
         # camera import inside it.
         pictures_loc = QStandardPaths.writableLocation(QStandardPaths.PicturesLocation)
         base_dir = pictures_loc if pictures_loc else str(Path.home())
-        fallback = os.path.join(base_dir, "Flashback_Output")
+        fallback = os.path.join(base_dir, "LoFi_Logic")
 
         def _resolve(key: str) -> str:
             v = self.app_settings.value(key, fallback)
@@ -440,17 +440,22 @@ class FlashbackEditor(QMainWindow):
         return button
 
     def _apply_theme(self):
-        """Re-run every registered stylesheet and icon with the current palette."""
+        """Re-run every registered stylesheet and icon with the current palette.
+
+        Each refresh step is guarded so one bad widget can't abort the whole
+        palette swap; failures are logged at debug (off by default) so a
+        systematic breakage is still diagnosable instead of fully silent.
+        """
         for widget, builder in self._themed_styles:
             try:
                 widget.setStyleSheet(builder())
             except Exception:
-                pass
+                log.debug("theme: stylesheet refresh failed for %r", widget, exc_info=True)
         for button, rel_path, color_token, size in self._themed_icons:
             try:
                 button.setIcon(svg_icon(rel_path, color_token, size))
             except Exception:
-                pass
+                log.debug("theme: icon refresh failed for %s", rel_path, exc_info=True)
         # Regenerate drag-overlay strings (they hold cached accent/text colours)
         if hasattr(self, "_rebuild_drag_styles"):
             self._rebuild_drag_styles()
@@ -461,25 +466,25 @@ class FlashbackEditor(QMainWindow):
             try:
                 self.set_export_mode(self.export_mode)
             except Exception:
-                pass
+                log.debug("theme: export-mode restyle failed", exc_info=True)
         if hasattr(self, "mode_label"):
             try:
                 self.update_mode_label()
             except Exception:
-                pass
+                log.debug("theme: mode-label restyle failed", exc_info=True)
         # Force a repaint on widgets that read the palette inside paintEvent
         for w in self._themed_repaint:
             try:
                 w.update()
             except Exception:
-                pass
+                log.debug("theme: repaint failed for %r", w, exc_info=True)
         # Apple/Windows native chrome needs to follow the theme too
         if getattr(self, "_native_chrome_applied", False):
             try:
                 from ui import native_chrome
                 native_chrome.apply(self, theme.current_theme())
             except Exception:
-                pass
+                log.debug("theme: native chrome refresh failed", exc_info=True)
 
     def set_dng_profile_name(self, name: str):
         self.current_vibe.dng_profile_name = name
@@ -520,7 +525,7 @@ class FlashbackEditor(QMainWindow):
     # ===================================================================
 
     def init_ui(self):
-        self.setWindowTitle("Flashback One35 v2 Editor")
+        self.setWindowTitle("LoFi Logic")
         self.resize(1200, 760)
         QTimer.singleShot(0, self.center_window)
 
@@ -1298,12 +1303,12 @@ class FlashbackEditor(QMainWindow):
         from _version import __version__
         mb = self.menuBar()
 
-        # ── Flashback / Help ──────────────────────────────────────────
+        # ── About / Help ──────────────────────────────────────────────
         # "About" with AboutRole moves to the app menu automatically on macOS.
         # We put it in a Help menu so it appears somewhere on Windows/Linux too.
         help_menu = mb.addMenu("Help")
 
-        act_about = QAction("About Flashback One35 v2", self)
+        act_about = QAction("About LoFi Logic", self)
         act_about.setMenuRole(QAction.MenuRole.AboutRole)
         act_about.triggered.connect(self.show_about)
         help_menu.addAction(act_about)
@@ -1432,11 +1437,11 @@ class FlashbackEditor(QMainWindow):
         from _version import __version__
         QMessageBox.about(
             self,
-            "About Flashback One35 v2",
-            f"<b>Flashback One35 v2</b><br>"
+            "About LoFi Logic",
+            f"<b>LoFi Logic</b><br>"
             f"Version {__version__}<br><br>"
-            "A RAW editor for Flashback film cameras.<br><br>"
-            "© 2026 Flashback"
+            "A RAW editor for the Flashback One35 film cameras.<br><br>"
+            "© 2026 LoFi Logic"
         )
 
     def _toggle_advanced_settings(self):
@@ -1469,8 +1474,13 @@ class FlashbackEditor(QMainWindow):
         self.set_export_mode('dng')
         self.process_all_images()
 
-    def export_lut_tiffs(self, output_dir):
-        """Export LUT profile TIFFs for all selected (or all) images."""
+    def export_lut_tiffs(self, output_dir, reverse_ae=False):
+        """Export ACEScct TIFFs for all selected (or all) images.
+
+        reverse_ae=False (default) exports at the app's standard exposure — the
+        right input for previewing a hand-built LUT. reverse_ae=True normalises
+        each frame by its EXIF shutter speed for real film-stock profiling.
+        """
         if not self.image_files:
             return 0, 0
 
@@ -1499,8 +1509,10 @@ class FlashbackEditor(QMainWindow):
                     self.processor.set_settings(self.image_settings[file_path])
 
                 base_name = export_basename(file_path)
-                output_path = os.path.join(output_dir, f"{base_name}_lut_profile.tif")
-                if export_image(self.processor, output_path, as_tiff=True, lut_profiling=True):
+                suffix = "_lut_profile" if reverse_ae else "_standard"
+                output_path = os.path.join(output_dir, f"{base_name}{suffix}.tif")
+                if export_image(self.processor, output_path, as_tiff=True,
+                                lut_profiling=True, reverse_ae=reverse_ae):
                     success_count += 1
             except Exception as e:
                 log.error("Error exporting TIFF for %s: %s", file_path, e)
@@ -1617,7 +1629,7 @@ class FlashbackEditor(QMainWindow):
                 continue
             if dng_files:
                 from core.camera_import import plan_imports
-                to_import, skipped, _ = plan_imports(dng_files, Path(self.camera_import_dir))
+                to_import, skipped = plan_imports(dng_files, Path(self.camera_import_dir))
                 new_n = len(to_import)
                 skip_n = len(skipped)
                 if new_n == 0:
@@ -1718,7 +1730,7 @@ class FlashbackEditor(QMainWindow):
                      else str(Path(default_dir) / f"Untitled{PROJECT_EXT}"))
         path, _ = QFileDialog.getSaveFileName(
             self, "Save Project As", suggested,
-            f"Flashback Project (*{PROJECT_EXT})"
+            f"LoFi Logic Project (*{PROJECT_EXT})"
         )
         if not path:
             return
@@ -1745,12 +1757,12 @@ class FlashbackEditor(QMainWindow):
             QMessageBox.critical(self, "Save Project", f"Failed to save project:\n{e}")
 
     def open_project(self, path=None):
-        from core.project import load_project, PROJECT_EXT
+        from core.project import load_project, PROJECT_EXT, LEGACY_PROJECT_EXT
         if not path:
             default_dir = self.app_settings.value("last_project_dir", self.output_dir)
             path, _ = QFileDialog.getOpenFileName(
                 self, "Open Project", default_dir,
-                f"Flashback Project (*{PROJECT_EXT})"
+                f"LoFi Logic Project (*{PROJECT_EXT} *{LEGACY_PROJECT_EXT})"
             )
             if not path:
                 return
@@ -1909,7 +1921,7 @@ class FlashbackEditor(QMainWindow):
                 self.loader_overlay.progress_label.setText(f"Error at {index}: {error_message}")
                 QTimer.singleShot(1500, lambda: self.loader_overlay.update_progress(index + 1, len(self.image_files)))
         except Exception:
-            pass
+            log.debug("loader overlay error display failed", exc_info=True)
 
     def _on_thumbnails_finished(self):
         self.thumbnails_loading = False
@@ -1927,7 +1939,7 @@ class FlashbackEditor(QMainWindow):
             if hasattr(self, 'loader_overlay'):
                 self.loader_overlay.clear_and_hide()
         except Exception:
-            pass
+            log.debug("loader overlay hide failed", exc_info=True)
 
     def add_image_files(self, new_files):
         """Append new images to the current session without resetting existing ones."""
@@ -1982,7 +1994,7 @@ class FlashbackEditor(QMainWindow):
             if hasattr(self, 'loader_overlay'):
                 self.loader_overlay.clear_and_hide()
         except Exception:
-            pass
+            log.debug("loader overlay hide failed", exc_info=True)
         self.update_mode_label()
 
     # ===================================================================
@@ -2277,7 +2289,7 @@ class FlashbackEditor(QMainWindow):
                 QMessageBox.information(
                     self, "TIFF Not Supported",
                     "TIFF intermediates cannot be imported in this version.\n\n"
-                    "Open the original DNG instead, or use Flashback v1.1.2 "
+                    "Open the original DNG instead, or use an older 1.1.x build "
                     "to continue working with existing TIFF intermediates."
                 )
                 return
@@ -2511,7 +2523,7 @@ class FlashbackEditor(QMainWindow):
                 if os.path.exists(os.path.join(self.output_dir, base + suffix)):
                     return True
         except Exception:
-            pass
+            log.debug("export-exists check failed for %s", file_path, exc_info=True)
         return False
 
     def save_current_settings(self):

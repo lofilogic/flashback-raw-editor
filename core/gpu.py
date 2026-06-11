@@ -36,6 +36,10 @@ except ImportError:
                 "rendering will be slow. Install dependencies with: "
                 "pip install -r requirements.txt")
 
+# wgpu's instance is process-global; its backend set can only be chosen once,
+# before the instance is created. Tracks whether we've done so (see _init).
+_INSTANCE_EXTRAS_SET = False
+
 
 def _read_shader(name: str) -> str:
     shader_dir = os.path.join(os.path.dirname(__file__), 'shaders')
@@ -270,8 +274,16 @@ class GPUPipeline:
             import sys as _sys
             backends = (["Primary"] if _sys.platform.startswith("linux")
                         else ["Primary", "GL"])
-            from wgpu.backends.wgpu_native.extras import set_instance_extras
-            set_instance_extras(backends=backends)
+            # set_instance_extras is only legal before the wgpu instance exists,
+            # which the first request_adapter creates. On a retry after a failed
+            # init the instance already exists, so calling it again raises
+            # "Instance already exists" — which would mask the *real* error (e.g.
+            # "no suitable graphics adapter found"). Configure backends once.
+            global _INSTANCE_EXTRAS_SET
+            if not _INSTANCE_EXTRAS_SET:
+                from wgpu.backends.wgpu_native.extras import set_instance_extras
+                set_instance_extras(backends=backends)
+                _INSTANCE_EXTRAS_SET = True
             adapter = wgpu.gpu.request_adapter_sync(power_preference='high-performance')
             info = dict(getattr(adapter, 'info', {}) or {})
             self.adapter_info = info
@@ -1242,7 +1254,7 @@ class GPUPipeline:
         return k / k.sum()
 
     def gaussian_blur(self, img: np.ndarray, sigma: float) -> np.ndarray | None:
-        """Separable Gaussian blur on CPU or 3-channel image.
+        """Separable Gaussian blur on a single-channel or 3-channel image.
 
         Accepts (H, W) single-channel or (H, W, 3) three-channel float32 arrays.
         Returns the same shape. Returns None if GPU unavailable.

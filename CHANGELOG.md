@@ -8,6 +8,45 @@
      users at the bundled build instead. Decide the wgpu version pin only after
      confirming whether 0.24.0 drives recent GPUs (e.g. RTX 5080). -->
 
+## 1.5.0-rc1 — 2026-06-11
+
+### Renamed to LoFi Logic
+
+The app is now **LoFi Logic** — "Flashback" is the camera; this is an
+independent editor built for it. Existing preferences and saved vibes carry over
+automatically on first launch, so nothing is lost in the move. Project files now
+use the `.lofi` extension; older `.fbproj` projects still open.
+
+### TIFF export now matches the app by default
+
+The advanced ACEScct TIFF export no longer always undoes the camera's per-frame
+autoexposure. Reverse-AE is only meaningful for profiling a film stock (where
+every frame must be normalised to a common level); applied to a normally-metered
+shot it could drop the export several stops — a 1/60 s frame exported ~4 stops
+dark. The export now defaults to the app's standard exposure, so a LUT graded by
+hand in DaVinci Resolve previews accurately, with a checkbox to re-enable
+reverse-AE for genuine film-stock profiling.
+
+### Exported DNGs keep their exposure
+
+Exported ("clean") DNGs now carry the camera's `ExposureTime`, written to the
+standard Exif location where Adobe / Camera Raw read it. Previously it was
+dropped, so a re-imported clean DNG had no exposure data and any
+exposure-dependent processing (e.g. reverse-AE) silently treated it as the
+reference exposure. The reader now looks in both the Exif IFD (exported DNGs,
+Adobe) and IFD0 (original camera DNGs).
+
+### Zen mode
+
+The exposure drag in Zen mode is calmer — about 2.5× more travel for the same
+change, so it's less twitchy to fine-tune.
+
+### Housekeeping
+
+A codebase pass tightened comments and diagnostics, switched a stray font to the
+bundled UI font, and removed an unused asset. Added developer documentation
+(architecture overview + build/test guide).
+
 ## 1.5.0-beta3 — 2026-06-08
 
 ### Performance: GPU-resident render pipeline

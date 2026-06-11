@@ -1,16 +1,69 @@
 """
-Flashback One35 — entry point.
+LoFi Logic — entry point.
 """
 import logging
+import os
+import shutil
 import sys
 import platform
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSettings, QStandardPaths
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QSurfaceFormat, QPalette, QColor
 
 from ui.editor import FlashbackEditor
 from _version import __version__
+
+log = logging.getLogger(__name__)
+
+# Identity used by builds before the LoFi Logic rename. Kept only so a one-time
+# migration can carry a beta user's settings + saved vibes across the rename.
+_LEGACY_ORG, _LEGACY_APP = "Flashback", "Flashback One35 v2"
+_LEGACY_SETTINGS = ("Flashback", "Editor")
+ORG_NAME, APP_NAME = "LoFi Logic", "LoFi Logic"
+SETTINGS_SCOPE = ("LoFi Logic", "Editor")
+
+
+def _migrate_app_identity():
+    """Best-effort one-time carry-over of pre-rename user data.
+
+    Renaming the app/org name moves both the QSettings store and Qt's
+    AppDataLocation (saved vibes). Copy the old data into the new locations once,
+    only when the new ones are still empty, so an existing beta install keeps its
+    settings and tuned vibes instead of silently resetting. Never clobbers data
+    the user already created under the new name. Must run after the new
+    application/organization names are set (so AppDataLocation resolves to the
+    new dir) and before the editor reads anything.
+    """
+    # 1) QSettings (default folders, DNG profile, window state, last project).
+    new_qs = QSettings(*SETTINGS_SCOPE)
+    if not new_qs.allKeys():
+        old_qs = QSettings(*_LEGACY_SETTINGS)
+        keys = old_qs.allKeys()
+        if keys:
+            for k in keys:
+                new_qs.setValue(k, old_qs.value(k))
+            new_qs.sync()
+            log.info("Migrated %d app setting(s) from the previous app name.", len(keys))
+
+    # 2) AppDataLocation (saved vibes). Derive the old dir from the new one by
+    #    swapping the org/app path segment — robust across platforms since Qt
+    #    builds the path as <base>/<org>/<app>.
+    new_dir = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
+    if not new_dir:
+        return
+    old_dir = new_dir.replace(os.path.join(ORG_NAME, APP_NAME),
+                              os.path.join(_LEGACY_ORG, _LEGACY_APP))
+    if old_dir == new_dir or not os.path.isdir(old_dir):
+        return
+    os.makedirs(new_dir, exist_ok=True)
+    if any(f.startswith("vibe_state") for f in os.listdir(new_dir)):
+        return  # user already has state under the new name — don't overwrite
+    for name in os.listdir(old_dir):
+        src, dst = os.path.join(old_dir, name), os.path.join(new_dir, name)
+        if os.path.isfile(src) and not os.path.exists(dst):
+            shutil.copy2(src, dst)
+    log.info("Migrated saved vibes from the previous app-data directory.")
 
 
 def main():
@@ -35,13 +88,14 @@ def main():
         try:
             from Foundation import NSBundle
             bundle_info = NSBundle.mainBundle().infoDictionary()
-            bundle_info['CFBundleName'] = 'Flashback One35 v2'
+            bundle_info['CFBundleName'] = 'LoFi Logic'
         except Exception:
             pass  # pyobjc not available — bundled app uses Info.plist instead
 
     app = QApplication(sys.argv)
-    app.setApplicationName("Flashback One35 v2")
-    app.setOrganizationName("Flashback")
+    app.setApplicationName(APP_NAME)
+    app.setOrganizationName(ORG_NAME)
+    _migrate_app_identity()
 
     # Fusion style with an explicit dark palette — ensures consistent appearance
     # regardless of the OS light/dark mode setting (important for Windows VMs).
@@ -66,7 +120,7 @@ def main():
     app.setPalette(dark)
 
     window = FlashbackEditor()
-    window.setWindowTitle(f"Flashback One35 v2 ({__version__})")
+    window.setWindowTitle(f"LoFi Logic ({__version__})")
     window.show()
 
     sys.exit(app.exec())

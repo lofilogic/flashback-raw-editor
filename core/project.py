@@ -1,4 +1,4 @@
-"""Save/load Flashback project files (.fbproj).
+"""Save/load LoFi Logic project files (.lofi; legacy .fbproj still opens).
 
 A project file is JSON containing:
   - schema version
@@ -20,7 +20,10 @@ from pathlib import Path, PurePosixPath
 
 log = logging.getLogger(__name__)
 
-PROJECT_EXT = '.fbproj'
+PROJECT_EXT = '.lofi'
+# Pre-rename extension. Still accepted on open (the file is identified by its
+# JSON content, not its suffix); new saves always use PROJECT_EXT.
+LEGACY_PROJECT_EXT = '.fbproj'
 SCHEMA_VERSION = 2
 
 
@@ -96,7 +99,8 @@ def save_project(path, image_files, image_settings, image_rotations=None, curren
 
     payload = {
         'schema': SCHEMA_VERSION,
-        'app': 'flashback_editor',
+        'app': 'flashback_editor',   # on-disk format marker — keep (the rename
+                                     # didn't change it so older projects still load)
         'image_files': stored_files,
         'image_settings': _rekey(image_settings),
         'image_rotations': {k: int(v) for k, v in _rekey(image_rotations).items()},

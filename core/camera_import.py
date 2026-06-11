@@ -40,7 +40,7 @@ def read_capture_date(source_path: Path) -> datetime:
 
 
 def target_path_for(source: Path, output_root: Path) -> Path:
-    """Resolve <output_root>/<DD-MM-YY>/_RAW/<source.name> for a camera DNG."""
+    """Resolve <output_root>/<YYYY-MM-DD>/_RAW/<source.name> for a camera DNG."""
     dt = read_capture_date(source)
     folder = output_root / date_folder_name(dt) / '_RAW'
     return folder / source.name
@@ -79,13 +79,12 @@ def export_camera_dng(source_path, target_path, processor):
 
 
 def plan_imports(sources, output_root: Path):
-    """Return (to_import, skipped, already_existing_targets).
+    """Return (to_import, skipped).
 
     to_import: list[(source_path, target_path)] for files that need exporting.
-    skipped: list[target_path] for files whose target already exists.
-    already_existing_targets: list[target_path] mirroring `skipped`, in the
-        order they appear among `sources`. Useful when the caller wants to
-        still surface those files in the thumbnail strip.
+    skipped: list[target_path] for files whose target already exists, in the
+        order they appear among `sources` — useful when the caller wants to
+        still surface those already-imported files in the thumbnail strip.
     """
     to_import = []
     skipped = []
@@ -96,4 +95,4 @@ def plan_imports(sources, output_root: Path):
             skipped.append(tgt)
         else:
             to_import.append((src, tgt))
-    return to_import, skipped, list(skipped)
+    return to_import, skipped

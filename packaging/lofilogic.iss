@@ -1,4 +1,4 @@
-; Inno Setup script for Flashback One35
+; Inno Setup script for LoFi Logic
 ; Built from PyInstaller onedir output.
 ;
 ; Two design choices worth flagging:
@@ -17,12 +17,12 @@
 ;      vibe_state.json is never touched, and future schema files (used
 ;      by later releases that happen to be installed in parallel) are
 ;      not touched either. The Qt app-data dir itself is left in place
-;      because other releases of Flashback share it.
+;      because other releases of LoFi Logic share it.
 
-#define MyAppName "Flashback One35 v2"
-#define MyAppExeName "Flashback One35.exe"
-#define MyAppPublisher "Flashback"
-#define MyAppURL "https://github.com/dothmos/flashback-editor"
+#define MyAppName "LoFi Logic"
+#define MyAppExeName "LoFi Logic.exe"
+#define MyAppPublisher "LoFi Logic"
+#define MyAppURL "https://github.com/lofilogic/flashback-raw-editor"
 
 ; Version is injected by CI via /D flag: iscc /DMyAppVersion=0.1.0-beta7
 #ifndef MyAppVersion
@@ -38,13 +38,13 @@
 ; Per-user app-data directory used by Qt's QStandardPaths.AppDataLocation,
 ; derived from organizationName / applicationName in main.py. Kept here as
 ; a single source of truth for the uninstall cleanup.
-#define MyAppDataDir "{userappdata}\Flashback\Flashback One35 v2"
+#define MyAppDataDir "{userappdata}\LoFi Logic\LoFi Logic"
 
 [Setup]
 ; AppId varies per version so each release is a distinct entry in
 ; Add/Remove Programs and gets its own uninstaller. Keep the base GUID
 ; stable so we stay in the same "product family" for any future tooling
-; that wants to enumerate Flashback installs.
+; that wants to enumerate LoFi Logic installs.
 AppId={{B7E3F1A2-8C4D-4E5F-9A6B-1D2E3F4A5B6C}_v{#MyAppVersion}
 AppName={#MyAppName} {#MyAppVersion}
 AppVersion={#MyAppVersion}
@@ -52,7 +52,7 @@ AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName} {#MyAppVersion}
 DefaultGroupName={#MyAppName} {#MyAppVersion}
-OutputBaseFilename=Flashback-Windows-Setup-{#MyAppVersion}
+OutputBaseFilename=LoFiLogic-Windows-Setup-{#MyAppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -70,7 +70,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 ; Bundle the entire PyInstaller onedir output
-Source: "..\dist\Flashback One35\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\LoFi Logic\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName} {#MyAppVersion}"; Filename: "{app}\{#MyAppExeName}"
@@ -91,9 +91,9 @@ begin
   // data, and so accidentally rerunning the uninstaller on a still-used
   // schema (e.g. a parallel 1.5.x install) leaves settings alone.
   RemoveSettings := MsgBox(
-    'Also remove saved Flashback settings for this version?' + #13#10 + #13#10 +
+    'Also remove saved LoFi Logic settings for this version?' + #13#10 + #13#10 +
     'Only the settings file used by this release ({#MySettingsFile})' + #13#10 +
-    'will be removed. Settings from older or other Flashback versions' + #13#10 +
+    'will be removed. Settings from older or other LoFi Logic versions' + #13#10 +
     'installed on this machine will not be affected.' + #13#10 + #13#10 +
     'Default is No.',
     mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
@@ -115,6 +115,6 @@ begin
     end;
     // Intentionally do NOT remove MyAppDataDir itself, the pre-1.5
     // vibe_state.json, or other schema-versioned files — those may
-    // belong to a parallel Flashback install on the same machine.
+    // belong to a parallel LoFi Logic install on the same machine.
   end;
 end;

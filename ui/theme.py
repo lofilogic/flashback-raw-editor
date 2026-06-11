@@ -1,4 +1,4 @@
-"""Design tokens for the Flashback editor UI — one place for colors, fonts,
+"""Design tokens for the LoFi Logic editor UI — one place for colors, fonts,
 spacing, and QSS snippets so the editor and widget modules stay consistent.
 
 The active palette lives in ``C`` (mutable dict). Switch themes at runtime via
@@ -130,7 +130,6 @@ def load_app_fonts() -> None:
         "Inter-Medium.ttf",
         "Inter-SemiBold.ttf",
         "JetBrainsMono-Medium.ttf",
-        "Roboto.ttf",
     ):
         QFontDatabase.addApplicationFont(resource_path(f"assets/fonts/{fname}"))
 
@@ -234,8 +233,8 @@ def section_reset_link_qss() -> str:
 
 
 def process_btn_qss() -> str:
-    # Accent text colour: dark on light themes, dark on the orange button — so
-    # reuse text_primary from the dark palette for readability on the button.
+    # Button text colour for readability on the accent fill: near-black on the
+    # dark theme's brighter orange, white on the light theme's muted orange.
     btn_text = "#1a1410" if current_theme() == "dark" else "#ffffff"
     return f"""
         QPushButton {{

@@ -14,11 +14,11 @@ jobs:
       matrix:
         include:
           - os: macos-14        # Apple Silicon (M1/M2 runner)
-            artifact: Flashback-macOS
+            artifact: LoFiLogic-macOS
           - os: windows-latest
-            artifact: Flashback-Windows
+            artifact: LoFiLogic-Windows
           - os: ubuntu-22.04
-            artifact: Flashback-Linux
+            artifact: LoFiLogic-Linux
 
     runs-on: ${{ matrix.os }}
 
@@ -53,30 +53,30 @@ jobs:
         if: runner.os != 'Linux'
         env:
           PYTHONUTF8: "1"   # Windows CP1252 can't print special chars — force UTF-8
-          FLASHBACK_VERSION: ${{ github.ref_name }}
-        run: pyinstaller Flashback.spec
+          LOFILOGIC_VERSION: ${{ github.ref_name }}
+        run: pyinstaller LoFiLogic.spec
 
       - name: Build with PyInstaller (Linux — needs virtual display)
         if: runner.os == 'Linux'
         env:
-          FLASHBACK_VERSION: ${{ github.ref_name }}
-        run: xvfb-run pyinstaller Flashback.spec
+          LOFILOGIC_VERSION: ${{ github.ref_name }}
+        run: xvfb-run pyinstaller LoFiLogic.spec
 
       # ── macOS: DMG ──────────────────────────────────────────────
       - name: Create DMG (macOS)
         if: runner.os == 'macOS'
         env:
-          FLASHBACK_VERSION: ${{ github.ref_name }}
+          LOFILOGIC_VERSION: ${{ github.ref_name }}
         run: |
           brew install create-dmg
-          # Must match the versioned name produced by Flashback.spec
-          # ("Flashback One35 <version>.app"). Strip the leading 'v'
+          # Must match the versioned name produced by LoFiLogic.spec
+          # ("LoFi Logic <version>.app"). Strip the leading 'v'
           # from the tag the same way the spec does.
-          VERSION="${FLASHBACK_VERSION#v}"
-          APP_NAME="Flashback One35 ${VERSION}.app"
+          VERSION="${LOFILOGIC_VERSION#v}"
+          APP_NAME="LoFi Logic ${VERSION}.app"
           DMG_NAME="${{ matrix.artifact }}-${VERSION}.dmg"
           create-dmg \
-            --volname "Flashback One35 v2 ${VERSION}" \
+            --volname "LoFi Logic ${VERSION}" \
             --volicon "assets/icons/icon.icns" \
             --window-pos 200 120 \
             --window-size 600 400 \
@@ -104,41 +104,52 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           $version = "${{ github.ref_name }}".TrimStart('v')
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion="$version" packaging\flashback.iss
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion="$version" packaging\lofilogic.iss
 
       - name: Upload artifact (Windows)
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: Flashback-Windows
-          # Filename is versioned (Flashback-Windows-Setup-<ver>.exe) so two
+          name: LoFiLogic-Windows
+          # Filename is versioned (LoFiLogic-Windows-Setup-<ver>.exe) so two
           # parallel releases never overwrite each other in artifact storage.
-          path: packaging/Output/Flashback-Windows-Setup-*.exe
+          path: packaging/Output/LoFiLogic-Windows-Setup-*.exe
           retention-days: 14
 
       # ── Linux: AppImage ─────────────────────────────────────────
       - name: Create AppImage (Linux)
         if: runner.os == 'Linux'
         env:
-          FLASHBACK_VERSION: ${{ github.ref_name }}
+          LOFILOGIC_VERSION: ${{ github.ref_name }}
         run: |
           # Build the AppDir from PyInstaller output
-          APPDIR="Flashback_One35.AppDir"
+          APPDIR="LoFiLogic.AppDir"
           mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/icons/hicolor/256x256/apps"
 
           # Move PyInstaller output into AppDir
-          cp -r "dist/Flashback One35"/* "$APPDIR/usr/bin/"
+          cp -r "dist/LoFi Logic"/* "$APPDIR/usr/bin/"
+
+          # Drop the bundled C++ runtime so the host's is used. Mesa's Vulkan
+          # driver (RADV) links against the system libstdc++/libgcc; the copies
+          # PyInstaller bundles (built here on ubuntu-22.04) are older than
+          # SteamOS/modern Mesa, and because the loader searches the bundle
+          # dir first they shadow the system ones. RADV then fails to load
+          # ("GLIBCXX_3.4.xx not found", loader_icd_scan failure) and the app
+          # silently falls back to the CPU. Removing them lets the host's newer
+          # runtime drive the GPU. Floor becomes "system libstdc++ >= the build
+          # host's" — covers the Steam Deck and all current desktop distros.
+          find "$APPDIR/usr/bin" \( -name 'libstdc++.so.6*' -o -name 'libgcc_s.so.1*' \) -delete
 
           # Desktop file and icon
-          cp packaging/flashback.desktop "$APPDIR/flashback.desktop"
-          cp assets/icons/icon.png "$APPDIR/flashback.png"
-          cp assets/icons/icon.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/flashback.png"
+          cp packaging/lofilogic.desktop "$APPDIR/lofilogic.desktop"
+          cp assets/icons/icon.png "$APPDIR/lofilogic.png"
+          cp assets/icons/icon.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/lofilogic.png"
 
           # AppRun launcher. HERE must be the directory of the mounted AppRun,
           # so use dirname — `${SELF%%/*}` (greedy) wrongly strips everything to
           # an empty string for an absolute path, making the AppImage exec the
           # host's /usr/bin instead of its own and fail to launch on every Linux.
-          printf '#!/bin/bash\nHERE="$(dirname "$(readlink -f "$0")")"\nexec "${HERE}/usr/bin/Flashback One35" "$@"\n' > "$APPDIR/AppRun"
+          printf '#!/bin/bash\nHERE="$(dirname "$(readlink -f "$0")")"\nexec "${HERE}/usr/bin/LoFi Logic" "$@"\n' > "$APPDIR/AppRun"
           chmod +x "$APPDIR/AppRun"
 
           # Download appimagetool
@@ -147,15 +158,15 @@ jobs:
 
           # Build the AppImage with a versioned filename so parallel
           # releases never collide in the user's Downloads folder.
-          VERSION="${FLASHBACK_VERSION#v}"
-          ARCH=x86_64 ./appimagetool "$APPDIR" "Flashback-Linux-${VERSION}.AppImage"
+          VERSION="${LOFILOGIC_VERSION#v}"
+          ARCH=x86_64 ./appimagetool "$APPDIR" "LoFiLogic-Linux-${VERSION}.AppImage"
 
       - name: Upload artifact (Linux)
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
-          name: Flashback-Linux
-          path: Flashback-Linux-*.AppImage
+          name: LoFiLogic-Linux
+          path: LoFiLogic-Linux-*.AppImage
           retention-days: 14
 
   # Runs after all 3 platform builds succeed — only on version tags
@@ -180,7 +191,7 @@ jobs:
 
       # Strip the leading 'v' from the tag so the URL matches the
       # versioned installer filename produced by Inno Setup
-      # (Flashback-Windows-Setup-<ver>.exe).
+      # (LoFiLogic-Windows-Setup-<ver>.exe).
       - name: Compute version
         id: ver
         run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
@@ -195,9 +206,9 @@ jobs:
             echo "### Downloads"
             echo "| Platform | File |"
             echo "|---|---|"
-            echo "| macOS (Apple Silicon — M1/M2/M3/M4) | [\`Flashback-macOS-${VER}.dmg\`](${REPO_URL}/releases/download/${REF}/Flashback-macOS-${VER}.dmg) |"
-            echo "| Windows | [\`Flashback-Windows-Setup-${VER}.exe\`](${REPO_URL}/releases/download/${REF}/Flashback-Windows-Setup-${VER}.exe) |"
-            echo "| Linux | [\`Flashback-Linux-${VER}.AppImage\`](${REPO_URL}/releases/download/${REF}/Flashback-Linux-${VER}.AppImage) |"
+            echo "| macOS (Apple Silicon — M1/M2/M3/M4) | [\`LoFiLogic-macOS-${VER}.dmg\`](${REPO_URL}/releases/download/${REF}/LoFiLogic-macOS-${VER}.dmg) |"
+            echo "| Windows | [\`LoFiLogic-Windows-Setup-${VER}.exe\`](${REPO_URL}/releases/download/${REF}/LoFiLogic-Windows-Setup-${VER}.exe) |"
+            echo "| Linux | [\`LoFiLogic-Linux-${VER}.AppImage\`](${REPO_URL}/releases/download/${REF}/LoFiLogic-Linux-${VER}.AppImage) |"
             echo ""
             # Extract the section in CHANGELOG.md whose heading matches the
             # version. Heading format: "## <version> — <date>". If no match,

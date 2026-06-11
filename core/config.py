@@ -241,9 +241,9 @@ def stops_above_mid_grey_to_acescct(stops: float) -> float:
 # DEBUG / TIMING
 # =============================================================================
 
-# Per-effect timing prints. Off by default; opt in via the FLASHBACK_DEBUG_TIMING
+# Per-effect timing prints. Off by default; opt in via the LOFILOGIC_DEBUG_TIMING
 # env var ("1" / "true" / "yes") so user installs stay quiet.
-DEBUG_TIMING = _os.environ.get('FLASHBACK_DEBUG_TIMING', '').lower() in ('1', 'true', 'yes')
+DEBUG_TIMING = _os.environ.get('LOFILOGIC_DEBUG_TIMING', '').lower() in ('1', 'true', 'yes')
 
 
 def _timing_print(msg):

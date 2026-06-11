@@ -1,5 +1,5 @@
 """
-Custom Qt widgets for the Flashback editor.
+Custom Qt widgets for the LoFi Logic editor.
 
   ThumbnailWorker   — background QThread for generating thumbnails
   ThumbnailWidget   — individual thumbnail with dual selection states
@@ -37,7 +37,7 @@ from core.gpu import gpu
 from core.processor import FlashbackProcessor
 from core.config import _timing_print
 from core.v1_negative import is_v1_negative
-from ui.theme import C, qcolor, register_theme_listener, ui_font
+from ui.theme import C, qcolor, register_theme_listener, ui_font, UI_FONT
 
 
 def _choose_lut(file_path, lut, lut_v1):
@@ -588,7 +588,7 @@ class LoaderOverlay(QWidget):
 
         self.progress_label = QLabel("")
         self.progress_label.setAlignment(Qt.AlignCenter)
-        self.progress_label.setStyleSheet("background: transparent; color: #d0d0d0; font-family: Roboto, Arial, Helvetica; font-size: 13px;")
+        self.progress_label.setStyleSheet(f"background: transparent; color: #d0d0d0; font-family: {UI_FONT}, Arial, Helvetica; font-size: 13px;")
         container_layout.addWidget(self.progress_label, alignment=Qt.AlignCenter)
 
         self.layout = QVBoxLayout(self)
@@ -627,7 +627,7 @@ class LoaderOverlay(QWidget):
             if p is not None:
                 p.installEventFilter(self)
         except Exception:
-            pass
+            log.debug("loader overlay: installEventFilter failed", exc_info=True)
 
     def _update_geometry(self):
         parent = self.parent() or self.window()

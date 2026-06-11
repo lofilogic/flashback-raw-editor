@@ -69,7 +69,7 @@ def _timed(label: str):
     """Log wall-time for a single render stage.
 
     Diagnostic only: the actual printing is gated inside _timing_print by the
-    FLASHBACK_DEBUG_TIMING env flag, so this is a no-op (beyond two time reads)
+    LOFILOGIC_DEBUG_TIMING env flag, so this is a no-op (beyond two time reads)
     in normal runs and never touches the rendered output.
     """
     t0 = time.time()
@@ -307,7 +307,9 @@ def _read_dng_exif(path: str) -> tuple:
         make = str(tags.get('Image Make', '')).strip().lower()
         is_flashback = (make == 'flashback')
         exp_s = None
-        tag = tags.get('Image ExposureTime')
+        # Exif IFD (where our DNG writer + Adobe put it) first, then IFD0
+        # (where the camera writes it directly).
+        tag = tags.get('EXIF ExposureTime') or tags.get('Image ExposureTime')
         if tag is not None:
             from fractions import Fraction
             val = tag.values[0]
@@ -921,12 +923,20 @@ class FlashbackProcessor:
 # =============================================================================
 
 def export_image(processor, output_path, quality=95, as_tiff=False,
-                 lut_profiling=False):
-    """Export JPEG or LUT-profiling TIFF from the current processor state.
+                 lut_profiling=False, reverse_ae=True):
+    """Export JPEG or ACEScct TIFF from the current processor state.
 
     Standard export produces a JPEG. TIFF export (lut_profiling=True, via the
-    advanced panel) encodes the ACEScg intermediate as ACEScct with full
-    reverse-AE + boost applied, suitable for LUT training in DaVinci Resolve.
+    advanced panel) encodes the ACEScg intermediate as ACEScct with the vibe's
+    base exposure offset applied — the level the app feeds the LUT at default
+    exposure — for LUT work in DaVinci Resolve.
+
+    ``reverse_ae`` additionally undoes the camera's per-frame autoexposure (from
+    EXIF ExposureTime, via _rev_gain_unconditional). That's only wanted when
+    *profiling a film stock*, where every frame must be normalised to a common
+    reference level; it darkens/brightens each frame by its own shutter speed
+    (a normally-metered frame can drop several stops). Leave it off to preview a
+    hand-built LUT, so the TIFF matches what the app actually shows.
     """
     output_dir = os.path.dirname(output_path)
     if output_dir and not os.path.exists(output_dir):
@@ -941,9 +951,10 @@ def export_image(processor, output_path, quality=95, as_tiff=False,
             return False
         vibe = processor.vibe
         if lut_profiling:
-            rev_gain = processor._rev_gain_unconditional
-            if not np.isclose(rev_gain, 1.0):
-                img = img * rev_gain
+            if reverse_ae:
+                rev_gain = processor._rev_gain_unconditional
+                if not np.isclose(rev_gain, 1.0):
+                    img = img * rev_gain
             base_ev = vibe.base_exposure_offset_v2
             if not np.isclose(base_ev, 0.0):
                 img = img * (2.0 ** base_ev)

@@ -115,7 +115,9 @@ class FullscreenZenOverlay(QWidget):
         if event.buttons() & Qt.LeftButton:
             if self.lock_axis == 'v':
                 move_y = (curr_pos.y() - self.drag_start_pos.y())
-                val = self.base_exposure + (-move_y / 300.0)
+                # Divisor sets vertical-drag sensitivity: full exposure range
+                # (~0.40 units) sweeps over ~300 px of travel. Larger = calmer.
+                val = self.base_exposure + (-move_y / 750.0)
                 self.main_window.slider_exposure.setValue(int(val * 100))
             elif self.lock_axis == 'h':
                 move_x = (curr_pos.x() - self.drag_start_pos.x())

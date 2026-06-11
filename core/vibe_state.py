@@ -127,7 +127,7 @@ class MigrationReport:
 def _state_dir() -> Path:
     base = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
     if not base:
-        base = str(Path.home() / '.flashback')
+        base = str(Path.home() / '.lofilogic')
     p = Path(base)
     p.mkdir(parents=True, exist_ok=True)
     return p
