@@ -17,6 +17,10 @@ output/
 *.jpg
 *.tif
 
+# ...but README/docs images are committed assets, not exports
+!docs/assets/*.jpg
+!docs/assets/*.tif
+
 # Cache
 *.cache
 
