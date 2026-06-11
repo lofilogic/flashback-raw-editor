@@ -184,5 +184,22 @@ if _system == 'Darwin':
             'NSHighResolutionCapable': 'True',
             'LSBackgroundOnly': 'False',
             'LSUIElement': 'False',
+            # Declare the .lofi project type so double-clicking one opens this
+            # app and the files inherit the app icon. UTExportedTypeDeclarations
+            # defines our own UTI; CFBundleDocumentTypes registers us as its
+            # editor. The app receives the path as a QFileOpenEvent (see main).
+            'CFBundleDocumentTypes': [{
+                'CFBundleTypeName': 'LoFi Logic Project',
+                'CFBundleTypeRole': 'Editor',
+                'LSItemContentTypes': ['com.lofilogic.project'],
+                'CFBundleTypeIconFile': 'icon.icns',
+            }],
+            'UTExportedTypeDeclarations': [{
+                'UTTypeIdentifier': 'com.lofilogic.project',
+                'UTTypeDescription': 'LoFi Logic Project',
+                'UTTypeConformsTo': ['public.data'],
+                'UTTypeIconFile': 'icon.icns',
+                'UTTypeTagSpecification': {'public.filename-extension': ['lofi']},
+            }],
         },
     )

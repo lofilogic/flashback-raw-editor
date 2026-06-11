@@ -77,6 +77,16 @@ Name: "{group}\{#MyAppName} {#MyAppVersion}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\Uninstall {#MyAppName} {#MyAppVersion}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName} {#MyAppVersion}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
+[Registry]
+; Associate .lofi project files with this build: give them the app icon and
+; open them by launching the app with the file path (handled via argv in
+; main.py). HKA = per-machine on an admin install, per-user otherwise. With
+; parallel installs the most recently installed version owns the association.
+Root: HKA; Subkey: "Software\Classes\.lofi"; ValueType: string; ValueName: ""; ValueData: "LoFiLogic.Project"; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\LoFiLogic.Project"; ValueType: string; ValueName: ""; ValueData: "LoFi Logic Project"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\LoFiLogic.Project\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#MyAppExeName},0"
+Root: HKA; Subkey: "Software\Classes\LoFiLogic.Project\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
+
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName} {#MyAppVersion}"; Flags: nowait postinstall skipifsilent
 

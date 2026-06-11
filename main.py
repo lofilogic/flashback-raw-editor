@@ -7,7 +7,7 @@ import shutil
 import sys
 import platform
 
-from PySide6.QtCore import Qt, QSettings, QStandardPaths
+from PySide6.QtCore import Qt, QEvent, QSettings, QStandardPaths
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QSurfaceFormat, QPalette, QColor
 
@@ -15,6 +15,38 @@ from ui.editor import FlashbackEditor
 from _version import __version__
 
 log = logging.getLogger(__name__)
+
+
+class _LoFiApplication(QApplication):
+    """QApplication that routes OS 'open document' events to the editor.
+
+    macOS delivers a file-association double-click / "Open With" as a
+    QFileOpenEvent (not via argv). On a cold launch that event can arrive before
+    the window exists, so it's buffered and flushed once the editor registers.
+    (Windows/Linux pass the path on argv instead — handled in main().)
+    """
+
+    def __init__(self, argv):
+        super().__init__(argv)
+        self._editor = None
+        self._pending = []
+
+    def event(self, e):
+        if e.type() == QEvent.Type.FileOpen:
+            path = e.file()
+            if path:
+                if self._editor is not None:
+                    self._editor.open_os_path(path)
+                else:
+                    self._pending.append(path)
+                return True
+        return super().event(e)
+
+    def register_editor(self, editor):
+        self._editor = editor
+        for p in self._pending:
+            editor.open_os_path(p)
+        self._pending.clear()
 
 # Identity used by builds before the LoFi Logic rename. Kept only so a one-time
 # migration can carry a beta user's settings + saved vibes across the rename.
@@ -92,7 +124,7 @@ def main():
         except Exception:
             pass  # pyobjc not available — bundled app uses Info.plist instead
 
-    app = QApplication(sys.argv)
+    app = _LoFiApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(ORG_NAME)
     _migrate_app_identity()
@@ -122,6 +154,14 @@ def main():
     window = FlashbackEditor()
     window.setWindowTitle(f"LoFi Logic ({__version__})")
     window.show()
+    app.register_editor(window)
+
+    # Windows/Linux hand a double-clicked / "Open with" file on the command line
+    # (macOS uses the QFileOpenEvent path above). Open the first real path.
+    for arg in sys.argv[1:]:
+        if os.path.exists(arg):
+            window.open_os_path(arg)
+            break
 
     sys.exit(app.exec())
 

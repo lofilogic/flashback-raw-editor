@@ -1440,7 +1440,7 @@ class FlashbackEditor(QMainWindow):
             "About LoFi Logic",
             f"<b>LoFi Logic</b><br>"
             f"Version {__version__}<br><br>"
-            "A RAW editor for the Flashback One35 film cameras.<br><br>"
+            "A RAW editor for the Flashback One35 cameras.<br><br>"
             "© 2026 LoFi Logic"
         )
 
@@ -1792,6 +1792,21 @@ class FlashbackEditor(QMainWindow):
         # load_image_files cleared current_project_path; re-attach so Save
         # writes back to this file.
         self.current_project_path = Path(path)
+
+    def open_os_path(self, path):
+        """Open a path the OS handed us (file association double-click, "Open
+        With", or a command-line argument). Routes project files to
+        open_project and image/zip/folder inputs through the normal load path,
+        so double-clicking a .lofi behaves like File → Open Project."""
+        from core.project import PROJECT_EXT, LEGACY_PROJECT_EXT
+        if not path or not os.path.exists(path):
+            return
+        if path.lower().endswith((PROJECT_EXT, LEGACY_PROJECT_EXT)):
+            self.open_project(path)
+            return
+        resolved = self._resolve_input_paths([path])
+        if resolved:
+            self.load_image_files(resolved)
 
     def open_files(self):
         default_dir = QStandardPaths.writableLocation(QStandardPaths.PicturesLocation) or str(Path.home())
