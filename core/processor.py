@@ -363,10 +363,11 @@ _BOOST_EV_BY_EXT = {
 }
 
 # Tier 3 residual (EV) for a non-DNG raw whose make/ext we have NOT measured.
-# Set to the native-ISO centroid of published Adobe BaselineExposure values
-# (~+0.2 EV across makes; see _BOOST_EV_BY_MAKE note), the best universal guess
-# for the per-camera term when we have no file-specific or measured signal.
-_TIER3_DEFAULT_EV = 0.20
+# Held at 0: the published-BaselineExposure centroid (~+0.2 EV) made unmeasured
+# bodies read consistently hot across a wide test set, so with no file-specific
+# or measured signal we apply no per-camera lift and let the anchor + base
+# offset stand alone.
+_TIER3_DEFAULT_EV = 0.0
 
 # DNG IFD0 tag 0xC62A (50730), BaselineExposure — the manufacturer/Adobe's
 # intended lift (EV) from raw mid-grey to display mid-grey. When present this is

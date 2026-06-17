@@ -204,7 +204,7 @@ class FlashbackEditor(QMainWindow):
     # actual decode be the gate — an unsupported/corrupt file raises in
     # rawpy.imread, is caught at load, and surfaces as a clean miss (not a crash).
     # Exposure handling: DNGs read embedded BaselineExposure (Tier 1); measured
-    # makes hit Tier 2; everything else lands on the Tier-3 default (+0.2).
+    # makes hit Tier 2; everything else lands on the Tier-3 default (0 EV).
     SUPPORTED_EXTENSIONS = (
         '.dng',                                  # Adobe / Leica / Ricoh / Pixel / iPhone
         '.cr2', '.cr3', '.crw',                  # Canon
