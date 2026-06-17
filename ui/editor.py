@@ -14,6 +14,7 @@ import time
 import traceback
 import platform
 import re
+from collections import OrderedDict
 from pathlib import Path
 
 # core must be imported before colour to apply the NumPy 2.0 compatibility shim
@@ -72,6 +73,130 @@ from .theme import (
 # MAIN EDITOR WINDOW
 # =============================================================================
 
+def _value_nbytes(value):
+    """Bytes held by a cache value: a numpy array, or a tuple/list that
+    contains arrays (preview_cache stores ``(key, img_array)``)."""
+    nb = getattr(value, 'nbytes', None)
+    if nb is not None:
+        return nb
+    if isinstance(value, (tuple, list)):
+        return sum(_value_nbytes(v) for v in value)
+    return 0
+
+
+class _CacheBudget:
+    """Shared, dynamically-sized memory budget for the array caches.
+
+    All caches that register share one pool, so the cap is the total resident
+    cache memory — not per-cache. The limit is recomputed live from system RAM
+    (via psutil) as ``min(fraction * total, available - reserve)`` so the caches
+    automatically back off when other software consumes memory, and grow again
+    when it's freed. Falls back to a fixed limit if psutil is unavailable.
+    """
+
+    def __init__(self, fraction=0.5, reserve_bytes=2 * 1024 ** 3,
+                 floor_bytes=512 * 1024 ** 2, fallback_bytes=2 * 1024 ** 3):
+        self.fraction = fraction
+        self.reserve = reserve_bytes
+        self.floor = floor_bytes
+        self.fallback = fallback_bytes
+        self.used = 0
+        self._caches = []
+
+    def register(self, cache):
+        self._caches.append(cache)
+
+    def limit(self):
+        try:
+            import psutil
+            vm = psutil.virtual_memory()
+            return max(self.floor, min(int(self.fraction * vm.total),
+                                       int(vm.available - self.reserve)))
+        except Exception:
+            return max(self.floor, self.fallback)
+
+    def enforce(self, protect=()):
+        """Evict least-recently-used entries across all registered caches until
+        the shared total is within the current limit. ``protect`` names keys that
+        must never be evicted (the active image)."""
+        limit = self.limit()
+        # Guard bounds the loop against pathological states; normal exit is the
+        # budget condition or running out of evictable entries.
+        for _ in range(1_000_000):
+            if self.used <= limit:
+                return
+            victim = None
+            for cache in self._caches:
+                for key in cache:                # OrderedDict: oldest first
+                    if key not in protect:
+                        victim = (cache, key)
+                        break
+                if victim:
+                    break
+            if victim is None:
+                return                            # everything left is protected
+            cache, key = victim
+            del cache[key]
+
+
+class _ByteBudgetLRU(OrderedDict):
+    """LRU cache of numpy arrays sharing a :class:`_CacheBudget`.
+
+    get/set bump recency; inserts trigger a shared-budget enforcement that
+    evicts the globally least-recently-used entries across all caches sharing
+    the budget. Evicted intermediates are re-derived from disk on next visit,
+    and the currently displayed image survives because the processor holds its
+    own reference to that array (and it is passed as ``protect`` on insert).
+    """
+
+    def __init__(self, budget: _CacheBudget):
+        super().__init__()
+        self._budget = budget
+        budget.register(self)
+
+    def __getitem__(self, key):
+        self.move_to_end(key)
+        return super().__getitem__(key)
+
+    def get(self, key, default=None):
+        return self[key] if key in self else default
+
+    def __setitem__(self, key, value):
+        if key in self:
+            del self[key]
+        super().__setitem__(key, value)
+        self._budget.used += _value_nbytes(value)
+        self._budget.enforce(protect=(key,))
+
+    def __delitem__(self, key):
+        self._budget.used -= _value_nbytes(super().__getitem__(key))
+        super().__delitem__(key)
+
+    def pop(self, key, *default):
+        # Delete through our own __delitem__ (which adjusts the budget) using
+        # the raw OrderedDict accessor — NOT super().pop / self[key], both of
+        # which re-enter the overridden __getitem__ and move_to_end, turning an
+        # absent-key lookup into a KeyError that defeats the `default` arg.
+        if key in self:
+            value = OrderedDict.__getitem__(self, key)
+            del self[key]
+            return value
+        if default:
+            return default[0]
+        raise KeyError(key)
+
+    def clear(self):
+        for v in self.values():
+            self._budget.used -= _value_nbytes(v)
+        super().clear()
+
+    def prune_to(self, valid_keys):
+        """Drop entries whose key is not in ``valid_keys`` (e.g. images no
+        longer in the open project)."""
+        for key in [k for k in self if k not in valid_keys]:
+            del self[key]
+
+
 class FlashbackEditor(QMainWindow):
     """Main application window for LoFi Logic image editing."""
 
@@ -118,10 +243,14 @@ class FlashbackEditor(QMainWindow):
         self.image_files = []
         self.current_index = 0
         self.image_settings = {}
-        self.image_cache = {}
-        self.preview_cache = {}
+        # All array caches share one dynamic, RAM-relative memory budget so the
+        # combined resident cache never exceeds it; entries are LRU-evicted
+        # across caches and re-derived from disk on next visit.
+        self.cache_budget = _CacheBudget()
+        self.image_cache = _ByteBudgetLRU(self.cache_budget)
+        self.preview_cache = _ByteBudgetLRU(self.cache_budget)
         self.export_mode = 'jpeg'  # 'jpeg' | 'tiff' | 'dng'
-        self.thumbnail_cache = {}
+        self.thumbnail_cache = _ByteBudgetLRU(self.cache_budget)
         self.thumbnail_settings = {}
         self._file_is_flashback: dict = {}  # path_str -> bool
         # Cumulative rotation in degrees (0/90/180/270) per image path. The
@@ -1043,12 +1172,14 @@ class FlashbackEditor(QMainWindow):
             return
 
         # Stop any in-flight refresh before starting a new one.
-        if self._vibe_refresh_worker and self._vibe_refresh_worker.isRunning():
-            self._vibe_refresh_worker.stop()
-            self._vibe_refresh_worker.wait()
+        self._stop_vibe_refresh_worker()
 
-        # Snapshot cache on the main thread so the worker never touches the live dict.
-        cache_snapshot = {k: v.copy() for k, v in self.image_cache.items()}
+        # Snapshot cache keys on the main thread so the worker never iterates the
+        # live dict. Share the array references (shallow) rather than deep-copying
+        # every intermediate — that copy duplicated the entire cache (gigabytes)
+        # into the worker. Safe because cache values are never mutated in place
+        # (always replaced) and the worker copies each array before rendering.
+        cache_snapshot = dict(self.image_cache.items())
 
         self._vibe_refresh_worker = VibeRefreshWorker(
             image_files=self.image_files,
@@ -1851,6 +1982,23 @@ class FlashbackEditor(QMainWindow):
             self.app_settings.setValue("last_open_dir", new_dir)
             self.load_image_files(self._resolve_input_paths(files))
 
+    def _stop_vibe_refresh_worker(self):
+        """Stop, join, and release the vibe-refresh worker.
+
+        Releasing the reference (not just stopping) is what frees memory: the
+        worker holds a snapshot of the whole image cache, so a lingering
+        ``self._vibe_refresh_worker`` keeps that entire snapshot alive — the
+        cause of RAM not dropping when a project is replaced.
+        """
+        w = self._vibe_refresh_worker
+        if w is None:
+            return
+        w.blockSignals(True)
+        w.stop()
+        if w.isRunning():
+            w.wait()
+        self._vibe_refresh_worker = None
+
     def _stop_thumbnail_workers(self):
         """Stop and join any running thumbnail workers so their QThreads never
         outlive the Python owner — that aborts with "QThread: Destroyed while
@@ -1873,9 +2021,7 @@ class FlashbackEditor(QMainWindow):
         if not image_files:
             return
 
-        if self._vibe_refresh_worker and self._vibe_refresh_worker.isRunning():
-            self._vibe_refresh_worker.stop()
-            self._vibe_refresh_worker.wait()
+        self._stop_vibe_refresh_worker()
         # Retire any in-flight thumbnail pass before we replace the worker
         # reference below, or the old QThread is orphaned while still running.
         self._stop_thumbnail_workers()
@@ -1892,6 +2038,7 @@ class FlashbackEditor(QMainWindow):
         self.image_files = image_files
         self.image_cache.clear()
         self.preview_cache.clear()
+        self.thumbnail_cache.clear()
         self._file_is_flashback.clear()
         self.image_rotations = dict(image_rotations) if image_rotations else {}
         self.thumbnail_strip.clear()
@@ -2127,7 +2274,7 @@ class FlashbackEditor(QMainWindow):
             if index == self.current_index:
                 self.thumbnail_strip.set_current_index(index)
 
-        if intermediate is not None and self.image_files:
+        if intermediate is not None and self.image_files and index < len(self.image_files):
             file_path = str(self.image_files[index])
             self.image_cache[file_path] = intermediate
             if is_flashback is not None:
@@ -2160,6 +2307,7 @@ class FlashbackEditor(QMainWindow):
         self.image_rotations.pop(file_path, None)
         self.image_cache.pop(file_path, None)
         self.preview_cache.pop(file_path, None)
+        self.thumbnail_cache.pop(file_path, None)
         self._file_is_flashback.pop(file_path, None)
         self.thumbnail_strip.remove_at(index)
 
@@ -2920,9 +3068,7 @@ class FlashbackEditor(QMainWindow):
         # its Python owner is destroyed aborts the process ("QThread: Destroyed
         # while thread is still running"). Slow V1 thumbnail passes make this
         # easy to hit on close.
-        if self._vibe_refresh_worker and self._vibe_refresh_worker.isRunning():
-            self._vibe_refresh_worker.stop()
-            self._vibe_refresh_worker.wait()
+        self._stop_vibe_refresh_worker()
         self._stop_thumbnail_workers()
         self._render_worker.stop()
         self._render_worker.wait()
