@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.6.0 — 2026-06-17
+
+Broader camera support, smarter exposure for generic raws, and two memory fixes —
+including one that could drive the app to many gigabytes and out of memory.
+
+### Raw format support
+- **Greatly expanded the import whitelist** — most formats libraw can decode now
+  open (Canon, Nikon, Sony, Fujifilm, Olympus, Panasonic, Leica, Pentax, Hasselblad,
+  Phase One, Kodak, Sigma, GoPro, and more). The decode itself is the gate: an
+  unsupported or corrupt file surfaces as a clean miss instead of being pre-rejected.
+
+### Exposure
+- **Tiered exposure for non-Flashback raws.** DNGs read their embedded
+  `BaselineExposure` (Tier 1); a few proprietary formats use a measured per-make
+  residual (Tier 2); unknown bodies now apply **no** per-camera lift (Tier 3),
+  which stops unmeasured raws from reading hot. A constant anchor re-aligns the
+  libraw linear develop to the mid-grey the pipeline expects.
+- **Exposure slider range widened to ±3 stops** (was ±2). Existing projects load
+  unchanged — saved values keep their exact exposure.
+
+### Fixes
+- **Fixed a GPU memory leak that could exhaust system RAM.** The per-render texture
+  arena pooled resources by image resolution and never released them, so browsing
+  raws of differing sizes accumulated GPU memory without bound — on unified-memory
+  Macs that is system RAM. Stale pools are now freed on resolution change.
+- **Removing an image no longer leaves its thumbnail behind.** An LRU-cache `pop`
+  raised instead of returning its default, aborting removal partway (backspace and
+  drag-out both affected).
+
+### Under the hood
+- Image/preview/thumbnail caches now share one **RAM-relative memory budget**
+  (a quarter of system RAM, backing off live as other apps need memory) with
+  LRU eviction across caches, so resident cache memory stays bounded.
+
 ## 1.5.0 — 2026-06-11
 
 The largest release so far, and the first under the new name. Highlights: a full

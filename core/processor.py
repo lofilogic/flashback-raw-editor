@@ -23,6 +23,7 @@ Pipeline (generic raw — non-Flashback):
 """
 import logging
 import os
+import struct
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -37,6 +38,7 @@ from . import resource_path
 log = logging.getLogger(__name__)
 from .config import (
     SENSOR_BLACK, GRAIN_TILE_SCALE, GRAIN_HIGHLIGHT_BIAS, PUSH_PULL_RANGE_EV,
+    GENERIC_RAW_ANCHOR_EV,
     BASE_KELVIN, GENERIC_DAYLIGHT_K, GENERIC_DAYLIGHT_WB_FALLBACK,
     PROFILE_TONE_CURVE,
     VibeConfig, ImageAdjustments,
@@ -319,71 +321,155 @@ def _read_dng_exif(path: str) -> tuple:
         return False, None
 
 
-# Per-make exposure boost (EV) for non-Flashback raws developed via libraw.
-# Goal: the same exposure settings on each camera produce a similar mid-grey
-# in the developed output, with our Fuji pipeline as the rough anchor.
+# Tier-2 fallback: per-make exposure RESIDUAL (EV), added on top of
+# GENERIC_RAW_ANCHOR_EV, used ONLY for non-DNG raws that carry no embedded
+# BaselineExposure (Sony ARW, Fuji RAF, Pentax PEF, non-ProRAW Apple). It is the
+# per-camera difference from libraw's generic normalization level — the same job
+# BaselineExposure does for DNGs, but for these proprietary formats ACR uses an
+# internal per-model profile that is NOT present in the file, so there is no
+# universal signal to read and the value can only come from measurement.
 #
-# Values are community ballpark — within ~0.5 EV of "matches ACR defaults",
-# distilled from RawDigger's Real ISO measurements (Iliah Borg / LibRaw),
-# DPReview studio comparisons, and RawTherapee/darktable forum consensus.
-# They are NOT calibrated against the in-house Fuji reference and should be
-# refined empirically once we measure mid-grey on each body.
+# DELIBERATELY MEASURED-ONLY. We do not list cameras we haven't verified: an
+# unmeasured make is wrong in an unknown direction, whereas falling through to
+# the Tier-3 default (see _TIER3_DEFAULT_EV) is the lowest-risk universal choice.
+# Add an entry here only after measuring that body against an ACR-default render.
+#
+# Note on ISO: published Adobe BaselineExposure data (RawDigger, diglloyd) shows
+# the per-camera value is small and tightly clustered (~0..+0.35 EV) at native
+# ISO across makes; the large swings are ISO-dependent — down to ~-1 EV at
+# extended-LOW (pull) ISOs (50/64/80). DNGs capture this via Tier 1, but the
+# per-ISO term (Adobe BaselineExposureOffset) lives in the DCP profile, not the
+# raw, so non-DNG files here cannot read it. Consequence: these flat residuals
+# are accurate at native/standard ISO (the common case) but may render ~1 stop
+# bright at extended-low/pull ISOs. Accepted limitation — not worth per-camera
+# ISO tables for this app.
+#
+# Measured perceptually vs ACR default render, 2026-06-17:
 _BOOST_EV_BY_MAKE = {
-    'sony':                          0.00,
-    'nikon':                         0.20,
-    'nikon corporation':             0.20,
-    'canon':                         0.00,
-    'fujifilm':                      1.00,
-    'fuji':                          1.00,
-    'olympus':                       0.30,
-    'olympus corporation':           0.30,
-    'olympus imaging corp.':         0.30,
-    'om digital solutions':          0.30,
-    'panasonic':                     0.20,
-    'leica':                         0.30,
-    'leica camera ag':               0.30,
-    'pentax':                        0.50,
-    'ricoh':                         0.50,
+    'sony':                         -1.00,   # ARW
+    'fujifilm':                      0.00,   # via RAF
+    'fuji':                          0.00,   # via RAF
+    'pentax':                        0.50,   # matches GR III embedded BaselineExposure 0.49
+    'ricoh':                         0.50,   # non-DNG Ricoh; GR DNGs use Tier 1
     'ricoh imaging company, ltd.':   0.50,
-    'sigma':                         0.70,
-    'hasselblad':                    0.20,
-    'phase one':                     0.20,
-    'apple':                         1.50,   # iPhone ProRAW / LR Camera DNG
-    'google':                        2.00,   # Pixel HDR+ DNG
-    'dji':                           0.30,
+    'apple':                        -0.50,   # non-ProRAW iPhone raw; ProRAW DNGs use Tier 1
 }
 
 # Used only when Make can't be read from EXIF — primarily Fuji RAF, which
-# is a proprietary container exifread can't parse.
+# is a proprietary container exifread can't parse. Residual on top of the
+# anchor; 0.00 measured for Fuji RAF on 2026-06-17.
 _BOOST_EV_BY_EXT = {
-    '.raf': 1.00,
+    '.raf': 0.00,
 }
+
+# Tier 3 residual (EV) for a non-DNG raw whose make/ext we have NOT measured.
+# Held at 0: the published-BaselineExposure centroid (~+0.2 EV) made unmeasured
+# bodies read consistently hot across a wide test set, so with no file-specific
+# or measured signal we apply no per-camera lift and let the anchor + base
+# offset stand alone.
+_TIER3_DEFAULT_EV = 0.0
+
+# DNG IFD0 tag 0xC62A (50730), BaselineExposure — the manufacturer/Adobe's
+# intended lift (EV) from raw mid-grey to display mid-grey. When present this is
+# the exact per-model/per-ISO value ACR honors, so we prefer it over the
+# hand-tuned per-make table. SRATIONAL (type 10): one signed num/den pair.
+_DNG_BASELINE_EXPOSURE_TAG = 0xC62A
+_TIFF_TYPE_SIZES = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8,
+                    11: 4, 12: 8}
+
+
+def _read_dng_baseline_exposure(path: str) -> 'float | None':
+    """Read the embedded DNG ``BaselineExposure`` (EV), or ``None`` if absent.
+
+    DNG is a TIFF, so we parse IFD0 directly rather than depend on a raw-aware
+    reader (libraw doesn't expose this tag, and tifffile isn't in the packaged
+    build). Returns ``None`` for non-DNG files, missing tag, or any parse error.
+    """
+    try:
+        with open(path, 'rb') as f:
+            header = f.read(8)
+            if len(header) < 8:
+                return None
+            bo = header[:2]
+            if bo == b'II':
+                end = '<'
+            elif bo == b'MM':
+                end = '>'
+            else:
+                return None  # not a TIFF/DNG
+            if struct.unpack(end + 'H', header[2:4])[0] != 42:
+                return None
+            ifd_off = struct.unpack(end + 'I', header[4:8])[0]
+            f.seek(ifd_off)
+            n = struct.unpack(end + 'H', f.read(2))[0]
+            entries = f.read(n * 12)
+            for i in range(n):
+                tag, typ, count = struct.unpack(end + 'HHI', entries[i*12:i*12+8])
+                if tag != _DNG_BASELINE_EXPOSURE_TAG:
+                    continue
+                val_field = entries[i*12+8:i*12+12]
+                size = _TIFF_TYPE_SIZES.get(typ, 0) * count
+                # SRATIONAL is 8 bytes → stored out-of-line at this offset.
+                if size > 4:
+                    off = struct.unpack(end + 'I', val_field)[0]
+                    f.seek(off)
+                    val_field = f.read(size)
+                if typ == 10:   # SRATIONAL
+                    num, den = struct.unpack(end + 'ii', val_field[:8])
+                elif typ == 5:  # RATIONAL (defensive; spec says SRATIONAL)
+                    num, den = struct.unpack(end + 'II', val_field[:8])
+                else:
+                    return None
+                return float(num) / den if den else None
+    except Exception:
+        log.exception("[processor] BaselineExposure read failed for %s", path)
+    return None
 
 
 def _read_generic_raw_boost_ev(path: str) -> float:
     """Return the per-file exposure boost (EV) for a non-Flashback raw.
 
-    Priority:
-      1. EXIF ``Make`` → per-make table.
-      2. File extension → per-extension fallback (for raws exifread can't parse).
-      3. 0.0 if unknown.
+    Always ``GENERIC_RAW_ANCHOR_EV`` (re-anchors libraw's linear develop to the
+    FM1 intermediate level the render pipeline expects) plus a per-file residual,
+    chosen by a strict confidence tier:
+
+      Tier 1 — embedded DNG ``BaselineExposure``. The manufacturer/ACR's own
+        per-model/per-ISO intent; the only universal, non-guessed signal. Used
+        for any DNG (Ricoh GR, Pixel, iPhone ProRAW, DJI, Leica, DNG-converted).
+      Tier 2 — measured per-make residual, for the handful of proprietary-raw
+        bodies we have actually verified (see ``_BOOST_EV_BY_MAKE``). Proprietary
+        formats carry no readable exposure intent, so these come from measurement
+        only — never from un-verified ballpark.
+      Tier 3 — unknown body → anchor + _TIER3_DEFAULT_EV (the native-ISO centroid
+        of published Adobe BaselineExposure values), the lowest-risk default for
+        files we've never seen.
     """
+    anchor = GENERIC_RAW_ANCHOR_EV
+
+    ble = _read_dng_baseline_exposure(path)
+    if ble is not None:
+        log.info("[processor] anchor %+.2f + embedded BaselineExposure %+.2f EV",
+                 anchor, ble)
+        return anchor + ble
+
     try:
         with open(path, 'rb') as f:
             tags = exifread.process_file(f, details=False)
         make = str(tags.get('Image Make', '')).strip().lower()
         if make and make in _BOOST_EV_BY_MAKE:
             ev = _BOOST_EV_BY_MAKE[make]
-            log.info("[processor] baseline boost for make=%r: %+.2f EV", make, ev)
-            return ev
+            log.info("[processor] anchor %+.2f + per-make boost for make=%r: %+.2f EV",
+                     anchor, make, ev)
+            return anchor + ev
         if make:
             log.info("[processor] no baseline-boost entry for make=%r", make)
     except Exception:
         log.exception("[processor] EXIF read failed")
     ext = os.path.splitext(path)[1].lower()
-    ev = _BOOST_EV_BY_EXT.get(ext, 0.0)
-    log.info("[processor] baseline boost for ext=%r: %+.2f EV", ext, ev)
-    return ev
+    ev = _BOOST_EV_BY_EXT.get(ext, _TIER3_DEFAULT_EV)
+    log.info("[processor] anchor %+.2f + per-ext boost for ext=%r: %+.2f EV",
+             anchor, ext, ev)
+    return anchor + ev
 
 
 # =============================================================================

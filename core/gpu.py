@@ -47,6 +47,16 @@ def _read_shader(name: str) -> str:
         return f.read()
 
 
+def _destroy_gpu_resource(resource):
+    """Best-effort release of a wgpu texture/buffer. ``destroy()`` frees the
+    backing allocation immediately rather than waiting for GC; absent (CPU
+    fallback / test doubles), dropping the reference is enough."""
+    try:
+        resource.destroy()
+    except Exception:
+        pass
+
+
 class _RenderArena:
     """Thread-local bump allocator for per-render GPU textures and uniforms.
 
@@ -106,6 +116,27 @@ class _RenderArena:
         s.depth = max(0, s.depth - 1)
         if s.depth == 0:
             s.active = False
+            self._evict_unused(s)
+
+    def _evict_unused(self, s):
+        """Drop pools whose key was NOT touched by the render that just ended,
+        destroying their GPU resources.
+
+        The pools are keyed by texture (h, w) / uniform nbytes, so without this
+        they retain a full render's worth of textures for EVERY distinct image
+        resolution ever seen. Navigating raws of differing sizes then leaks
+        unbounded GPU memory — which on unified-memory GPUs is system RAM. The
+        keys acquired this render are exactly ``tex_idx`` / ``uni_idx`` (reset on
+        the outermost ``begin``); everything else is a stale resolution. Same-
+        image scrubbing reuses the same keys, so steady-state churn is zero — it
+        only frees on a resolution change, honouring the one-render-working-set
+        bound this arena's docstring promises."""
+        for key in [k for k in s.tex_pools if k not in s.tex_idx]:
+            for tex in s.tex_pools.pop(key):
+                _destroy_gpu_resource(tex)
+        for key in [k for k in s.uni_pools if k not in s.uni_idx]:
+            for buf in s.uni_pools.pop(key):
+                _destroy_gpu_resource(buf)
 
     def acquire_tex(self, shape, create_fn):
         s = self._state()
