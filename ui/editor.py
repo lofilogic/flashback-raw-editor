@@ -94,7 +94,7 @@ class _CacheBudget:
     when it's freed. Falls back to a fixed limit if psutil is unavailable.
     """
 
-    def __init__(self, fraction=0.5, reserve_bytes=2 * 1024 ** 3,
+    def __init__(self, fraction=0.25, reserve_bytes=2 * 1024 ** 3,
                  floor_bytes=512 * 1024 ** 2, fallback_bytes=2 * 1024 ** 3):
         self.fraction = fraction
         self.reserve = reserve_bytes
