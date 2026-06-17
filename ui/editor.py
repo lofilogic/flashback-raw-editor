@@ -75,9 +75,36 @@ from .theme import (
 class FlashbackEditor(QMainWindow):
     """Main application window for LoFi Logic image editing."""
 
+    # Permissive: every raw extension libraw can plausibly decode. We let the
+    # actual decode be the gate — an unsupported/corrupt file raises in
+    # rawpy.imread, is caught at load, and surfaces as a clean miss (not a crash).
+    # Exposure handling: DNGs read embedded BaselineExposure (Tier 1); measured
+    # makes hit Tier 2; everything else lands on the Tier-3 default (+0.2).
     SUPPORTED_EXTENSIONS = (
-        '.dng', '.raf', '.cr2', '.cr3', '.nef',
-        '.arw', '.orf', '.rw2',
+        '.dng',                                  # Adobe / Leica / Ricoh / Pixel / iPhone
+        '.cr2', '.cr3', '.crw',                  # Canon
+        '.nef', '.nrw',                          # Nikon
+        '.arw', '.srf', '.sr2',                  # Sony
+        '.raf',                                  # Fujifilm
+        '.orf',                                  # Olympus / OM
+        '.rw2', '.raw',                          # Panasonic
+        '.rwl',                                  # Leica
+        '.pef', '.ptx',                          # Pentax
+        '.3fr', '.fff',                          # Hasselblad / Imacon
+        '.iiq', '.cap', '.eip',                  # Phase One
+        '.mef',                                  # Mamiya
+        '.mos',                                  # Leaf
+        '.mrw',                                  # Minolta
+        '.dcr', '.dcs', '.kdc', '.k25', '.drf',  # Kodak
+        '.mdc',                                  # Minolta / Agfa
+        '.erf',                                  # Epson
+        '.srw',                                  # Samsung
+        '.x3f',                                  # Sigma (Foveon)
+        '.pxn',                                  # Logitech
+        '.gpr',                                  # GoPro
+        '.rwz',                                  # Rawzor
+        '.bay',                                  # Casio
+        '.ari',                                  # ARRI
     )
 
     def __init__(self):

@@ -61,6 +61,17 @@ PROFILE_TONE_CURVE = [
 # training input level and the clean camera-metered intermediate.
 BASE_EXPOSURE_OFFSET_V2 = 2.0
 
+# Generic (non-Flashback) raw path only: constant lift (EV) baked into the
+# ACEScg intermediate at develop time, BEFORE the shared render pipeline runs.
+# libraw's linear develop (no_auto_bright, gamma=1) normalizes the sensor's raw
+# *white level* to 1.0, so mid-grey lands ~2 stops below where the FM1 Flashback
+# develop puts it — the anchor that BASE_EXPOSURE_OFFSET_V2 was tuned against.
+# This re-anchors the generic intermediate to that level so the per-make table /
+# embedded BaselineExposure and the downstream base offset all behave correctly.
+# Preset-independent (baked in develop, not render), so V1 vs other vibes keep
+# the same relative exposure relationship for generic raws as for FM1 raws.
+GENERIC_RAW_ANCHOR_EV = 2.0
+
 # Static linear-space boost applied AFTER reverse-AE and BEFORE ACEScct encode.
 # Must match the value used by tools/build_color_charts.py when sampling the
 # digital chart, otherwise the LUT's input domain at runtime won't match what
