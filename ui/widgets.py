@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 
 from PySide6.QtWidgets import (
     QWidget, QLabel, QScrollArea, QFrame, QVBoxLayout, QHBoxLayout,
-    QApplication, QSizePolicy, QToolTip,
+    QApplication, QSizePolicy, QToolTip, QGraphicsOpacityEffect,
 )
 from PySide6.QtCore import (
     Qt, QTimer, QSize, Signal, QThread, QEvent, QPropertyAnimation, QEasingCurve,
@@ -621,6 +621,14 @@ class LoaderOverlay(QWidget):
 
         self.hide()
         self._fade_anim = None
+        # Fade via a graphics effect, NOT setWindowOpacity: windowOpacity only
+        # affects top-level windows, and animating it on this child overlay
+        # composites wrong on macOS — the dim survives only where the widget is
+        # continuously repainted (the GIF + text), leaving the rest transparent.
+        # The effect composites the whole widget rect, so the dim stays full.
+        self._opacity_effect = QGraphicsOpacityEffect(self)
+        self._opacity_effect.setOpacity(1.0)
+        self.setGraphicsEffect(self._opacity_effect)
 
         try:
             p = self.parent()
@@ -651,14 +659,14 @@ class LoaderOverlay(QWidget):
 
     def fade_in(self, duration_ms: int = 300):
         self._update_geometry()
-        self.setWindowOpacity(0.0)
+        self._opacity_effect.setOpacity(0.0)
         self.show()
         self.raise_()
 
         if self._fade_anim is not None:
             self._fade_anim.stop()
 
-        self._fade_anim = QPropertyAnimation(self, b"windowOpacity")
+        self._fade_anim = QPropertyAnimation(self._opacity_effect, b"opacity")
         self._fade_anim.setDuration(duration_ms)
         self._fade_anim.setStartValue(0.0)
         self._fade_anim.setEndValue(1.0)
@@ -672,9 +680,10 @@ class LoaderOverlay(QWidget):
         if self._fade_anim is not None:
             self._fade_anim.stop()
 
-        self._fade_anim = QPropertyAnimation(self, b"windowOpacity")
+        start = self._opacity_effect.opacity()
+        self._fade_anim = QPropertyAnimation(self._opacity_effect, b"opacity")
         self._fade_anim.setDuration(duration_ms)
-        self._fade_anim.setStartValue(self.windowOpacity() if self.windowOpacity() > 0 else 1.0)
+        self._fade_anim.setStartValue(start if start > 0 else 1.0)
         self._fade_anim.setEndValue(0.0)
         self._fade_anim.setEasingCurve(QEasingCurve.InOutQuad)
         self._fade_anim.finished.connect(self.hide)

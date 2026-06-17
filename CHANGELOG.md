@@ -28,6 +28,10 @@ including one that could drive the app to many gigabytes and out of memory.
 - **Removing an image no longer leaves its thumbnail behind.** An LRU-cache `pop`
   raised instead of returning its default, aborting removal partway (backspace and
   drag-out both affected).
+- **Developing overlay dims the whole window again.** The fade animated a child
+  widget's window opacity, which composites wrong on macOS — the darkening
+  collapsed to just the spinner and text mid-load. It now fades via a graphics
+  effect that covers the full window.
 
 ### Under the hood
 - Image/preview/thumbnail caches now share one **RAM-relative memory budget**
