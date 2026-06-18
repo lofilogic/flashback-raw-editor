@@ -2,7 +2,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Flashback",
+      "name": "LoFi Logic",
       "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}/main.py",
@@ -10,14 +10,25 @@
       "cwd": "${workspaceFolder}"
     },
     {
-      "name": "Flashback (debug timing)",
+      "name": "LoFi Logic (CPU only)",
       "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}/main.py",
       "console": "integratedTerminal",
       "cwd": "${workspaceFolder}",
       "env": {
-        "FLASHBACK_DEBUG_TIMING": "1"
+        "LOFILOGIC_FORCE_CPU": "1"
+      }
+    },
+    {
+      "name": "LoFi Logic (GPU + debug timing)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "LOFILOGIC_DEBUG_TIMING": "1"
       }
     }
   ]

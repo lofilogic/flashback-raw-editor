@@ -385,7 +385,10 @@ class FlashbackEditor(QMainWindow):
             return
         if status['mode'] == 'gpu':
             return
-        if status['mode'] == 'software':
+        if status.get('forced'):
+            msg = ("CPU-only mode (LOFILOGIC_FORCE_CPU) — GPU acceleration is "
+                   "disabled for debugging. Renders will be slow.")
+        elif status['mode'] == 'software':
             msg = (f"GPU not in use — running on a software renderer "
                    f"({status['summary']}). Renders will be slow; update your "
                    f"graphics drivers.")

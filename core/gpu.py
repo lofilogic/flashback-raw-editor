@@ -250,7 +250,20 @@ class GPUPipeline:
 
         Triggers lazy init so the adapter is actually selected. ``mode`` is one
         of 'gpu' (hardware), 'software' (CPU adapter — slow), or 'cpu' (no GPU
-        device; numpy fallback path — slow)."""
+        device; numpy fallback path — slow). ``forced`` is True when the CPU
+        path was selected by LOFILOGIC_FORCE_CPU rather than a real GPU problem."""
+        # When the pipeline is running its CPU fallbacks (forced via env, or
+        # because wgpu is missing), report 'cpu' WITHOUT probing the real
+        # adapter — otherwise the health banner would say GPU while every op
+        # runs on the CPU.
+        if not HAS_GPU:
+            return {
+                'mode': 'cpu',
+                'available': _WGPU_AVAILABLE,
+                'forced': _FORCE_CPU,
+                'summary': self.adapter_summary,
+                'info': dict(self.adapter_info),
+            }
         ok = self._init()
         if not ok or self._device is None:
             mode = 'cpu'
@@ -261,6 +274,7 @@ class GPUPipeline:
         return {
             'mode': mode,
             'available': _WGPU_AVAILABLE,
+            'forced': False,
             'summary': self.adapter_summary,
             'info': dict(self.adapter_info),
         }
@@ -1481,4 +1495,7 @@ class Frame:
 
 # Singleton — one GPU device shared across the app
 gpu = GPUPipeline()
-HAS_GPU = _WGPU_AVAILABLE
+# LOFILOGIC_FORCE_CPU=1 forces the numpy/cv2 fallback paths even when wgpu is
+# available — for debugging the CPU oracle or reproducing no-GPU behaviour.
+_FORCE_CPU = os.environ.get('LOFILOGIC_FORCE_CPU', '').lower() in ('1', 'true', 'yes')
+HAS_GPU = _WGPU_AVAILABLE and not _FORCE_CPU

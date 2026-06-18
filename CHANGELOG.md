@@ -31,6 +31,12 @@ around highlights instead of a soft bloom, with control over its colour.
   colour math were handled differently across Apple GPU generations; the pipeline
   now sanitises them, so highlights render identically on all hardware.
 
+### Under the hood
+- The "running on CPU" banner now also covers a forced CPU-only mode
+  (`LOFILOGIC_FORCE_CPU`) used for debugging, with a message that distinguishes
+  it from a real GPU problem — so a deliberate CPU run can't be mistaken for a
+  driver fault.
+
 ## 1.6.0 — 2026-06-17
 
 Broader camera support, smarter exposure for generic raws, and two memory fixes —
