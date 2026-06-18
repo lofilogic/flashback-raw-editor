@@ -134,12 +134,15 @@ def test_blur_frame_matches_buffer_blur(img):
 @requires_gpu
 def test_halation_frame_approximates_per_op():
     """Resident halation blurs its glow at HALF resolution for speed (downsample
-    -> blur at half sigma -> bilinear upsample); the numpy fallback keeps the
+    -> blur at half size -> bilinear upsample); the numpy fallback keeps the
     full-res blur. So the resident path is a deliberate APPROXIMATION, not a
-    bit-match. The glow is low-frequency, so the error stays tiny — measured max
-    ~0.02 (linear ACEScg) on this hard-edged synthetic worst case, and
-    sub-code-value end-to-end on real images. Perceptual bar, not bit-exact;
-    0.03 leaves headroom over the measured worst case."""
+    bit-match. The dominant scale is now a defocus DISC with a defined edge, and
+    that hard rim is exactly where the half-res upsample ramp diverges most from
+    the full-res oracle — so the worst-case error is larger than the old smooth
+    Gaussian's (measured max ~0.04 in linear ACEScg on this hard-edged synthetic,
+    and sub-code-value end-to-end on real images). Perceptual bar, not bit-exact;
+    0.06 leaves headroom over the measured worst case. The intentional small-disc
+    smear (no full-res gate) lives in this regime — br=4 -> r=2 at half res."""
     from core import effects
     rng = np.random.default_rng(5)
     img = rng.random((40, 60, 3), dtype=np.float32) * 0.5
@@ -155,7 +158,7 @@ def test_halation_frame_approximates_per_op():
     finally:
         gpu.halation_frame = saved
 
-    assert max_abs_err(resident, ref) <= 0.03
+    assert max_abs_err(resident, ref) <= 0.06
 
 
 # --- post-LUT resident tail stages vs their per-op oracles ------------------

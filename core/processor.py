@@ -757,6 +757,7 @@ class FlashbackProcessor:
             stops_above_mid_grey_to_acescct(self.vibe.halation_threshold_stops),
             self.vibe.halation_blur_radius,
             pct(self.vibe.halation_strength_pct),
+            self.vibe.halation_warmth_pct,
         )
 
     def load_image(self, dng_path):
@@ -830,6 +831,7 @@ class FlashbackProcessor:
                 acescg = self._bake_halation(acescg)
             else:
                 acescg = self._develop_generic_raw(dng_path)
+                acescg = self._bake_halation(acescg)
                 self._rev_gain = 1.0
                 self._rev_gain_unconditional = 1.0
 

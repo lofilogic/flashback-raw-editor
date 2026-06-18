@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.6.5 — 2026-06-18
+
+A reworked halation that behaves like real film: a defined, photographic glow
+around highlights instead of a soft bloom, with control over its colour.
+
+### Halation rework
+- **Rebuilt halation on a physically-grounded model.** Film halation is light
+  that passes through the emulsion, reflects off the film base, and re-exposes
+  the frame — geometrically an *out-of-focus copy* of the highlights. The glow's
+  core is now a defocus disc (a circle of confusion) with a **defined edge**, the
+  way real no-remjet stocks like CineStill look, rather than the old soft Gaussian
+  bloom. Fainter exponential "scatter" tails sit underneath for the diffuse falloff,
+  and the glow is added in linear light, so it stays punchy around bright sources.
+- **New Warmth control.** Halation now reddens *outward* — a near-neutral core
+  shading to a red-orange halo, matching the colour of real back-reflection.
+  Warmth sets how saturated that is: 100% is the physical baseline (and reproduces
+  the previous look's average colour), 0% is a colourless glow, and higher values
+  push toward the saturated no-remjet / CineStill halo.
+- Existing vibes carry over unchanged — Threshold, Blur Radius and Strength keep
+  their units and meaning; Warmth simply starts at its default on older presets.
+
+### Fixes
+- **Generic (non-Flashback) raws now receive halation.** The develop path for
+  imported third-party raws skipped the halation bake entirely, so those files got
+  no glow regardless of the vibe. They now bake halation like every other path.
+- **Fixed cyan-tinted highlights on some Apple Silicon Macs.** Clipped highlights
+  in Flashback Camera files could render with a cyan cast on certain M-series GPUs
+  (seen on M1; M3 and Windows rendered correctly). Out-of-range values in the GPU
+  colour math were handled differently across Apple GPU generations; the pipeline
+  now sanitises them, so highlights render identically on all hardware.
+
 ## 1.6.0 — 2026-06-17
 
 Broader camera support, smarter exposure for generic raws, and two memory fixes —

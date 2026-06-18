@@ -213,3 +213,36 @@ def gaussian_blur(img: np.ndarray, sigma: float) -> np.ndarray:
             return result
     # cv2 fallback
     return cv2.GaussianBlur(img, (0, 0), sigmaX=sigma, sigmaY=sigma)
+
+
+def exp_blur(img: np.ndarray, lam: float) -> np.ndarray:
+    """Separable exponential blur with a 1-D exp(-|x|/lam) kernel.
+
+    The 2-D response is exp(-(|x|+|y|)/lam) — a sharp central cusp with a long
+    tail, the halation falloff. numpy/cv2 oracle twin of gpu.blur_frame_exp;
+    must match its _exp_kernel (radius = 4*lam). Runs only on the no-GPU path,
+    so cv2.sepFilter2D is fine.
+    """
+    if lam <= 0:
+        return img.copy()
+    radius = max(1, int(round(lam * 4)))
+    x = np.arange(-radius, radius + 1, dtype=np.float32)
+    k = np.exp(-np.abs(x) / lam).astype(np.float32)
+    k /= k.sum()
+    return cv2.sepFilter2D(img, -1, k, k)
+
+
+def disc_blur(img: np.ndarray, radius: float) -> np.ndarray:
+    """Disc (circle-of-confusion) blur: average within `radius` px.
+
+    The defined-edge halation core — numpy/cv2 oracle twin of gpu.disc_blur.
+    A disc is not separable, so this is a single 2D filter2D with a circular
+    kernel. Runs only on the no-GPU path.
+    """
+    if radius <= 0:
+        return img.copy()
+    r = max(1, int(round(radius)))
+    y, x = np.ogrid[-r:r + 1, -r:r + 1]
+    k = (x * x + y * y <= r * r).astype(np.float32)
+    k /= k.sum()
+    return cv2.filter2D(img, -1, k)
