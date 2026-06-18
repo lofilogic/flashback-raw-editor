@@ -106,9 +106,17 @@ CA_PIXELS = 5.0            # edge pixels of blue offset at the long edge of the 
 CA_STEPS = 4
 CA_BLUE_BLUR = 0.3         # px
 CA_ZOOM_BLUR_PCT = 100.0   # percent
-HALATION_THRESHOLD_STOPS = 4.0   # EV above middle grey
-HALATION_BLUR_RADIUS = 4.0 # px
-HALATION_STRENGTH_PCT = 50.0
+HALATION_THRESHOLD_STOPS = 4.5   # EV above middle grey
+HALATION_BLUR_RADIUS = 8.0 # px
+HALATION_STRENGTH_PCT = 75.0
+# Warmth controls the per-scale halo chroma. 100% = the physically-grounded
+# red-orange of colour-negative back-reflection (the visible halation hue);
+# this default reproduces the legacy look's average colour, now applied as a
+# radial gradient (near-neutral core → red-orange outer halo). 0% collapses to
+# a colourless glow; >100% pushes toward the saturated no-remjet / CineStill
+# halo. It scales the green/blue falloff exponentially around the baseline, so
+# the hue direction is fixed (always reddens outward) and only its depth moves.
+HALATION_WARMTH_PCT = 120.0
 SOFTNESS_SIGMA = 0.5       # px
 # Edge (corner) softness — a radial defocus that grows toward the frame corners,
 # emulating lens field curvature. Distinct from the global `softness` blur.
@@ -249,6 +257,51 @@ def stops_above_mid_grey_to_acescct(stops: float) -> float:
     return float((_math.log2(max(linear, 1e-10)) + 9.72) / 17.52)
 
 # =============================================================================
+# HALATION SCALE MODEL
+# =============================================================================
+#
+# The halation glow is built from three concentric scales blurred at growing
+# radii, summed, then screen-blended. This replaces the older two-pass glow and
+# gives the soft, wide falloff of a no-remjet stock while keeping small
+# highlights crisp. Each scale carries its own chroma so the halo reddens
+# outward (physically: back-reflected light is red-dominant after two passes
+# through the upper dye layers and the orange base mask).
+#
+# Per scale: (radius_mult, thresh_offset, weight, green_frac, blue_frac, kind)
+#   radius_mult   blur radius as a multiple of halation_blur_radius
+#   thresh_offset added to the ACEScct threshold (wider tiers target only the
+#                 very brightest, as the legacy second pass did)
+#   weight        contribution to the summed glow (core dominant, halo fainter)
+#   green/blue_frac  chroma at warmth=100%: green & blue relative to red. The
+#                 warmth exponent (pct/100) is applied as frac**exp, so 100% is
+#                 the physical baseline, 0% → neutral (frac**0 = 1), >100% →
+#                 deeper red. Core ~ the legacy average; outer scales redder.
+#   kind          'disc' = circle-of-confusion (defined edge — the back-
+#                 reflection is a defocused copy of the highlights); 'exp' =
+#                 exponential falloff (the fainter diffuse scatter tail).
+#
+# The defined CineStill halo is the disc core; the exp tails are the soft bloom
+# of scattered light layered faintly on top.
+HALATION_SCALES = (
+    (1.0, 0.0,  1.00, 0.45, 0.12, 'disc'),  # core — defined defocus disc, dominant
+    (2.5, 0.10, 0.18, 0.28, 0.05, 'exp'),   # near scatter — faint, brighter sources
+    (5.0, 0.20, 0.07, 0.16, 0.02, 'exp'),   # far scatter — very faint pedestal
+)
+
+
+def halation_scale_tint(green_frac: float, blue_frac: float, weight: float,
+                        warmth_pct: float):
+    """Per-scale RGB tint (weight folded in) for the given warmth.
+
+    Single source of truth for both the numpy oracle and gpu.halation_frame:
+    red is the carrier (1.0); green/blue fall off as frac**(warmth_pct/100),
+    so warmth 100% = physical baseline, 0% = colourless, >100% = redder.
+    """
+    exp = max(warmth_pct, 0.0) / 100.0
+    return (weight, weight * (green_frac ** exp), weight * (blue_frac ** exp))
+
+
+# =============================================================================
 # DEBUG / TIMING
 # =============================================================================
 
@@ -297,6 +350,7 @@ class VibeConfig:
     halation_threshold_stops: float = HALATION_THRESHOLD_STOPS  # EV above mid grey
     halation_blur_radius: float = HALATION_BLUR_RADIUS         # px
     halation_strength_pct: float = HALATION_STRENGTH_PCT       # 0–300
+    halation_warmth_pct: float = HALATION_WARMTH_PCT           # 0–300, 100 = physical
     ca_pixels: float = CA_PIXELS                                # edge px @ long edge
     ca_steps: int = CA_STEPS
     ca_blue_blur: float = CA_BLUE_BLUR                          # px
@@ -492,7 +546,7 @@ def resolve_lut_ref(ref: str):
 # `ca_zoom_blur_pct` in the presets is legacy/inert — the spectral CA is driven
 # only by ca_pixels (the radial spectral spread subsumes the old zoom-blur pass).
 VIBE_PRESETS = {
-    'disposable':           {'enable_ca': True,  'ca_pixels': 8.0, 'ca_zoom_blur_pct': 150.0, 'softness': 0.3, 'sharpness_pct': 200.0, 'sharpen_radius': 0.5, 'grain_pct': 120.0, 'vignette_pct': 10.0, 'vignette_curve':  66.0, 'bloom_pct': 15.0, 'lut': 'factory:disposable'},
+    'disposable':           {'enable_ca': True,  'ca_pixels': 8.0, 'ca_zoom_blur_pct': 150.0, 'softness': 0.5, 'sharpness_pct': 200.0, 'sharpen_radius': 0.5, 'grain_pct': 120.0, 'vignette_pct': 10.0, 'vignette_curve':  66.0, 'bloom_pct': 15.0, 'lut': 'factory:disposable'},
     'flashback_classic_v1': {'enable_ca': True,  'ca_pixels':  5.0, 'ca_zoom_blur_pct': 200.0, 'softness': 0.3, 'sharpness_pct':  80.0, 'sharpen_radius': 0.5, 'grain_pct': 200.0, 'vignette_pct': 10.0, 'vignette_curve':  66.0, 'bloom_pct':  3.0, 'lut': 'factory:flashback_classic_v1', 'base_exposure_offset_v2': 0.0},
     'point_shoot':          {'enable_ca': True,  'ca_pixels':  2.0, 'ca_zoom_blur_pct': 100.0, 'softness': 0.3, 'sharpness_pct':  50.0, 'sharpen_radius': 1.0, 'grain_pct':  80.0, 'vignette_pct': 10.0, 'vignette_curve':   0.0, 'bloom_pct': 10.0, 'lut': 'factory:point_shoot'},
     'rangefinder':          {'enable_ca': False, 'ca_pixels':  0.0, 'ca_zoom_blur_pct': 100.0, 'softness': 0.1, 'sharpness_pct':  80.0, 'sharpen_radius': 1.0, 'grain_pct':  50.0, 'vignette_pct':  5.0, 'vignette_curve':   0.0, 'bloom_pct':  5.0, 'lut': 'factory:rangefinder'},

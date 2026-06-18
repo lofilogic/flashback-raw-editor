@@ -12,6 +12,7 @@ from PySide6.QtCore import Qt
 from core.config import (
     VibeConfig, VIBE_FIELD_NAMES,
     HALATION_THRESHOLD_STOPS, HALATION_BLUR_RADIUS, HALATION_STRENGTH_PCT,
+    HALATION_WARMTH_PCT,
     CA_PIXELS, CA_STEPS, CA_BLUE_BLUR, CA_ZOOM_BLUR_PCT,
     SOFTNESS_SIGMA, GRAIN_STRENGTH_PCT, SHARPEN_STRENGTH_PCT, SHARPEN_RADIUS,
     CNR_AMOUNT_PCT, CNR_DESPIKE_PCT, CNR_DESPIKE_BIAS_PCT,
@@ -133,6 +134,14 @@ class DebugPanel(QWidget):
         self.spin_halation_str = self._create_double_spin(0.0, 300.0, HALATION_STRENGTH_PCT, 5.0, suffix=" %")
         self.spin_halation_str.valueChanged.connect(self.update_config)
         baked_layout.addRow("Strength:", self.spin_halation_str)
+
+        self.spin_halation_warmth = self._create_double_spin(0.0, 300.0, HALATION_WARMTH_PCT, 5.0, suffix=" %")
+        self.spin_halation_warmth.setToolTip(
+            "Halo chroma. 100% = physical red-orange (and the legacy average "
+            "colour); 0% = colourless glow; >100% pushes toward the saturated "
+            "no-remjet / CineStill halo. Always reddens outward.")
+        self.spin_halation_warmth.valueChanged.connect(self.update_config)
+        baked_layout.addRow("Warmth:", self.spin_halation_warmth)
 
         form_layout.addWidget(baked_group)
 
@@ -418,6 +427,7 @@ class DebugPanel(QWidget):
             'halation_threshold_stops': self.spin_halation_thresh,
             'halation_blur_radius': self.spin_halation_blur,
             'halation_strength_pct': self.spin_halation_str,
+            'halation_warmth_pct': self.spin_halation_warmth,
             'ca_pixels': self.spin_ca_str,
             'ca_steps': self.spin_ca_steps,
             'ca_blue_blur': self.spin_ca_blue_blur,

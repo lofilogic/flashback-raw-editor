@@ -374,10 +374,11 @@ class GPUPipeline:
         ('gaussian_blur_tex.wgsl', 'TRS',   '_gauss_tex_bg_layout',   (('_gauss_tex_pipeline_h', 'main_h'),
                                                                        ('_gauss_tex_pipeline_v', 'main_v'))),
         ('downsample_tex.wgsl',    'TS',    '_downsample_bg_layout',  (('_downsample_pipeline', 'main'),)),
+        ('disc_blur_tex.wgsl',     'TSU',   '_disc_bg_layout',        (('_disc_pipeline', 'main'),)),
         ('upsample_tex.wgsl',      'TS',    '_upsample_bg_layout',    (('_upsample_pipeline', 'main'),)),
         ('halation_mask.wgsl',     'TSU',   '_hal_mask_bg_layout',    (('_hal_mask_pipeline', 'main'),)),
-        ('halation_highlights.wgsl', 'TTS', '_hal_hi_bg_layout',      (('_hal_hi_pipeline', 'main'),)),
-        ('halation_combine.wgsl',  'TTTSU', '_hal_combine_bg_layout', (('_hal_combine_pipeline', 'main'),)),
+        ('halation_highlights.wgsl', 'TTSU', '_hal_hi_bg_layout',     (('_hal_hi_pipeline', 'main'),)),
+        ('halation_combine.wgsl', 'TTTTSU', '_hal_combine_bg_layout', (('_hal_combine_pipeline', 'main'),)),
         ('unsharp_tex.wgsl',       'TTSU',  '_unsharp_tex_bg_layout', (('_unsharp_tex_pipeline', 'main'),)),
         ('ca_tex.wgsl',            'TSU',   '_ca_tex_bg_layout',      (('_ca_tex_pipeline', 'main'),)),
         ('grain_tex.wgsl',         'TTSU',  '_grain_tex_bg_layout',   (('_grain_tex_pipeline', 'main'),)),
@@ -643,8 +644,48 @@ class GPUPipeline:
             return None
         if sigma <= 0:
             return frame
+        return self._separable_blur(frame, self._gauss_kernel(sigma))
+
+    def blur_frame_exp(self, frame: "Frame", lam: float):
+        """Separable EXPONENTIAL blur, texture-resident: Frame in -> Frame out.
+
+        Same separable machinery as blur_frame but with a 1-D exp(-|x|/lam)
+        kernel, so the 2-D response is exp(-(|x|+|y|)/lam): a sharp central cusp
+        with a long tail. This is the halation falloff — film back-reflection
+        decays roughly exponentially, which reads as a *defined* halo rather
+        than a Gaussian's soft shoulder. See halation_frame.
+        """
+        if not self._init():
+            return None
+        if lam <= 0:
+            return frame
+        return self._separable_blur(frame, self._exp_kernel(lam))
+
+    def disc_blur(self, frame: "Frame", radius: float):
+        """Disc (circle-of-confusion) blur: average within `radius` texels.
+
+        The defined-edge halation core (see disc_blur_tex.wgsl). Single 2D pass,
+        O(r^2); halation runs it at half res, so radius is already halved by the
+        caller. radius <= 0 is a no-op.
+        """
+        if not self._init():
+            return None
+        if radius <= 0:
+            return frame
         h, w = frame.shape[:2]
-        kernel = self._gauss_kernel(sigma)
+        r = int(round(radius))
+        dst = self._create_tex(frame.shape)
+        uni = self._uniform(struct.pack('fiff', float(r * r), r, 0.0, 0.0))
+        bg = self._device.create_bind_group(layout=self._disc_bg_layout, entries=[
+            {'binding': 0, 'resource': frame.gpu().create_view()},
+            {'binding': 1, 'resource': dst.create_view()},
+            {'binding': 2, 'resource': {'buffer': uni, 'offset': 0, 'size': uni.size}},
+        ])
+        self._run2d(self._disc_pipeline, bg, w, h)
+        return Frame.from_gpu(dst, frame.shape, self)
+
+    def _separable_blur(self, frame: "Frame", kernel: np.ndarray):
+        h, w = frame.shape[:2]
         kbuf = self._device.create_buffer_with_data(
             data=kernel.tobytes(),
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC,
@@ -725,63 +766,76 @@ class GPUPipeline:
         self._run2d(self._hal_mask_pipeline, bg, w, h)
         return Frame.from_gpu(dst, frame.shape, self)
 
-    def _halation_highlights(self, img: "Frame", mask: "Frame"):
+    def _halation_highlights(self, img: "Frame", mask: "Frame", tint):
         h, w = img.shape[:2]
         dst = self._create_tex(img.shape)
+        # tint is (r, g, b) with the scale weight folded in; std140 pads vec3 to
+        # 16 bytes, so a trailing float keeps the uniform 16-byte aligned.
+        uni = self._uniform(struct.pack('4f', tint[0], tint[1], tint[2], 0.0))
         bg = self._device.create_bind_group(layout=self._hal_hi_bg_layout, entries=[
             {'binding': 0, 'resource': img.gpu().create_view()},
             {'binding': 1, 'resource': mask.gpu().create_view()},
             {'binding': 2, 'resource': dst.create_view()},
+            {'binding': 3, 'resource': {'buffer': uni, 'offset': 0, 'size': uni.size}},
         ])
         self._run2d(self._hal_hi_pipeline, bg, w, h)
         return Frame.from_gpu(dst, img.shape, self)
 
-    def _halation_combine(self, img: "Frame", glow1: "Frame", glow2: "Frame", strength: float):
+    def _halation_combine(self, img: "Frame", glows, strength: float):
         h, w = img.shape[:2]
         dst = self._create_tex(img.shape)
         uni = self._uniform(struct.pack('4f', strength, 0.0, 0.0, 0.0))
+        g0, g1, g2 = glows
         bg = self._device.create_bind_group(layout=self._hal_combine_bg_layout, entries=[
             {'binding': 0, 'resource': img.gpu().create_view()},
-            {'binding': 1, 'resource': glow1.gpu().create_view()},
-            {'binding': 2, 'resource': glow2.gpu().create_view()},
-            {'binding': 3, 'resource': dst.create_view()},
-            {'binding': 4, 'resource': {'buffer': uni, 'offset': 0, 'size': uni.size}},
+            {'binding': 1, 'resource': g0.gpu().create_view()},
+            {'binding': 2, 'resource': g1.gpu().create_view()},
+            {'binding': 3, 'resource': g2.gpu().create_view()},
+            {'binding': 4, 'resource': dst.create_view()},
+            {'binding': 5, 'resource': {'buffer': uni, 'offset': 0, 'size': uni.size}},
         ])
         self._run2d(self._hal_combine_pipeline, bg, w, h)
         return Frame.from_gpu(dst, img.shape, self)
 
     def halation_frame(self, frame: "Frame", threshold: float, blur_radius: float,
-                       strength: float, k: float = 20.0):
-        """Two-pass halation, fully texture-resident: Frame in -> Frame out.
+                       strength: float, warmth_pct: float = 100.0, k: float = 20.0):
+        """Three-scale halation, fully texture-resident: Frame in -> Frame out.
 
-        Mirrors effects.apply_halation (same thresholds, radii, channel weights
-        and screen blend) but uploads once and reads back once instead of the
-        ~9 CPU<->GPU round-trips the per-op path makes. Returns None if the GPU
-        is unavailable (caller falls back to the numpy/buffer path).
+        Mirrors effects.apply_halation (same scale table, tints and screen
+        blend) but uploads once and reads back once instead of the many
+        CPU<->GPU round-trips the per-op path makes. Returns None if the GPU is
+        unavailable (caller falls back to the numpy/buffer path).
         """
         if not self._init():
             return None
 
-        def glow(thresh, br):
+        from .config import HALATION_SCALES, halation_scale_tint
+
+        def glow(thresh, size, tint, kind):
             mask = self._halation_mask(frame, thresh, k)
             mask = self.blur_frame(mask, 2.0)
-            hi = self._halation_highlights(frame, mask)
-            # Halation glow is intrinsically low-frequency, so blur it at half
-            # resolution: quarter the pixels and half the sigma make the wide
-            # pass ~8x cheaper, then bilinear-upsample. Imperceptible for a soft
-            # glow; the channel weighting is already baked into `hi` upstream, so
-            # the downsample preserves it. (The numpy fallback keeps the full-res
-            # blur — it only runs without a GPU, where speed is moot; this is why
-            # the resident-vs-per-op parity bar is perceptual, not bit-exact.)
+            hi = self._halation_highlights(frame, mask, tint)
+            # All scales blur at half resolution: quarter the pixels, half the
+            # size, then bilinear-upsample. ~8x cheaper, and for the disc the
+            # upsample IS the rim-soften we want (a softened bokeh). The 'disc'
+            # core gives the defined circle-of-confusion edge; 'exp' tails are
+            # the fainter diffuse scatter. Tint is baked into `hi` upstream, so
+            # the downsample preserves it.
             small = self._downsample(hi, 2)
-            small = self.blur_frame(small, br * 0.5)
             if small is None:
                 return None
+            if kind == 'disc':
+                small = self.disc_blur(small, size * 0.5)
+            else:
+                small = self.blur_frame_exp(small, size * 0.5)
             return self._upsample(small, frame.shape)
 
-        g1 = glow(threshold, blur_radius)
-        g2 = glow(min(threshold + 0.15, 0.98), blur_radius * 3.0)
-        return self._halation_combine(frame, g1, g2, strength)
+        glows = []
+        for radius_mult, thresh_off, weight, gf, bf, kind in HALATION_SCALES:
+            tint = halation_scale_tint(gf, bf, weight, warmth_pct)
+            glows.append(glow(min(threshold + thresh_off, 0.98),
+                              blur_radius * radius_mult, tint, kind))
+        return self._halation_combine(frame, glows, strength)
 
     # ------------------------------------------------------------------
     # Post-LUT resident tail (display sRGB): softness, grain, sharpen
@@ -1282,6 +1336,18 @@ class GPUPipeline:
         radius = max(1, int(round(sigma * 3)))
         x = np.arange(-radius, radius + 1, dtype=np.float32)
         k = np.exp(-0.5 * (x / sigma) ** 2).astype(np.float32)
+        return k / k.sum()
+
+    @staticmethod
+    def _exp_kernel(lam: float) -> np.ndarray:
+        """Normalised 1-D exponential kernel exp(-|x|/lam).
+
+        Sized to 4*lam: the exp tail decays slower than a Gaussian, so it needs
+        a wider window than the 3-sigma Gaussian rule to avoid truncating the
+        halo. Must match kernels.exp_blur (the numpy oracle)."""
+        radius = max(1, int(round(lam * 4)))
+        x = np.arange(-radius, radius + 1, dtype=np.float32)
+        k = np.exp(-np.abs(x) / lam).astype(np.float32)
         return k / k.sum()
 
     def gaussian_blur(self, img: np.ndarray, sigma: float) -> np.ndarray | None:

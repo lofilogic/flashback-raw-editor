@@ -26,15 +26,17 @@ _resident_halation_warned = False
 from .kernels import (
     apply_lut_gpu,
     apply_lut_cpu,
-    screen_blend,
     unsharp_mask,
     gaussian_blur,
+    exp_blur,
+    disc_blur,
     acescct_encode,
 )
 from .gpu import gpu, HAS_GPU, Frame
 from .config import (
     _timing_print,
     HALATION_BLUR_RADIUS,
+    HALATION_SCALES, halation_scale_tint,
     SOFTNESS_SIGMA, SHARPEN_RADIUS,
     cnr_sigma_color,
 )
@@ -237,26 +239,33 @@ def reduce_color_noise_chroma(image, sigma=0.7, despike=(0.0, 0.0)):
     return _lab_to_acescg(lab)
 
 
-def _halation_glow(img_f, gray, threshold, blur_radius, k=20.0):
-    """Compute one halation glow layer for a given threshold and radius."""
+def _halation_glow(img_f, gray, threshold, size, tint, kind, k=20.0):
+    """Compute one halation glow scale for a given threshold, size, tint and kind.
+
+    `tint` is (r, g, b) with the scale weight already folded in; it carries the
+    scale's chroma so the summed glow reddens outward. `kind` selects the
+    kernel: 'disc' = defined circle-of-confusion core, 'exp' = diffuse scatter
+    tail. Mirrors halation_highlights.wgsl + gpu.halation_frame.
+    """
     gray_log = acescct_encode(gray)
     mask = 1.0 / (1.0 + np.exp(-k * (gray_log - threshold)))
     mask = gaussian_blur(mask, 2.0)
     mask_3d = np.stack([mask, mask, mask], axis=2)
-    highlights = img_f * mask_3d
-    glow = np.zeros_like(highlights)
-    glow[:, :, 0] = gaussian_blur(highlights[:, :, 0], blur_radius)
-    glow[:, :, 1] = gaussian_blur(highlights[:, :, 1] * 0.2, blur_radius)
-    # Blue stays at zero (orange/red glow only, as on real film halation).
-    return glow
+    highlights = img_f * mask_3d * np.asarray(tint, dtype=np.float32)
+    return disc_blur(highlights, size) if kind == 'disc' else exp_blur(highlights, size)
 
 
-def apply_halation(img, threshold=0.65, blur_radius=HALATION_BLUR_RADIUS, strength=0.5):
+def apply_halation(img, threshold=0.65, blur_radius=HALATION_BLUR_RADIUS, strength=0.5,
+                   warmth_pct=100.0):
     """
-    Two-pass halation: regular highlights + extreme highlights with 3x radius.
-    The second pass targets only the very brightest areas (threshold + 0.15)
-    and spreads much wider, simulating the larger glow of intense light sources.
-    Both passes use the same parameters so debug sliders control both naturally.
+    Three-scale halation: a defined disc core (circle-of-confusion — the film
+    back-reflection is a defocused copy of the highlights) plus faint
+    exponential scatter tails, each carrying its own chroma so the halo reddens
+    outward. Wider scales target only the brightest areas (threshold offset).
+    Warmth scales the green/blue falloff around the physical red-orange baseline
+    (100% = physical, 0% = colourless, >100% = the saturated no-remjet /
+    CineStill halo). See config.HALATION_SCALES — single source of truth shared
+    with gpu.halation_frame.
     """
     start_total = time.time()
 
@@ -278,7 +287,7 @@ def apply_halation(img, threshold=0.65, blur_radius=HALATION_BLUR_RADIUS, streng
             # the arena (mirrors kernels.run_resident).
             gpu.begin_render()
             try:
-                res = gpu.halation_frame(Frame.from_cpu(img_f), threshold, blur_radius, strength)
+                res = gpu.halation_frame(Frame.from_cpu(img_f), threshold, blur_radius, strength, warmth_pct)
                 out = res.cpu() if res is not None else None   # combine clamps to >= 0
             finally:
                 gpu.end_render()
@@ -296,16 +305,16 @@ def apply_halation(img, threshold=0.65, blur_radius=HALATION_BLUR_RADIUS, streng
 
     gray = np.max(img_f, axis=2)
 
-    # Pass 1 — regular highlights
-    glow1 = _halation_glow(img_f, gray, threshold, blur_radius)
+    glow_combined = np.zeros_like(img_f)
+    for radius_mult, thresh_off, weight, gf, bf, kind in HALATION_SCALES:
+        tint = halation_scale_tint(gf, bf, weight, warmth_pct)
+        glow_combined += _halation_glow(img_f, gray, min(threshold + thresh_off, 0.98),
+                                        blur_radius * radius_mult, tint, kind)
+    glow_combined *= strength
 
-    # Pass 2 — extreme highlights: higher threshold, 3x radius, 60% strength
-    threshold2 = min(threshold + 0.15, 0.98)
-    glow2 = _halation_glow(img_f, gray, threshold2, blur_radius * 3)
-
-    glow_combined = (glow1 + glow2 * 0.6) * strength
-
-    result = screen_blend(img_f, glow_combined)
+    # Additive in linear light — halation is added re-exposure, and screen blend
+    # breaks on linear HDR values > 1 (see halation_combine.wgsl).
+    result = img_f + glow_combined
 
     total_time = time.time() - start_total
     _timing_print(f"    [Halation] Total: {total_time*1000:.2f}ms")
