@@ -10,14 +10,27 @@ const CUT_DECODE: f32 = 0.155251141552511;
 const A: f32 = 10.5402377416545;
 const B: f32 = 0.0729055341958355;
 
-fn decode(v: f32) -> f32 {
+// Replace NaN with 0 and flush +/-Inf to the finite f32 extremes. Apple GPU
+// families (e.g. M1 vs M3) do not agree on how a non-finite value flows through
+// the following log2/exp2 and the downstream LUT clamp; left unguarded, a single
+// Inf/NaN in one channel collapses that channel and tints clipped highlights
+// (observed as cyan on M1, fine on M3). Sanitising here makes the result
+// GPU-family-agnostic and is a no-op for the finite values real images produce.
+fn sanitize(v: f32) -> f32 {
+    let n = select(v, 0.0, v != v);   // NaN -> 0
+    return clamp(n, -3.4e38, 3.4e38); // +/-Inf -> finite
+}
+
+fn decode(vin: f32) -> f32 {
+    let v = sanitize(vin);
     if v < CUT_DECODE {
         return (v - B) / A;
     }
-    return pow(2.0, v * 17.52 - 9.72);
+    return sanitize(pow(2.0, v * 17.52 - 9.72));
 }
 
-fn encode(v: f32) -> f32 {
+fn encode(vin: f32) -> f32 {
+    let v = sanitize(vin);
     if v <= CUT_ENCODE {
         return A * v + B;
     }

@@ -11,8 +11,16 @@ const CUT_ENCODE: f32 = 0.0078125;
 const A: f32 = 10.5402377416545;
 const B: f32 = 0.0729055341958355;
 
+// NaN -> 0, +/-Inf -> finite f32 extremes. See acescct.wgsl `sanitize` for why:
+// keeps non-finite highlight values from diverging across Apple GPU families
+// (M1 cyan-highlight bug) before the LUT. No-op for finite real-image values.
+fn sanitize(v: f32) -> f32 {
+    let n = select(v, 0.0, v != v);
+    return clamp(n, -3.4e38, 3.4e38);
+}
+
 fn encode(vin: f32) -> f32 {
-    let v = max(vin, 1e-10);
+    let v = max(sanitize(vin), 1e-10);
     if v <= CUT_ENCODE {
         return A * v + B;
     }
