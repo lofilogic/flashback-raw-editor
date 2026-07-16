@@ -13,8 +13,10 @@ import pytest
 
 from core.dng_export import (
     _BYTE, _SHORT, _LONG, _RATIONAL,
-    _pack_ifd, _find_raw_strip, _pack_rational_array, export_dng,
+    _pack_ifd, _read_ifd, _find_raw_strip, _pack_rational_array, export_dng,
 )
+
+TAG_PROFILE_NAME = 50936
 
 # A stand-in for a camera capture: small enough to keep the test fast, since
 # nothing in the strip-resolution path depends on the real sensor dimensions.
@@ -57,6 +59,22 @@ def _read_strip(path):
         off, length = found
         f.seek(off)
         return f.read(length)
+
+
+def read_profile_name(path):
+    """ProfileName (tag 50936) from IFD0. exifread doesn't decode this DNG tag,
+    so walk to it directly."""
+    with open(path, 'rb') as f:
+        header = f.read(8)
+        bo = '<' if header[:2] == b'II' else '>'
+        (ifd0_off,) = struct.unpack(bo + 'I', header[4:8])
+        ifd0 = _read_ifd(f, ifd0_off, bo)
+        _type, count, payload = ifd0[TAG_PROFILE_NAME]
+        if count > 4:
+            (off,) = struct.unpack(bo + 'I', payload)
+            f.seek(off)
+            payload = f.read(count)
+        return payload[:count].rstrip(b'\x00').decode()
 
 
 @pytest.fixture

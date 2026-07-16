@@ -72,7 +72,11 @@ def export_camera_dng(source_path, target_path, processor):
     img_display = processor.load_image(source_str)
     embed_thumb = _embed_thumb_from_display(img_display)
     os.makedirs(os.path.dirname(target_str), exist_ok=True)
-    if not export_dng(source_str, target_str, embed_thumb):
+    # ProfileName is an app-wide preference (see editor._apply_vibe), so an
+    # imported DNG must carry the same one the Export > DNG route writes —
+    # otherwise the name the user chose only ever reaches exported files.
+    profile_name = processor.vibe.dng_profile_name
+    if not export_dng(source_str, target_str, embed_thumb, profile_name):
         log.warning("DNG rewrite failed; falling back to copy: %s", source_str)
         shutil.copy2(source_str, target_str)
     return img_display
