@@ -11,6 +11,8 @@ import numpy as np
 import exifread
 from pathlib import Path
 
+_PHOTOMETRIC_CFA = 32803
+
 log = logging.getLogger(__name__)
 
 from .config import (
@@ -58,18 +60,92 @@ def _pack_ifd(tags: list, current_offset: int, next_ifd_offset: int = 0) -> byte
     entries += struct.pack('<I', next_ifd_offset)
     return entries + extra
 
+def _read_ifd(f, offset: int, bo: str) -> dict:
+    """Read one TIFF IFD into {tag_id: (type, count, value_or_offset_bytes)}."""
+    f.seek(offset)
+    (count,) = struct.unpack(bo + 'H', f.read(2))
+    out = {}
+    for _ in range(count):
+        entry = f.read(12)
+        if len(entry) < 12:
+            break
+        tag_id, type_val, n = struct.unpack(bo + 'HHI', entry[:8])
+        out[tag_id] = (type_val, n, entry[8:12])
+    return out
+
+
+def _ifd_long(f, ifd: dict, tag_id: int, bo: str):
+    """First value of a SHORT/LONG tag, following the offset when it's out-of-line."""
+    if tag_id not in ifd:
+        return None
+    type_val, n, payload = ifd[tag_id]
+    width = 2 if type_val == _SHORT else 4
+    fmt = 'H' if type_val == _SHORT else 'I'
+    if n * width > 4:
+        (off,) = struct.unpack(bo + 'I', payload)
+        f.seek(off)
+        payload = f.read(width)
+    return struct.unpack(bo + fmt, payload[:width])[0]
+
+
+def _find_raw_strip(f):
+    """Locate the CFA raw strip (offset, length) in a TIFF/DNG.
+
+    The raw lives in IFD0 on camera-original files, but in a SubIFD on DNGs we
+    wrote ourselves (whose IFD0 holds the RGB preview thumbnail). Re-exporting
+    an already-exported file used to grab that thumbnail as if it were Bayer
+    data, so resolve by PhotometricInterpretation rather than assuming IFD0.
+    """
+    header = f.read(8)
+    if len(header) < 8 or header[:2] not in (b'II', b'MM'):
+        return None
+    bo = '<' if header[:2] == b'II' else '>'
+    (ifd0_off,) = struct.unpack(bo + 'I', header[4:8])
+
+    ifd0 = _read_ifd(f, ifd0_off, bo)
+    candidates = [ifd0]
+
+    # Follow the SubIFDs pointer (tag 330); it may list several offsets.
+    if 330 in ifd0:
+        type_val, n, payload = ifd0[330]
+        if n * 4 > 4:
+            (list_off,) = struct.unpack(bo + 'I', payload)
+            f.seek(list_off)
+            offs = struct.unpack(bo + f'{n}I', f.read(4 * n))
+        else:
+            offs = struct.unpack(bo + 'I', payload)
+        candidates += [_read_ifd(f, o, bo) for o in offs]
+
+    for ifd in candidates:
+        if _ifd_long(f, ifd, 262, bo) != _PHOTOMETRIC_CFA:
+            continue
+        off = _ifd_long(f, ifd, 273, bo)
+        length = _ifd_long(f, ifd, 279, bo)
+        if off is not None and length:
+            return off, length
+    return None
+
+
 def export_dng(source_path: str, output_path: str, thumbnail_rgb: np.ndarray, profile_name: str = 'Flashback Standard') -> bool:
     try:
         # Pass the source DNG's 10-bit raw strip through verbatim.
         with open(source_path, 'rb') as f:
             tags = exifread.process_file(f, details=False)
 
-        raw_off = int(tags['Image StripOffsets'].values[0]) if 'Image StripOffsets' in tags else 2048
-        raw_len = int(tags['Image StripByteCounts'].values[0]) if 'Image StripByteCounts' in tags else SENSOR_RAW_STRIP_BYTES
-
         with open(source_path, 'rb') as f:
+            strip = _find_raw_strip(f)
+            if strip is None:
+                # No CFA IFD found — fall back to IFD0's strip tags.
+                raw_off = int(tags['Image StripOffsets'].values[0]) if 'Image StripOffsets' in tags else 2048
+                raw_len = int(tags['Image StripByteCounts'].values[0]) if 'Image StripByteCounts' in tags else SENSOR_RAW_STRIP_BYTES
+            else:
+                raw_off, raw_len = strip
+
             f.seek(raw_off)
             raw_bytes = f.read(raw_len)
+
+        if len(raw_bytes) != raw_len:
+            raise ValueError(f"raw strip truncated: got {len(raw_bytes)} of {raw_len} bytes")
 
         # Carry the source's ExposureTime forward so reverse-AE still works if a
         # clean DNG is re-imported. The camera writes it in IFD0; we re-emit it
