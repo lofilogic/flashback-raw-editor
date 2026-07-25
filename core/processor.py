@@ -495,7 +495,6 @@ class FlashbackProcessor:
         self.intermediate_acescg = None
         self.current_file = None
         self.is_flashback_file = False
-        self.is_v1 = False
         self._rev_gain = 1.0
         self._rev_gain_unconditional = 1.0
         self.highlight_mode = 1
@@ -775,7 +774,6 @@ class FlashbackProcessor:
         # V1 negatives are headerless raw + sidecar JSON, not DNGs — detect
         # them first and skip the (harmless but pointless) DNG EXIF probe.
         is_v1 = is_v1_negative(dng_path)
-        self.is_v1 = is_v1
         if is_v1:
             is_flashback, exp_s = False, None
         else:

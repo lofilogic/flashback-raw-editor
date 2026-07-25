@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from functools import lru_cache
 from pathlib import Path
 
 import cv2
@@ -122,9 +123,14 @@ def _stem_paths(path: str):
     return raw_path, (json_path if json_path.exists() else None)
 
 
+@lru_cache(maxsize=4096)
 def is_v1_negative(path: str) -> bool:
     """True if `path` belongs to a V1 negative: a sidecar .json exists and the
-    raw payload is exactly width*height bytes (headerless, 8-bit, 1 channel)."""
+    raw payload is exactly width*height bytes (headerless, 8-bit, 1 channel).
+
+    Cached: the thumbnail worker asks this once per frame on every vibe change,
+    and the answer can only change when a negative is written — which is
+    extract_negatives_from_zip, and that clears the cache."""
     raw_path, json_path = _stem_paths(path)
     if raw_path is None or json_path is None:
         return False
@@ -198,6 +204,7 @@ def extract_negatives_from_zip(zip_path, dest_dir=None) -> list:
             raw_out.write_bytes(data)
             json_out.write_bytes(zf.read(jn))
             raws.append(raw_out)
+    is_v1_negative.cache_clear()
     return sorted(raws, key=lambda p: p.name.lower())
 
 

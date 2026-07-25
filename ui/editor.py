@@ -251,7 +251,6 @@ class FlashbackEditor(QMainWindow):
         self.preview_cache = _ByteBudgetLRU(self.cache_budget)
         self.export_mode = 'jpeg'  # 'jpeg' | 'tiff' | 'dng'
         self.thumbnail_cache = _ByteBudgetLRU(self.cache_budget)
-        self.thumbnail_settings = {}
         self._file_is_flashback: dict = {}  # path_str -> bool
         # Cumulative rotation in degrees (0/90/180/270) per image path. The
         # processor *consumes* its rotation field by burning it into the
@@ -287,8 +286,6 @@ class FlashbackEditor(QMainWindow):
         os.makedirs(self.camera_import_dir, exist_ok=True)
         os.makedirs(self.output_dir, exist_ok=True)
 
-        self.pending_file_path = None
-
         # The active vibe — replaces the old global DebugConfig. Initialized
         # to factory disposable here; the real vibe is loaded in
         # _on_vibe_selected() once the picker exists.
@@ -311,7 +308,6 @@ class FlashbackEditor(QMainWindow):
         self.thumbnail_worker = None
         self.add_thumbnail_worker = None
         self._vibe_refresh_worker = None
-        self._thumbnails_dirty = set()
         self._lut_cache: dict = {}
         # The LUT ref currently uploaded to the GPU / set on the processor —
         # may be a transient V1 override of current_vibe.lut_ref (see
@@ -320,8 +316,6 @@ class FlashbackEditor(QMainWindow):
         self._active_lut_ref = None
 
         self._tint_manual_offset = 0.0  # user's manual tint correction on top of WB coupling
-
-        self.pending_render = False
 
         # Run pre-1.5 → 1.5.0 vibe-state migration once. The report (if
         # any) is stashed for the post-window-shown notice; vibes loaded
