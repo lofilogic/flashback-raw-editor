@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.6.6 — 2026-07-25
+
+A maintenance release: two DNG fixes, and thumbnails that stop re-reading the
+same files every time you switch vibe.
+
+### Fixes
+- **Fixed DNG export producing broken files for already-imported captures.**
+  Camera-original DNGs keep the raw sensor data in the first image block, but the
+  DNGs Flashback writes put an RGB preview there and move the raw further in.
+  Export > DNG > Process always read the first block, so re-exporting a capture
+  that had already been imported packaged the *preview* as if it were sensor
+  data — producing sub-1MB files that no raw editor could open. Export now finds
+  the raw block by looking for it rather than assuming its position, and a
+  re-export is byte-identical to the first one. Importing was never affected.
+- **Import now honours your DNG profile name.** The profile name decides which
+  profile Camera Raw and Lightroom bind a file to. Export > DNG used your
+  setting, but camera import ignored it and always wrote the shipped default, so
+  files that came in through the camera silently disagreed with files you
+  exported. Both paths now use the name you set. The default is unchanged.
+
+### Performance
+- **Switching vibe no longer re-reads every V1 negative on disk.** Detecting a V1
+  negative means reading its sidecar file, and the thumbnail pass asked once per
+  frame — so a full roll re-read every sidecar on every vibe change. The answer
+  is now remembered for the session (and refreshed when a roll is imported).
+
+### Under the hood
+- Removed five pieces of state that were set but never read — leftovers carried
+  over from before the modular rewrite. No behaviour change.
+
 ## 1.6.5 — 2026-06-18
 
 A reworked halation that behaves like real film: a defined, photographic glow

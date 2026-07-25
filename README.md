@@ -119,9 +119,9 @@ Grab the latest build for your platform from the [**Releases**](../../releases/l
 
 | Platform | File | Status |
 |----------|------|--------|
-| macOS (Apple Silicon) | [`LoFiLogic-macOS-1.6.5.dmg`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v1.6.5/LoFiLogic-macOS-1.6.5.dmg) | ✓ Tested |
-| Windows (x64) | [`LoFiLogic-Windows-Setup-1.6.5.exe`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v1.6.5/LoFiLogic-Windows-Setup-1.6.5.exe) | ✓ Tested |
-| Linux (x86_64) | [`LoFiLogic-Linux-1.6.5.AppImage`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v1.6.5/LoFiLogic-Linux-1.6.5.AppImage) | ⚠ Community-tested |
+| macOS (Apple Silicon) | [`LoFiLogic-macOS-1.6.6.dmg`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v1.6.6/LoFiLogic-macOS-1.6.6.dmg) | ✓ Tested |
+| Windows (x64) | [`LoFiLogic-Windows-Setup-1.6.6.exe`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v1.6.6/LoFiLogic-Windows-Setup-1.6.6.exe) | ✓ Tested |
+| Linux (x86_64) | [`LoFiLogic-Linux-1.6.6.AppImage`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v1.6.6/LoFiLogic-Linux-1.6.6.AppImage) | ⚠ Community-tested |
 
 The apps aren't code-signed yet, so each OS warns on first launch. One-time steps:
 
