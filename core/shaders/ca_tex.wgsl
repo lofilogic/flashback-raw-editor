@@ -1,20 +1,8 @@
-// Spectral chromatic aberration, texture-resident.
+// Lateral chromatic aberration. Sums `samples` wavelengths, each magnified
+// radially and weighted by its RGB response: red is unshifted, blue magnified
+// by 1 + scale. Gives a smooth fringe rather than three shifted copies.
 //
-// Models lateral (transverse) CA: a real lens magnifies long wavelengths less
-// and short wavelengths more, so colour fringes grow with distance from the
-// optical centre and vanish at it. Instead of three discrete R/G/B copies, we
-// integrate `samples` points across the visible spectrum: each is displaced
-// radially by its own magnification and weighted by that band's RGB
-// sensitivity, producing a smooth purple->green fringe like real glass.
-//
-// Strength matches the legacy effect's envelope: red (longest wavelength) stays
-// ~unshifted and blue (shortest) is magnified outward by (1 + `scale`), where
-// scale = ca_pixels / (width/2). So existing ca_pixels values carry straight
-// over. (The per-sample magnification is the reciprocal 1/(1+scale*t) — see the
-// loop — which is what gives the physically-correct fringe direction.)
-//
-// rgba32float is not filterable, so sampling is manual bilinear with
-// clamp-to-edge (== cv2 BORDER_REPLICATE).
+// Manual bilinear with clamp-to-edge, since f32 isn't filterable.
 
 struct U {
     scale:   f32,   // blue-edge magnification minus 1
@@ -40,9 +28,8 @@ fn sample_edge(pos: vec2f, dims: vec2f) -> vec3f {
     return mix(mix(c00, c10, fr.x), mix(c01, c11, fr.x), fr.y);
 }
 
-// Per-channel spectral sensitivity: smooth Gaussian bands centred at t=0 (red),
-// t=0.5 (green), t=1 (blue). Per-channel normalisation in main() keeps a neutral
-// input neutral.
+// Gaussian bands at t=0 (red), 0.5 (green), 1 (blue). main() normalises per
+// channel so neutrals stay neutral.
 fn band(t: f32) -> vec3f {
     let s2 = 2.0 * 0.25 * 0.25;
     let dr = t - 0.0;
@@ -57,7 +44,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     if gid.x >= dimsu.x || gid.y >= dimsu.y { return; }
     let dims = vec2f(dimsu);
     let p = vec2f(f32(gid.x), f32(gid.y));
-    let c = dims * 0.5;                 // matches cv2 getRotationMatrix2D centre
+    let c = dims * 0.5;
     let d = p - c;
 
     let n = max(i32(u.samples), 1);
@@ -65,10 +52,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     var wsum = vec3f(0.0);
     for (var i: i32 = 0; i < n; i++) {
         let t  = select(0.0, f32(i) / f32(n - 1), n > 1);
-        // Reciprocal so the magnification matches a real lens (and the legacy
-        // cv2.warpAffine, which inverts its matrix): blue (t=1) samples inward,
-        // so blue *content* lands at larger radius. Net: light->dark edges going
-        // outward fringe blue, dark->light fringe red — as on the film scans.
+        // Sampling inward puts blue content further out, so light->dark edges
+        // fringe blue and dark->light red, as on the film scans.
         let sc = 1.0 / (1.0 + u.scale * t);
         let w  = band(t);
         acc  += sample_edge(c + d * sc, dims) * w;

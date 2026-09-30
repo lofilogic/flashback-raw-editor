@@ -1,13 +1,9 @@
-// Film grain blend, texture-resident twin of grain.wgsl.
-//
-// Identical math to the buffer kernel, per channel:
+// Grain blend on textures, per channel:
 //   grain_delta = (2*grain - 1) * intensity
 //   weight      = (1-bias)*(1-pixel) + bias*pixel
 //   falloff     = min_grain + weight*(1-min_grain)
 //   result      = clamp(pixel + grain_delta*falloff, 0, 1)
-//
-// Reads the image and a same-size grain layer as rgba32float textures and
-// writes the blended result, so grain stays GPU-resident between stages.
+
 
 struct Uniforms {
     intensity:      f32,

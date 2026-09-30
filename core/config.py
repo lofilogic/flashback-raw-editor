@@ -1,19 +1,9 @@
 """
-Application-wide constants, dataclasses, and runtime configuration.
+Constants, presets and the two state dataclasses.
 
-Two dataclasses model the two layers of user-mutable state:
-
-  VibeConfig         — the "film stock" layer. Effect parameters that
-                       define a vibe (halation, grain, LUT, etc.).
-                       One instance per active vibe. Persisted via
-                       core.vibe_state. Edited only in the debug panel.
-
-  ImageAdjustments   — the per-image layer. Exposure, WB, tint,
-                       push/pull, rotation, plus the id of the vibe
-                       this image was last edited under. Travels with
-                       the image; gets saved in a project.
-
-Everything that used to be DebugConfig.X is now a field on VibeConfig.
+VibeConfig        effect parameters that make up a vibe. Persisted by
+                  core.vibe_state, edited in the F12 panel.
+ImageAdjustments  per-image sliders + rotation. Saved in projects.
 """
 from dataclasses import dataclass, asdict, fields, replace
 import math as _math
@@ -25,27 +15,25 @@ import os as _os
 
 SENSOR_BLACK = 64
 
-# Native ONE35 V2 sensor geometry. The DNG exporter writes the raw strip
-# verbatim, so these must match the source file's ImageWidth/ImageLength.
-# SENSOR_RAW_STRIP_BYTES is the fallback strip length used when StripByteCounts
-# is missing from the source EXIF (10-bit packed: w*h*10/8).
+# ONE35 V2 sensor geometry. The DNG exporter copies the raw strip verbatim,
+# so these must match the source. The byte count is the fallback when
+# StripByteCounts is missing (10-bit packed: w*h*10/8).
 SENSOR_WIDTH = 4144
 SENSOR_HEIGHT = 3088
 SENSOR_RAW_STRIP_BYTES = 15995840
 
-# Slider zero for the WB knob. Matches the Flashback ForwardMatrix1's
-# calibration illuminant (D55). The generic-raw path also targets this
-# Kelvin so both paths land at the same neutral point.
+# WB slider zero. D55, the ForwardMatrix1 calibration illuminant; the
+# generic-raw path targets it too so both land on the same neutral.
 BASE_KELVIN = 5500.0
 
-# CIE D65 — the reference illuminant for libraw's daylight_whitebalance.
+# D65, the reference for libraw's daylight_whitebalance.
 GENERIC_DAYLIGHT_K = 6504.0
 
 # Fallback Bayer WB for cameras whose raw file lacks daylight_whitebalance.
 GENERIC_DAYLIGHT_WB_FALLBACK = [2.0, 1.0, 1.6, 1.0]
 
-# v2 profile tone curve, used by the DNG exporter (tag 50940) AND by the
-# fallback render path when no LUT is active. Pairs of (input, output).
+# Profile tone curve, (in, out) pairs. Written to exported DNGs (tag 50940)
+# and used for rendering when no LUT is active.
 PROFILE_TONE_CURVE = [
     0.0, 0.0, 0.02, 0.02, 0.06, 0.10, 0.20, 0.42,
     0.40, 0.70, 0.78, 0.95, 1.0, 1.0,
@@ -55,71 +43,48 @@ PROFILE_TONE_CURVE = [
 # EXPOSURE PIPELINE TUNING
 # =============================================================================
 
-# v2 pipeline: constant render-time exposure lift (EV). Applied alongside
-# user exposure_ev and NOT counteracted post-LUT, so it genuinely raises
-# output brightness. Tune to compensate for the gap between the LUT's
-# training input level and the clean camera-metered intermediate.
+# Render-time lift (EV) added to the user exposure. Not counteracted after
+# the LUT, so it raises output brightness. Bridges the gap between the level
+# the LUTs were trained on and the camera-metered intermediate.
 BASE_EXPOSURE_OFFSET_V2 = 2.0
 
-# Generic (non-Flashback) raw path only: constant lift (EV) baked into the
-# ACEScg intermediate at develop time, BEFORE the shared render pipeline runs.
-# libraw's linear develop (no_auto_bright, gamma=1) normalizes the sensor's raw
-# *white level* to 1.0, so mid-grey lands ~2 stops below where the FM1 Flashback
-# develop puts it — the anchor that BASE_EXPOSURE_OFFSET_V2 was tuned against.
-# This re-anchors the generic intermediate to that level so the per-make table /
-# embedded BaselineExposure and the downstream base offset all behave correctly.
-# Preset-independent (baked in develop, not render), so V1 vs other vibes keep
-# the same relative exposure relationship for generic raws as for FM1 raws.
+# Generic raws only: lift (EV) baked in at develop. libraw's linear develop
+# maps raw white to 1.0, which puts mid-grey ~2 stops below the Flashback
+# develop that BASE_EXPOSURE_OFFSET_V2 was tuned against.
 GENERIC_RAW_ANCHOR_EV = 2.0
 
-# Static linear-space boost applied AFTER reverse-AE and BEFORE ACEScct encode.
-# Must match the value used by tools/build_color_charts.py when sampling the
-# digital chart, otherwise the LUT's input domain at runtime won't match what
-# colormatch saw at training time.
+# Linear boost after reverse-AE, before the ACEScct encode. Must match
+# tools/build_color_charts.py or the LUT sees a different input range than it
+# was trained on.
 POST_AE_EXPOSURE_BOOST_EV = 2.0
 
-# Fraction of the full reverse-AE + boost effect applied at slider zero.
-# 0.0 = camera-metered look (AE fully preserved), 1.0 = old behavior (full
-# reverse-AE + boost visible through the LUT). ~0.3 gives a mild film character
-# while keeping brightness close to the camera-metered original.
+# How much of reverse-AE + boost to apply. 0 = camera-metered, 1 = full
+# effect through the LUT. 0.3 adds some film character without drifting far
+# from the metered brightness.
 REVERSE_AE_STRENGTH = 0.3
 
-# "Push / Pull" slider extent, in EV (each direction). Pulling
-# left scales the pre-LUT exposure down by 2^pp and counteracts it post-LUT
-# (brightness ~unchanged, film toe more pronounced); pushing right does the
-# opposite. Also drives grain highlight-bias.
+# Push/pull range in EV each way. Shifts exposure into the LUT and undoes it
+# afterwards, so brightness stays put and only the toe/shoulder changes. Also
+# drives grain highlight bias.
 PUSH_PULL_RANGE_EV = 2.0
 
 # =============================================================================
 # EFFECT DEFAULTS
 # =============================================================================
 
-# User-facing effect defaults. Units are documented per-field on VibeConfig.
-# Conversion to the internal scalars the effect functions expect happens in
-# the conversion helpers below; storage and UI both use these user-facing
-# numbers.
-CA_PIXELS = 5.0            # edge pixels of blue offset at the long edge of the rendered frame
-# Legacy CA params — UNUSED by the current spectral CA (gpu.ca_frame /
-# effects.apply_chromatic_aberration), which is driven solely by ca_pixels. Kept
-# so existing presets/saved projects/UI don't break; candidates for repurposing
-# or removal in a future cleanup.
-CA_STEPS = 4
-CA_BLUE_BLUR = 0.3         # px
-CA_ZOOM_BLUR_PCT = 100.0   # percent
+# Defaults in user-facing units (see VibeConfig); the helpers below convert
+# them for the effect functions.
+CA_PIXELS = 5.0            # blue offset in px at the long edge
 HALATION_THRESHOLD_STOPS = 4.5   # EV above middle grey
 HALATION_BLUR_RADIUS = 8.0 # px
 HALATION_STRENGTH_PCT = 75.0
-# Warmth controls the per-scale halo chroma. 100% = the physically-grounded
-# red-orange of colour-negative back-reflection (the visible halation hue);
-# this default reproduces the legacy look's average colour, now applied as a
-# radial gradient (near-neutral core → red-orange outer halo). 0% collapses to
-# a colourless glow; >100% pushes toward the saturated no-remjet / CineStill
-# halo. It scales the green/blue falloff exponentially around the baseline, so
-# the hue direction is fixed (always reddens outward) and only its depth moves.
+# Halo colour. 100% = the red-orange of colour-negative back-reflection,
+# 0% = colourless, >100% heads toward a CineStill halo. Only the depth of the
+# red changes, not the hue (see halation_scale_tint).
 HALATION_WARMTH_PCT = 120.0
 SOFTNESS_SIGMA = 0.5       # px
-# Edge (corner) softness — a radial defocus that grows toward the frame corners,
-# emulating lens field curvature. Distinct from the global `softness` blur.
+# Corner softness: radial defocus toward the corners (field curvature).
+# Separate from the global softness blur.
 EDGE_SOFTNESS_STRENGTH_PCT = 60.0   # 0–100 → max sharp→blur blend at the corners
 EDGE_SOFTNESS_SIGMA = 3.0           # px, blur radius of the soft copy
 EDGE_SOFTNESS_START_PCT = 40.0      # 0–100 → radius (as % of corner) where softness begins
@@ -128,7 +93,7 @@ GRAIN_TILE_SCALE = 0.8     # <1.0 makes grain finer (tiles render denser); >1.0 
 GRAIN_HIGHLIGHT_BIAS = 0.3 # 1.0 = grain biased to highlights, 0.0 = shadows, 0.5 = flat.
 SHARPEN_STRENGTH_PCT = 50.0
 SHARPEN_RADIUS = 1.0       # px
-CNR_AMOUNT_PCT = 20.0      # sigma 8 at _CNR_SIGMA_MAX=20 (a touch under old "200%")
+CNR_AMOUNT_PCT = 20.0      # sigma 4
 CNR_DESPIKE_PCT = 60.0        # chroma firefly/outlier clamp; 0 = off
 CNR_DESPIKE_BIAS_PCT = 75.0  # 0 = symmetric, 100 = green (-a*) only
 VIGNETTE_STRENGTH_PCT = 50.0
@@ -137,12 +102,9 @@ VIGNETTE_CURVE = 0.0       # -100…+100, higher = more feathered (softer)
 BLOOM_STRENGTH_PCT = 30.0
 BLOOM_THRESHOLD_STOPS = 3.0      # EV above middle grey
 
-# Internal scalar maxima — the user-facing percent fields map 0–100 onto
-# 0–MAX. Keeping these explicit makes the migration buckets trivial to
-# write and makes the panel/pipeline agree on the same conversion.
+# Internal maxima: percent fields map 0–100 onto 0–MAX.
 _CNR_SIGMA_MAX = 20.0
-# Despike clamp limits in Lab a*/b* units: gentle band at amount→0+, tight at
-# amount→100. Smooth colour stays inside the band; only spikes get pulled back.
+# Despike clamp range in Lab a*/b*: loose at low amounts, tight at 100.
 _CNR_DESPIKE_T_HI = 40.0
 _CNR_DESPIKE_T_LO = 4.0
 _VIGNETTE_COLOR_MAX = 0.2
@@ -151,22 +113,16 @@ _VIGNETTE_COLOR_MAX = 0.2
 # =============================================================================
 # UNIT CONVERSIONS  (user-facing values  →  internal effect scalars)
 # =============================================================================
-# Each helper takes a value as stored on VibeConfig and returns what the
-# effect function actually consumes. The pipeline calls these at the
-# effect-function boundary in core/processor.py.
 
-# Long edge (px) of the Flashback V2 half_size develop. Every px-denominated
-# effect is calibrated at this size; other inputs scale their effects by
-# long_edge / WORKING_LONG_EDGE (see FlashbackProcessor._set_spatial_scale).
+# Long edge of the V2 half-size develop. Pixel-sized effects are tuned at this
+# size and scaled by long_edge / WORKING_LONG_EDGE for other inputs.
 WORKING_LONG_EDGE = 2072
 
-# EXPERIMENTAL JPEG input (opt-in in Advanced Settings). Applied at load to
-# the linear ACEScg decode, in this order: tone curve → exposure → contrast →
-# saturation → shadow saturation. Neutral trims are 0.0 / 1.0 / 1.0 / 1.0.
+# Experimental JPEG input. Applied at load in this order: tone curve,
+# exposure, contrast, saturation, shadow saturation.
 #
-# Tone curve: undoes the camera's tone-mapping. Matched in Photoshop on ACEScct
-# TIFFs (LUT-profiling export, halation off, trims neutral): JPEG layer curved
-# to its RAW twin with a Luminosity-blend RGB curve. (input, output), 0–255.
+# The tone curve undoes the camera's tone mapping. Matched by hand in
+# Photoshop: ACEScct export of a JPEG curved onto its RAW twin. 0–255.
 JPEG_TONE_CURVE = [(0, 0), (39, 45), (136, 121), (158, 143), (181, 193), (200, 222), (255, 255)]
 JPEG_EXPOSURE_EV = 0.0   # stops
 JPEG_CONTRAST = 1.0      # power around 18% grey in linear; <1 flattens
@@ -178,15 +134,9 @@ JPEG_VIGNETTE_MULT = 3.0  # camera JPEGs arrive lens-corrected; RAWs keep theirs
 
 
 def ca_pixels_to_scale(pixels: float, long_edge: int) -> float:
-    """Edge-pixel offset → CA radial scale factor, normalised by the LONG edge.
+    """Pixel offset at the long half-edge → radial CA scale.
 
-    CA samples are displaced radially by s * radius; ``s = pixels / (long_edge/2)``
-    so the displacement at the long half-edge is exactly ``pixels``. Normalising
-    by the long edge (max(W, H)) makes the fringe invariant to orientation and to
-    post-shoot 90° rotation — rotation swaps W and H but not their max — so a
-    portrait and a landscape framing of the same scene fringe identically, as a
-    real lens does. For a landscape frame the long edge IS the width, so existing
-    ca_pixels values are unchanged; only portrait/rotated frames are corrected.
+    Normalised by the long edge so rotating the frame doesn't change the fringe.
     """
     if long_edge <= 0:
         return 0.0
@@ -194,17 +144,13 @@ def ca_pixels_to_scale(pixels: float, long_edge: int) -> float:
 
 
 def pct(value: float) -> float:
-    """0–N percent → 0–N/100 (the generic [0,1] mapping)."""
+    """Percent → fraction."""
     return float(value) / 100.0
 
 
 def vignette_curve_to_power(curve: float) -> float:
-    """Symmetric -100…+100 curve → cosine-falloff exponent.
-
-    0 → 1.0 (neutral). Higher = softer / more feathered (exponent < 1
-    keeps falloff high until near the corners). Lower = harder edge
-    (exponent > 1 pulls darkening inward).
-    """
+    """-100…+100 curve → cosine falloff exponent. 0 is neutral, positive is
+    softer."""
     return float(2.0 ** (-float(curve) / 50.0))
 
 
@@ -213,35 +159,25 @@ def cnr_pct_to_sigma(amount_pct: float) -> float:
 
 
 def cnr_sigma_color(sigma: float) -> float:
-    """Bilateral range sigma for chroma NR, scaled with the spatial sigma.
+    """Bilateral range sigma for chroma NR.
 
-    A fixed range sigma capped the strength: the bilateral preserved chroma
-    variation near edges, so cranking the spatial sigma plateaued (it never
-    removed the last ~12% of chroma noise). Scaling the range tolerance with the
-    spatial sigma lets high settings approach a near-Gaussian chroma blur (much
-    stronger), while a floor of 15 keeps low settings edge-preserving (no colour
-    bleed across saturated boundaries). Single source of truth for both the
-    numpy/cv2 path and gpu.cnr_frame.
+    Scales with the spatial sigma; with a fixed range sigma, strength plateaued
+    because the bilateral kept preserving chroma near edges. The floor of 15
+    stops colour bleeding across edges at low settings. Shared by the CPU and
+    GPU paths.
     """
     return max(15.0, float(sigma) * 3.0)
 
 
 def cnr_despike_thresholds(amount_pct: float, bias_pct: float) -> tuple:
-    """Per-direction Lab clamp limits for the chroma despike prepass.
+    """Lab clamp limits ``(thr_green, thr_other)`` for the despike prepass.
 
-    Returns ``(thr_green, thr_other)`` in a*/b* units. The prepass clamps each
-    chroma channel into ``[median +/- thr]`` of its 3x3 neighbourhood, killing
-    isolated colour spikes (fireflies) while leaving smooth colour untouched (a
-    smooth region equals its own median, so the deviation is ~0). A bilateral
-    filter is edge-preserving and treats a one-pixel spike as an edge to keep,
-    which is why cranking cnr_amount washes out detail before it removes the
-    spike — this is the tool that actually removes it.
+    Each chroma channel is clamped to median ± thr of its 3x3 neighbourhood,
+    which removes single-pixel colour spikes. The bilateral can't do that: it
+    treats a spike as an edge and keeps it.
 
-    The green direction (a* below the median) uses ``thr_green``; magenta (a*
-    above) and both b* directions use ``thr_other``. ``bias`` widens
-    ``thr_other`` so 100% acts on green only while 0% is symmetric. ``amount<=0``
-    returns ``(0, 0)`` = off. Single source of truth for the cv2 path and
-    gpu.cnr_frame.
+    thr_green applies to a* below the median, thr_other to everything else.
+    bias widens thr_other, so 100% only touches green. (0, 0) means off.
     """
     amt = pct(amount_pct)
     if amt <= 0.0:
@@ -261,19 +197,9 @@ _MID_GREY_LINEAR = 0.18
 
 
 def stops_above_mid_grey_to_acescct(stops: float) -> float:
-    """Stops above 18% middle grey → ACEScct-encoded threshold.
+    """Stops above 18% grey → ACEScct value, for the bloom/halation masks.
 
-    The bloom/halation passes mask on ACEScct-encoded luminance, which is
-    why the prior 0–100% slider was opaque (ACEScct is a log encoding, so
-    65% sat ~1.7 stops above scene white, not at "65% brightness"). This
-    helper takes a photographer-friendly EV value and produces the same
-    ACEScct number the effect functions expect.
-
-    Skips the toe branch of the ACEScct encoder: anything brighter than
-    linear 0.0078 is in the log range, which covers all sensible stops
-    values (the toe crosses linear at acescct ≈ 0.155, equivalent to
-    roughly -4.5 stops below middle grey — well below any threshold the
-    effects care about).
+    Ignores the ACEScct toe, which only matters below about -4.5 stops.
     """
     linear = _MID_GREY_LINEAR * (2.0 ** float(stops))
     return float((_math.log2(max(linear, 1e-10)) + 9.72) / 17.52)
@@ -282,43 +208,29 @@ def stops_above_mid_grey_to_acescct(stops: float) -> float:
 # HALATION SCALE MODEL
 # =============================================================================
 #
-# The halation glow is built from three concentric scales blurred at growing
-# radii, summed, then screen-blended. This replaces the older two-pass glow and
-# gives the soft, wide falloff of a no-remjet stock while keeping small
-# highlights crisp. Each scale carries its own chroma so the halo reddens
-# outward (physically: back-reflected light is red-dominant after two passes
-# through the upper dye layers and the orange base mask).
+# Halation is three scales blurred at growing radii, summed and
+# screen-blended. Outer scales are redder, since back-reflected light passes
+# the upper dye layers and orange mask twice.
 #
 # Per scale: (radius_mult, thresh_offset, weight, green_frac, blue_frac, kind)
-#   radius_mult   blur radius as a multiple of halation_blur_radius
-#   thresh_offset added to the ACEScct threshold (wider tiers target only the
-#                 very brightest, as the legacy second pass did)
-#   weight        contribution to the summed glow (core dominant, halo fainter)
-#   green/blue_frac  chroma at warmth=100%: green & blue relative to red. The
-#                 warmth exponent (pct/100) is applied as frac**exp, so 100% is
-#                 the physical baseline, 0% → neutral (frac**0 = 1), >100% →
-#                 deeper red. Core ~ the legacy average; outer scales redder.
-#   kind          'disc' = circle-of-confusion (defined edge — the back-
-#                 reflection is a defocused copy of the highlights); 'exp' =
-#                 exponential falloff (the fainter diffuse scatter tail).
-#
-# The defined CineStill halo is the disc core; the exp tails are the soft bloom
-# of scattered light layered faintly on top.
+#   radius_mult    multiple of halation_blur_radius
+#   thresh_offset  added to the ACEScct threshold; outer scales only catch
+#                  the brightest sources
+#   weight         share of the summed glow
+#   green/blue     relative to red at warmth 100%
+#   kind           'disc' = defocused copy of the highlights (the defined
+#                  halo), 'exp' = diffuse scatter tail
 HALATION_SCALES = (
-    (1.0, 0.0,  1.00, 0.45, 0.12, 'disc'),  # core — defined defocus disc, dominant
-    (2.5, 0.10, 0.18, 0.28, 0.05, 'exp'),   # near scatter — faint, brighter sources
-    (5.0, 0.20, 0.07, 0.16, 0.02, 'exp'),   # far scatter — very faint pedestal
+    (1.0, 0.0,  1.00, 0.45, 0.12, 'disc'),  # core
+    (2.5, 0.10, 0.18, 0.28, 0.05, 'exp'),   # near scatter
+    (5.0, 0.20, 0.07, 0.16, 0.02, 'exp'),   # far scatter
 )
 
 
 def halation_scale_tint(green_frac: float, blue_frac: float, weight: float,
                         warmth_pct: float):
-    """Per-scale RGB tint (weight folded in) for the given warmth.
-
-    Single source of truth for both the numpy oracle and gpu.halation_frame:
-    red is the carrier (1.0); green/blue fall off as frac**(warmth_pct/100),
-    so warmth 100% = physical baseline, 0% = colourless, >100% = redder.
-    """
+    """RGB tint for one scale, weight included. Green and blue are
+    frac ** (warmth/100), so 0% is neutral and >100% is redder."""
     exp = max(warmth_pct, 0.0) / 100.0
     return (weight, weight * (green_frac ** exp), weight * (blue_frac ** exp))
 
@@ -327,13 +239,11 @@ def halation_scale_tint(green_frac: float, blue_frac: float, weight: float,
 # DEBUG / TIMING
 # =============================================================================
 
-# Per-effect timing prints. Off by default; opt in via the LOFILOGIC_DEBUG_TIMING
-# env var ("1" / "true" / "yes") so user installs stay quiet.
+# Per-stage timing prints, enabled with LOFILOGIC_DEBUG_TIMING=1.
 DEBUG_TIMING = _os.environ.get('LOFILOGIC_DEBUG_TIMING', '').lower() in ('1', 'true', 'yes')
 
 
 def _timing_print(msg):
-    """Print timing/debug messages. Controlled by DEBUG_TIMING flag."""
     if DEBUG_TIMING:
         print(msg)
 
@@ -344,12 +254,7 @@ def _timing_print(msg):
 
 @dataclass
 class VibeConfig:
-    """All effect parameters that define a vibe.
-
-    One instance per active vibe. Persisted via core.vibe_state.
-    Constructed empty (all factory defaults) and then either tweaked by
-    the user or seeded from a VIBE_PRESETS recipe via vibe_config_for().
-    """
+    """Effect parameters for one vibe. Usually built by vibe_config_for()."""
     # ---- effect toggles ----
     enable_halation: bool = True
     enable_chromatic_aberration: bool = True
@@ -362,21 +267,13 @@ class VibeConfig:
     enable_vignette: bool = True
     enable_bloom: bool = True
 
-    # ---- effect parameters (user-facing units; see conversion helpers) ----
-    # Percent fields are stored as 0–N where N is each effect's natural max
-    # (100 for clamped effects, 200/300/500 for ones that can over-drive).
-    # Pixel fields are explicit pixel counts. Threshold fields are in EV
-    # (stops) above 18% middle grey — 0 = middle grey, +N = N stops
-    # brighter, default ≈ +4 (just into the specular highlight range).
-    # vignette_curve is signed -100…+100 with 0 = neutral, positive = softer.
+    # ---- effect parameters (user-facing units) ----
+    # Thresholds are in stops above 18% grey.
     halation_threshold_stops: float = HALATION_THRESHOLD_STOPS  # EV above mid grey
     halation_blur_radius: float = HALATION_BLUR_RADIUS         # px
     halation_strength_pct: float = HALATION_STRENGTH_PCT       # 0–300
     halation_warmth_pct: float = HALATION_WARMTH_PCT           # 0–300, 100 = physical
     ca_pixels: float = CA_PIXELS                                # edge px @ long edge
-    ca_steps: int = CA_STEPS
-    ca_blue_blur: float = CA_BLUE_BLUR                          # px
-    ca_zoom_blur_pct: float = CA_ZOOM_BLUR_PCT                  # 0–500
     softness_sigma: float = SOFTNESS_SIGMA                      # px
     edge_softness_strength_pct: float = EDGE_SOFTNESS_STRENGTH_PCT  # 0–100
     edge_softness_sigma: float = EDGE_SOFTNESS_SIGMA            # px
@@ -404,22 +301,13 @@ class VibeConfig:
     base_exposure_offset_v2: float = BASE_EXPOSURE_OFFSET_V2
 
     # ---- LUT + DNG metadata ----
-    # Tagged LUT reference. One of:
-    #   ""                     — no LUT (tone-curve fallback path)
-    #   "factory:<id>"         — looked up in FACTORY_LUTS against the
-    #                            current build's asset dir
-    #   "user:<absolute path>" — user-imported .cube file on disk
-    # Factory ids decouple a saved vibe from the install-time on-disk
-    # location of bundled LUTs, so a moved/upgraded install can't load the
-    # wrong file. The migrator rewrites legacy `lut_path` strings into
-    # this tagged form.
+    # "" (no LUT), "factory:<id>" (see FACTORY_LUTS) or "user:<abs path>".
+    # Factory ids keep saved vibes working when the install moves.
     lut_ref: str = ''
     dng_profile_name: str = 'Flashback Standard'
 
-    # Pre-1.5 custom LUT path, preserved by the migrator. Purely
-    # informational — never read by the pipeline. Lets users find and
-    # re-import their original .cube once they've regenerated it against
-    # the v2 color pipeline. Cleared once the user re-imports a LUT.
+    # Pre-1.5 custom LUT path, kept by the migrator so the user can find and
+    # re-import it. Display only; cleared on the next LUT import.
     legacy_user_lut: str = ''
 
     # ---- serialization ----
@@ -449,13 +337,10 @@ class VibeConfig:
 
 @dataclass
 class ImageAdjustments:
-    """Per-image user adjustments: the four main-window sliders + rotation.
+    """The four main-window sliders + rotation for one image.
 
-    Travels with the image and is persisted in projects. active_vibe_id
-    records which vibe the image was last edited under; for now the UI
-    keeps a single global active vibe, but every image stores its own id
-    so future per-image vibes (or project reloading) work without a
-    schema change.
+    active_vibe_id is stored per image although the UI has one global vibe,
+    so per-image vibes wouldn't need a schema change.
     """
     exposure_ev: float = 0.0
     wb_temp: float = 0.0
@@ -484,18 +369,10 @@ class ImageAdjustments:
 
 
 # =============================================================================
-# VIBE PRESETS — recipes that seed a VibeConfig
+# LUTS
 # =============================================================================
 
-# Preset values are in user-facing units (see the conversion helpers above).
-# vignette_curve = -50 * log2(power), so the previous feather=0.4 / "softer"
-# maps to curve ≈ +66.
-# =============================================================================
-# LUT REGISTRY — factory id → bundled file (relative to the install root,
-# resolved through resource_path at load time so PyInstaller bundles and
-# dev runs both work). Saved vibes store these ids, never raw paths, so a
-# moved install never silently picks up the wrong file.
-# =============================================================================
+# Paths relative to the install root, resolved through resource_path.
 
 FACTORY_LUTS = {
     'disposable':           'assets/luts/disposable.cube',
@@ -506,42 +383,29 @@ FACTORY_LUTS = {
     'monochrome':           'assets/luts/monochrome.cube',
 }
 
-# Tag prefixes used on VibeConfig.lut_ref. Keep these as the single source
-# of truth — sites that build or parse refs must use the constants below.
+# Prefixes for VibeConfig.lut_ref.
 LUT_REF_FACTORY = 'factory:'
 LUT_REF_USER = 'user:'
 
-# Per-file-type LUT overrides. V1 negatives have a flatter, lower-DR capture
-# than V2 DNGs, so the disposable look needs a LUT tuned for them. The override
-# is transient (display/export only) — it never gets written back into the
-# saved vibe, and it only swaps a *factory* ref, never a user-imported LUT.
+# V1 negatives are flatter than V2 DNGs, so some looks have a V1 variant.
+# Swapped in at render time only; never saved, never applied to user LUTs.
 _V1_LUT_OVERRIDES = {
     LUT_REF_FACTORY + 'disposable': LUT_REF_FACTORY + 'disposable_v1',
 }
 
 
 def effective_lut_ref(base_ref: str, is_v1: bool) -> str:
-    """Resolve the LUT ref actually used to render a frame.
-
-    For V1 negatives, swap in the V1-tuned variant of a factory look where one
-    exists; everything else (V2 files, user LUTs, looks without a V1 variant)
-    passes through unchanged.
-    """
+    """The LUT ref to render with: the V1 variant for V1 negatives if one
+    exists, otherwise base_ref."""
     if is_v1:
         return _V1_LUT_OVERRIDES.get(base_ref, base_ref)
     return base_ref
 
 
 def resolve_lut_ref(ref: str):
-    """Resolve a tagged LUT reference to an absolute filesystem path.
-
-    Returns (absolute_path, origin) where origin ∈ {'factory', 'user', None}.
-    Returns (None, None) for an empty ref. Returns (None, origin) when the
-    referenced LUT cannot be found — the caller decides whether to fall
-    back to the vibe's factory LUT or surface a notice.
-    """
-    # Imported here (not at module top) to avoid a circular import:
-    # core/__init__.py loads this module during package init.
+    """Tagged LUT ref → (absolute_path, origin), origin being 'factory',
+    'user' or None. The path is None if the file is missing."""
+    # Local import: core/__init__.py imports this module.
     from . import resource_path
     if not ref:
         return None, None
@@ -555,29 +419,23 @@ def resolve_lut_ref(ref: str):
     if ref.startswith(LUT_REF_USER):
         path = ref[len(LUT_REF_USER):]
         return (path if _os.path.exists(path) else None), 'user'
-    # Unknown tag — treat as missing rather than guessing.
     return None, None
 
 
-# `ca_pixels` is the blue fringe offset in pixels at the long half-edge of the
-# rendered frame (see ca_pixels_to_scale — normalised by the long edge so it's
-# orientation-invariant). The pipeline develops raws with half_size=True, so the
-# rendered width is half the sensor width (2072 px for the ONE35 V2); 2–8 px is
-# the visual baseline these presets are calibrated against.
-#
-# `ca_zoom_blur_pct` in the presets is legacy/inert — the spectral CA is driven
-# only by ca_pixels (the radial spectral spread subsumes the old zoom-blur pass).
+# =============================================================================
+# VIBE PRESETS
+# =============================================================================
+
+# User-facing units. ca_pixels is at the 2072 px working size.
 VIBE_PRESETS = {
-    'disposable':           {'enable_ca': True,  'ca_pixels': 8.0, 'ca_zoom_blur_pct': 150.0, 'softness': 0.5, 'sharpness_pct': 200.0, 'sharpen_radius': 0.5, 'grain_pct': 120.0, 'vignette_pct': 10.0, 'vignette_curve':  66.0, 'bloom_pct': 15.0, 'lut': 'factory:disposable'},
-    'flashback_classic_v1': {'enable_ca': True,  'ca_pixels':  5.0, 'ca_zoom_blur_pct': 200.0, 'softness': 0.3, 'sharpness_pct':  80.0, 'sharpen_radius': 0.5, 'grain_pct': 200.0, 'vignette_pct': 10.0, 'vignette_curve':  66.0, 'bloom_pct':  3.0, 'lut': 'factory:flashback_classic_v1', 'base_exposure_offset_v2': 0.0},
-    'point_shoot':          {'enable_ca': True,  'ca_pixels':  2.0, 'ca_zoom_blur_pct': 100.0, 'softness': 0.3, 'sharpness_pct':  50.0, 'sharpen_radius': 1.0, 'grain_pct':  80.0, 'vignette_pct': 10.0, 'vignette_curve':   0.0, 'bloom_pct': 10.0, 'lut': 'factory:point_shoot'},
-    'rangefinder':          {'enable_ca': False, 'ca_pixels':  0.0, 'ca_zoom_blur_pct': 100.0, 'softness': 0.1, 'sharpness_pct':  80.0, 'sharpen_radius': 1.0, 'grain_pct':  50.0, 'vignette_pct':  5.0, 'vignette_curve':   0.0, 'bloom_pct':  5.0, 'lut': 'factory:rangefinder'},
-    'monochrome':           {'enable_ca': False, 'ca_pixels':  0.0, 'ca_zoom_blur_pct': 100.0, 'softness': 0.1, 'sharpness_pct':  80.0, 'sharpen_radius': 1.0, 'grain_pct': 150.0, 'vignette_pct': 20.0, 'vignette_curve':   0.0, 'bloom_pct':  5.0, 'lut': 'factory:monochrome'},
+    'disposable':           {'enable_ca': True,  'ca_pixels': 8.0, 'softness': 0.5, 'sharpness_pct': 200.0, 'sharpen_radius': 0.5, 'grain_pct': 120.0, 'vignette_pct': 10.0, 'vignette_curve':  66.0, 'bloom_pct': 15.0, 'lut': 'factory:disposable'},
+    'flashback_classic_v1': {'enable_ca': True,  'ca_pixels':  5.0, 'softness': 0.3, 'sharpness_pct':  80.0, 'sharpen_radius': 0.5, 'grain_pct': 200.0, 'vignette_pct': 10.0, 'vignette_curve':  66.0, 'bloom_pct':  3.0, 'lut': 'factory:flashback_classic_v1', 'base_exposure_offset_v2': 0.0},
+    'point_shoot':          {'enable_ca': True,  'ca_pixels':  2.0, 'softness': 0.3, 'sharpness_pct':  50.0, 'sharpen_radius': 1.0, 'grain_pct':  80.0, 'vignette_pct': 10.0, 'vignette_curve':   0.0, 'bloom_pct': 10.0, 'lut': 'factory:point_shoot'},
+    'rangefinder':          {'enable_ca': False, 'ca_pixels':  0.0, 'softness': 0.1, 'sharpness_pct':  80.0, 'sharpen_radius': 1.0, 'grain_pct':  50.0, 'vignette_pct':  5.0, 'vignette_curve':   0.0, 'bloom_pct':  5.0, 'lut': 'factory:rangefinder'},
+    'monochrome':           {'enable_ca': False, 'ca_pixels':  0.0, 'softness': 0.1, 'sharpness_pct':  80.0, 'sharpen_radius': 1.0, 'grain_pct': 150.0, 'vignette_pct': 20.0, 'vignette_curve':   0.0, 'bloom_pct':  5.0, 'lut': 'factory:monochrome'},
 }
 
-# Short, file-name-safe suffix per vibe — appended to exported JPGs as
-# {basename}_{suffix}.jpg so users can tell at a glance which look produced
-# which file. Unknown vibe ids fall back to 'edit'.
+# Export filename suffix: {basename}_{suffix}.jpg. Unknown ids use 'edit'.
 VIBE_EXPORT_SUFFIX = {
     'disposable':           'disp',
     'point_shoot':          'ps',
@@ -588,14 +446,8 @@ VIBE_EXPORT_SUFFIX = {
 
 
 def vibe_config_for(vibe_id: str) -> VibeConfig:
-    """Construct a fresh VibeConfig from a preset recipe.
-
-    All non-preset fields keep their factory defaults. The preset
-    dictionary uses short keys (enable_ca, ca_pixels, softness, …);
-    we map those onto the dataclass field names. All numeric preset
-    values are in user-facing units (px, percent, signed curve).
-    """
-    cfg = VibeConfig()  # all factory defaults
+    """Fresh VibeConfig from a preset. Unlisted fields keep their defaults."""
+    cfg = VibeConfig()
     preset = VIBE_PRESETS[vibe_id]
     cfg.enable_chromatic_aberration = preset['enable_ca']
     cfg.ca_pixels                   = preset['ca_pixels']
@@ -608,10 +460,8 @@ def vibe_config_for(vibe_id: str) -> VibeConfig:
     cfg.bloom_strength_pct          = preset['bloom_pct']
     cfg.lut_ref                     = preset['lut']
     cfg.base_exposure_offset_v2     = preset.get('base_exposure_offset_v2', BASE_EXPOSURE_OFFSET_V2)
-    cfg.ca_zoom_blur_pct            = preset.get('ca_zoom_blur_pct', CA_ZOOM_BLUR_PCT)
     return cfg
 
 
-# Names of every VibeConfig field — used by the debug panel to detect
-# "modified from factory" state.
+# Used by the debug panel to detect changes from factory.
 VIBE_FIELD_NAMES = tuple(f.name for f in fields(VibeConfig))

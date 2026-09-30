@@ -1,8 +1,4 @@
-// ACEScct linear -> log encode, texture I/O (rgba32float).
-// Resident-pipeline twin of acescct.wgsl `main_encode`: identical math, but
-// reads/writes 2D textures instead of a flat storage buffer so the image can
-// stay GPU-resident between stages. Input is clamped to >= 1e-10 to match the
-// numpy oracle (kernels.acescct_encode applies the same np.maximum).
+// ACEScct encode on textures. Clamps to >= 1e-10 like kernels.acescct_encode.
 
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var dst: texture_storage_2d<rgba32float, write>;
@@ -11,9 +7,7 @@ const CUT_ENCODE: f32 = 0.0078125;
 const A: f32 = 10.5402377416545;
 const B: f32 = 0.0729055341958355;
 
-// NaN -> 0, +/-Inf -> finite f32 extremes. See acescct.wgsl `sanitize` for why:
-// keeps non-finite highlight values from diverging across Apple GPU families
-// (M1 cyan-highlight bug) before the LUT. No-op for finite real-image values.
+// NaN -> 0, Inf -> finite. See acescct.wgsl.
 fn sanitize(v: f32) -> f32 {
     let n = select(v, 0.0, v != v);
     return clamp(n, -3.4e38, 3.4e38);

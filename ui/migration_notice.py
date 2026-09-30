@@ -1,12 +1,5 @@
 """
-Post-migration summary dialog.
-
-Shown once on first launch after the 1.5.0 schema migration runs. The
-dialog is non-blocking (a Qt.Tool window the user can dismiss) and
-folds the per-vibe detail into a collapsible text area so the top-level
-message stays a one-paragraph headline.
-
-Dismissal persists via core.vibe_state.mark_migration_acknowledged().
+Summary shown after the pre-1.5 vibe migration, until dismissed.
 """
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -18,7 +11,7 @@ from core import vibe_state
 
 
 def _format_details(report) -> str:
-    """Render the MigrationReport into a readable multi-section text body."""
+    """MigrationReport as text."""
     lines = []
     lines.append(f"Source file: {report.legacy_file}")
     lines.append(f"Vibes migrated: {len(report.migrated_vibe_ids)}")
@@ -51,11 +44,7 @@ def _format_details(report) -> str:
 
 
 class MigrationNoticeDialog(QDialog):
-    """Single-shot summary shown after a pre-1.5 → 1.5 migration.
-
-    Dismissal (close, OK, escape) calls mark_migration_acknowledged() so
-    the dialog never reappears for the same migration.
-    """
+    """Closing it in any way marks the migration as acknowledged."""
 
     def __init__(self, report, parent=None):
         super().__init__(parent, Qt.Tool)

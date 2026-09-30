@@ -1,10 +1,6 @@
-"""Tests for the DNG writer's raw-strip handling.
-
-The regression these guard: camera-original DNGs keep the CFA raw in IFD0, but
-DNGs *we* write put an RGB preview in IFD0 and move the raw to a SubIFD. Export
-used to read IFD0's strip tags unconditionally, so re-exporting an already-
-exported file (Export > DNG > Process on an imported capture) silently packaged
-the preview thumbnail as if it were Bayer data — a sub-1MB, undecodable DNG.
+"""DNG export must find the raw strip in camera files (IFD0) and in our own
+exports (SubIFD, with the thumbnail in IFD0). Re-exporting an export used to
+package the thumbnail as raw data.
 """
 import struct
 
@@ -18,8 +14,7 @@ from core.dng_export import (
 
 TAG_PROFILE_NAME = 50936
 
-# A stand-in for a camera capture: small enough to keep the test fast, since
-# nothing in the strip-resolution path depends on the real sensor dimensions.
+# Small stand-in for a camera file.
 FAKE_W, FAKE_H = 8, 4
 FAKE_RAW = bytes((i * 7 + 3) % 256 for i in range(FAKE_W * FAKE_H * 2))
 
@@ -94,27 +89,25 @@ def test_export_preserves_raw_strip(source_dng, tmp_path):
 
 
 def test_reexport_preserves_raw_strip(source_dng, tmp_path):
-    """The actual regression: exporting an already-exported DNG must pass the
-    raw through, not the RGB preview sitting in IFD0."""
+    """Re-exporting an export keeps the raw, not the thumbnail."""
     p1, p2 = tmp_path / 'pass1.dng', tmp_path / 'pass2.dng'
     thumb = np.zeros((4, 6, 3), np.uint8)
     assert export_dng(str(source_dng), str(p1), thumb)
     assert export_dng(str(p1), str(p2), thumb)
 
     assert _read_strip(p2) == FAKE_RAW
-    # Byte-identical output is the stronger guarantee: a second pass over an
-    # exported file should be a no-op, not a lossy re-wrap.
+    # A second pass should produce identical bytes.
     assert p2.read_bytes() == p1.read_bytes()
 
 
 def test_find_raw_strip_skips_rgb_ifd0(source_dng, tmp_path):
-    """Our own exports put an RGB preview in IFD0; it must never be mistaken
-    for the raw, which is what produced the sub-1MB broken files."""
+    """The IFD0 thumbnail of our exports is never taken as the raw."""
     out = tmp_path / 'pass1.dng'
     thumb = np.zeros((4, 6, 3), np.uint8)
     assert export_dng(str(source_dng), str(out), thumb)
 
-    off, length = _find_raw_strip(open(out, 'rb'))
+    with open(out, 'rb') as f:
+        off, length = _find_raw_strip(f)
     assert length == len(FAKE_RAW)
     assert length != thumb.nbytes
 

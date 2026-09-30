@@ -32,11 +32,9 @@ jobs:
       - name: Run pytest
         run: pytest -v
 
-  # Compiles every WGSL compute pipeline against a software Vulkan device
-  # (Mesa lavapipe) so shader-translation regressions are caught in CI. Naga
-  # emits SPIR-V regardless of the underlying driver, so lavapipe exercises the
-  # exact codegen path a real Vulkan GPU takes — e.g. the "Expression is not
-  # cached!" panic that crashed the app on Vulkan while D3D12 stayed fine.
+  # Builds every compute pipeline on lavapipe (software Vulkan), which goes
+  # through the same Naga SPIR-V codegen as a real Vulkan GPU. Naga has
+  # crashed there on shaders that were fine on D3D12.
   shader-compile:
     runs-on: ubuntu-22.04
     steps:

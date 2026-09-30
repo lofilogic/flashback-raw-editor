@@ -1,9 +1,5 @@
-// Halation highlight extraction for one scale: highlights = img * mask, then
-// tinted per-channel by `tint` (weight already folded in). The tint carries the
-// scale's chroma — red is the carrier, green/blue fall off with warmth — so the
-// summed glow reddens outward. Replaces the old fixed r / 0.2g / 0 weighting,
-// which was radius-independent and couldn't make the halo redden with distance.
-// See config.HALATION_SCALES / halation_scale_tint for where tint comes from.
+// Highlights for one halation scale: img * mask * tint.
+// tint comes from config.halation_scale_tint.
 
 struct U { tint: vec3f, _p: f32, }
 

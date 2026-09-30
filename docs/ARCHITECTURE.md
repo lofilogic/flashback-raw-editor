@@ -1,34 +1,21 @@
 # Architecture
 
-How LoFi Logic turns a RAW file into a film-looking image, and how the code is laid out.
+How a RAW file becomes a film-looking image, and where the code for each part lives.
 
-- [Design philosophy](#design-philosophy)
-- [The big picture](#the-big-picture)
-- [Stage 1 — RAW to the ACEScg intermediate](#stage-1--raw-to-the-acescg-intermediate)
-- [Stage 2 — the render pipeline](#stage-2--the-render-pipeline)
-- [The exposure model](#the-exposure-model)
-- [GPU-resident design](#gpu-resident-design)
-- [Configuration & state](#configuration--state)
-- [The LUT-authoring loop](#the-lut-authoring-loop)
-- [Module map](#module-map)
+## Goals
 
----
+- A nice film look matters more than measured accuracy.
+- RAWs are developed at half size (2×2 binning). That avoids demosaicing artifacts, reduces moiré
+  and improves noise, and the effects are soft enough that more resolution wouldn't show.
+- Made for applying a look to a whole roll, not for pixel-peeping.
+- Keep it simple.
+- The look comes from LUTs made in DaVinci Resolve. The ACEScct intermediate exists so a 16-bit
+  TIFF can go to Resolve and back without banding.
 
-## Design philosophy
+## Overview
 
-- **Aesthetics over fidelity.** A pleasing, film-like look beats measurable accuracy.
-- **Film-like low acuity is the point.** RAWs are developed at half-size (2×2 bin), this removes any demosaicing artifacts, reduces moiree and improves signal to noise ratio. The softness of the vibes is so soft, that more resolution barely affects the result.
-- **Reward broad edits and batch processing**; don't encourage pixel-peeping.
-- **Lean and pragmatic.** Prefer the simple thing that's actually worth it.
-- **The look is LUT-driven.** LUTs are authored in DaVinci Resolve. A scene-referred ACEScct
-  intermediate exists specifically so a 16-bit TIFF round-trip to Resolve survives without banding.
-
----
-
-## The big picture
-
-Every supported input converges on a single cached intermediate — a **linear ACEScg** image — and
-everything downstream (sliders, effects, LUT, export) operates on that. Develop once, render many.
+Every input is developed once into a cached **linear ACEScg** image. Sliders, effects, LUT and
+export all work from that.
 
 ```
                      ┌─────────────────────────────────────────────┐
@@ -42,33 +29,30 @@ everything downstream (sliders, effects, LUT, export) operates on that. Develop 
                                      display sRGB / JPEG
 ```
 
-Loading a file produces the intermediate and an instant downscaled preview; a background worker
+Loading a file produces the intermediate and a quick downscaled preview; a background worker
 then renders the full-resolution frame. See [`core/processor.py`](../core/processor.py).
 
----
+## Developing
 
-## Stage 1 — RAW to the ACEScg intermediate
+Three paths lead to ACEScg; after that everything is shared. The matrices are in
+[`core/processor.py`](../core/processor.py).
 
-There are three develop paths. They differ only in how they reach ACEScg; after that the pipeline
-is shared. All matrices and the colour math live in [`core/processor.py`](../core/processor.py).
-
-### Flashback One35 V2 (DNG) — the primary path
+### Flashback One35 V2 (DNG)
 
 1. `rawpy.postprocess` with `user_wb=[1,1,1,1]`, `user_black=SENSOR_BLACK`, `half_size=True`,
    linear gamma, `output_color=raw`, 16-bit → normalised to `[0,1]`.
-2. **Highlight recovery** (darktable-style "inpaint opposed"), in raw space, pre-white-balance:
-   each clipped channel is reconstructed from the unclipped two so blown highlights keep plausible
-   colour instead of skewing.
-3. A single fused matmul takes white-balanced camera RGB → **ACEScg** (`FM1_WB_TO_ACESCG`,
-   the calibrated ForwardMatrix folded with the `XYZ_D50 → ACEScg` transform).
+2. **Highlight recovery** (like darktable's "inpaint opposed") in raw space, before white balance:
+   a clipped channel is rebuilt from the other two so blown highlights keep a plausible colour.
+3. One matrix from white-balanced camera RGB to **ACEScg** (`FM1_WB_TO_ACESCG`: the calibrated
+   ForwardMatrix combined with `XYZ_D50 → ACEScg`).
 
-The camera locks ISO and aperture, so its autoexposure is fully described by the EXIF
-`ExposureTime` — this is read once and used by the [exposure model](#the-exposure-model).
+ISO and aperture are fixed on this camera, so EXIF `ExposureTime` fully describes its
+autoexposure. It's used by the [exposure model](#exposure).
 
-### Flashback One35 V1 (negative) — see [`core/v1_negative.py`](../core/v1_negative.py)
+### Flashback One35 V1 (negative)
 
-The V1 can't write DNGs. It exports a *negative*: a headerless 8-bit RGGB Bayer dump plus a JSON
-sidecar (geometry + metadata), usually delivered as a roll `.zip`.
+See [`core/v1_negative.py`](../core/v1_negative.py). The V1 can't write DNGs. Its "negative"
+export is a headerless 8-bit RGGB mosaic plus a JSON sidecar, usually as a `.zip` per roll.
 
 ```
 read uint8 mosaic → black-subtract (+ decode dither) → demosaic RGGB →
@@ -76,33 +60,29 @@ downscale to the V2 pixel-scale → highlight recovery → exposure trim →
 ForwardMatrix (raw → XYZ_D50) → XYZ_D50 → ACEScg → V2 white-balance match
 ```
 
-It's downscaled to the **same 2072 px long edge** the V2 path produces, so every pixel-denominated
-effect (grain tile, blur radii) transfers 1:1 and the two cameras share one look. The colour matrix
-and white point are calibrated by [`tools/generate_matrices_v1.py`](../tools/generate_matrices_v1.py).
+It's downscaled to the same 2072 px long edge as V2 files, so pixel-sized effects like grain and
+blur look the same on both. The matrix and white point come from
+[`tools/generate_matrices_v1.py`](../tools/generate_matrices_v1.py).
 
-### Generic RAW (everything else) — best-effort
+### Other RAW files
 
 1. `rawpy.postprocess` with `output_color=sRGB`, the camera's `daylight_whitebalance` shifted to the
    Flashback reference Kelvin, `half_size` (full-size Markesteijn for X-Trans, then downscaled).
-2. A small per-manufacturer EV boost nudges different bodies toward a similar mid-grey.
+2. An exposure offset: the DNG's BaselineExposure if it has one, else a measured value per
+   manufacturer, else 0.
 3. Linear sRGB → **ACEScg**.
 
-This produces a good image, but it isn't a camera-specific calibration — different bodies won't land
-in exactly the same place.
+Not a per-camera calibration, so different cameras won't match exactly.
 
-### Baking halation
+### Halation
 
-For the Flashback paths, **halation** is applied to the intermediate at load time (see
-`apply_halation` in [`core/effects.py`](../core/effects.py)) rather than per-frame, because it's a
-low-frequency glow that doesn't need to recompute every slider move. It's the one effect baked into
-the cached intermediate; everything else runs per-render.
+**Halation** is applied once at load (`apply_halation` in [`core/effects.py`](../core/effects.py))
+and stored in the intermediate. It's a slow, low-frequency effect that doesn't depend on the
+sliders. Everything else runs on every render.
 
----
+## Rendering
 
-## Stage 2 — the render pipeline
-
-Each frame is rendered from the cached intermediate by `FlashbackProcessor._render`. Order matters —
-this mirrors how a real camera/film system layers the same operations:
+`FlashbackProcessor._render` renders from the intermediate in this order:
 
 ```
 ACEScg intermediate
@@ -114,25 +94,19 @@ ACEScg intermediate
   → display sRGB
 ```
 
-- **Pre-LUT** effects work in linear scene-referred light (vignette before bloom, so the glow is
-  generated from the already-darkened perimeter, as real optics do). CNR (chroma noise reduction)
-  runs in CIE Lab.
-- **The LUT** is the look. Input is encoded to **ACEScct** (a log encoding) first; the LUT is applied
-  via tetrahedral interpolation. With no LUT active, a tone-curve fallback path renders through
-  ProPhoto instead.
-- **Post-LUT** effects work on the display-referred (gamma-encoded) image, where lens artefacts like
-  CA fringing and grain belong.
+- **Before the LUT**, effects work in linear light. Vignette comes before bloom so the darkened
+  edges glow less. Chroma noise reduction (CNR) works in Lab.
+- **The LUT** is applied to ACEScct (a log encoding) with tetrahedral interpolation. Without a LUT,
+  a tone curve in ProPhoto is used instead.
+- **After the LUT**, effects work on the display image; CA and grain look right there.
 
-The CPU/oracle implementations of these effects live in [`core/effects.py`](../core/effects.py) and
-[`core/kernels.py`](../core/kernels.py); their GPU twins live in [`core/gpu.py`](../core/gpu.py) and
+The CPU versions are in [`core/effects.py`](../core/effects.py) and
+[`core/kernels.py`](../core/kernels.py), the GPU versions in [`core/gpu.py`](../core/gpu.py) and
 [`core/shaders/`](../core/shaders).
 
----
+## Exposure
 
-## The exposure model
-
-The intermediate is scene-referred, so exposure is just a linear gain — but the model distinguishes
-two kinds of brightness change, which is the subtle part:
+Exposure is a linear gain on the intermediate, but there are two kinds:
 
 | Term | Source | Counteracted after the LUT? | Effect |
 |------|--------|------------------------------|--------|
@@ -142,82 +116,61 @@ two kinds of brightness change, which is the subtle part:
 | Post-AE **boost** × strength | vibe | **yes** | shapes character, brightness ~unchanged |
 | **Push / Pull** slider | per-image | **yes** | trades toe/highlight character, brightness ~unchanged |
 
-The "counteracted" terms (`pre_lut_ev`) are applied *before* the LUT and then undone *after* it
-(`post_gain = 2^(-pre_lut_ev)`), so they change **how the image travels through the LUT** — how much
-sits in the toe vs the shoulder — without changing the final brightness. The non-counteracted terms
-genuinely raise or lower the output.
+The counteracted terms (`pre_lut_ev`) are applied before the LUT and undone after it
+(`post_gain = 2^(-pre_lut_ev)`). They change where the image sits on the LUT's curve (toe vs
+shoulder), not how bright the result is. The others change the output brightness.
 
-Reverse-AE is a profiling tool; it and the LUT-profiling TIFF export are **not** user-facing.
+Reverse-AE and the LUT-profiling TIFF export are for making LUTs and stay in the F12 panel.
 
----
+## GPU
 
-## GPU-resident design
+See [`core/gpu.py`](../core/gpu.py) and [`core/kernels.py`](../core/kernels.py).
 
-The pipeline keeps pixels on the GPU. See [`core/gpu.py`](../core/gpu.py) and
-[`core/kernels.py`](../core/kernels.py).
+- **`Frame`** holds an image as a float32 array, an `rgba32float` texture, or both, and converts
+  only when needed. Consecutive GPU stages never go through numpy.
+- **`run_resident`** uploads once, runs a list of `Frame → Frame` stages, and reads back once.
+  With a LUT, the whole render is one such chain.
+- **`_RenderArena`** reuses textures and uniform buffers between renders; allocating them every
+  frame was the biggest interactive cost. It's per thread because the preview and thumbnail
+  workers render at the same time.
+- **Every GPU stage has a numpy/cv2 version**, used as the fallback without a GPU and as the
+  reference in the tests.
+- Without a usable GPU (none, or a software adapter like WARP or lavapipe) the app shows a
+  "GPU not detected" banner and runs on the CPU.
 
-- **`Frame`** is an image handle that lazily lives on the CPU (float32) or the GPU
-  (`rgba32float` texture). It materialises the other side only at a real backend boundary, so two
-  GPU stages in a row never round-trip through numpy.
-- **`run_resident`** uploads once, runs a chain of `Frame → Frame` stages, and reads back once. With
-  a LUT active, the *entire* render (pre-LUT effects, encode, LUT, post-LUT tail) runs as one resident
-  chain — a single upload and a single readback per frame.
-- **`_RenderArena`** is a thread-local bump allocator that reuses textures and uniform buffers across
-  renders, killing per-frame allocation churn (the dominant interactive cost). It's thread-local
-  because preview, thumbnail, and vibe-refresh workers render concurrently on the shared device.
-- **Every GPU stage has a numpy/cv2 twin** that serves double duty: it's the *oracle* the parity
-  tests check the shader against, and the *runtime fallback* when there's no usable GPU. Deleting the
-  fallback would also delete the oracle — see [DEVELOPMENT.md → Testing](DEVELOPMENT.md#testing).
-- **Graceful degradation.** Adapter selection flags software adapters (WARP, lavapipe, …) and
-  init failures; the app surfaces a "GPU not detected" banner and falls back to the (slow) CPU path
-  rather than crashing.
+Textures are `f32`, not `f16`: the pipeline is CPU-bound, so packing to half floats would cost more
+than it saves. See `_TEX_FORMAT` in [`core/gpu.py`](../core/gpu.py).
 
-Why `f32` textures (not `f16`)? The pipeline is CPU-bound, so the half-float pack/unpack would cost
-more CPU than the GPU bandwidth it saves, and `f32` keeps the resident path bit-matchable to the CPU
-oracle. The full rationale is in the `_TEX_FORMAT` note in [`core/gpu.py`](../core/gpu.py).
+## State
 
----
+Two dataclasses in [`core/config.py`](../core/config.py):
 
-## Configuration & state
+- **`VibeConfig`**: all effect parameters of a vibe.
+- **`ImageAdjustments`**: exposure, WB, tint, push/pull and rotation of one image.
 
-Two dataclasses model the two layers of user-mutable state (see [`core/config.py`](../core/config.py)):
+The UI and the processor share the same instances; the next render picks up changes.
 
-- **`VibeConfig`** — the "film stock" layer: every effect parameter that defines a look. One per vibe.
-- **`ImageAdjustments`** — the per-image layer: exposure, WB, tint, push/pull, rotation.
-
-Both are passed by reference; the UI mutates them and the next render picks up the change. The
-processor never reads global state.
-
-- **Vibes** are seeded from `VIBE_PRESETS` recipes. Five ship factory: Disposable, Point & Shoot,
-  Rangefinder, Monochrome, Flashback Classic (V1).
-- **LUTs** are referenced by a tagged string — `factory:<id>` or `user:<path>` — never a bare path,
-  so a moved install can't load the wrong file. V1 negatives transparently swap in a V1-tuned variant
-  of a factory look.
-- **Persistence:** saved vibes live in a versioned JSON under the platform app-data dir
-  ([`core/vibe_state.py`](../core/vibe_state.py)), with a one-time migration from the pre-1.5 schema.
-  Projects (`.lofi`) store the image list + per-image settings with portable relative paths
+- **Vibes** start from `VIBE_PRESETS`: Disposable, Point & Shoot, Rangefinder, Monochrome and
+  Flashback Classic (V1).
+- **LUTs** are stored as `factory:<id>` or `user:<path>`, so a moved install still finds its own
+  files. V1 negatives use a V1 variant of a factory LUT where there is one.
+- Saved vibes are a versioned JSON file in the app data folder
+  ([`core/vibe_state.py`](../core/vibe_state.py)), migrated once from the pre-1.5 format.
+  Projects (`.lofi`) store the images and their settings with relative paths
   ([`core/project.py`](../core/project.py)).
 
----
+## Making LUTs
 
-## The LUT-authoring loop
-
-The look is a 3D LUT, authored outside the app:
-
-1. Export a frame as a **16-bit ACEScct TIFF** (advanced panel). ACEScct is scene-referred and log,
-   so the round-trip survives without banding.
-2. Grade it in **DaVinci Resolve** and export a `.cube`.
-3. The tooling in [`tools/`](../tools) builds colour charts from film⇄digital comparison pairs to
-   drive that grade.
-4. Drop the `.cube` in as a `user:` LUT, or bundle it as a factory look.
-
----
+1. Export a frame as a 16-bit ACEScct TIFF (F12 panel).
+2. Grade it in DaVinci Resolve and export a `.cube`.
+3. [`tools/`](../tools) builds colour charts from film/digital photo pairs to help with the grade.
+4. Load the `.cube` as a user LUT, or ship it as a factory look.
 
 ## Module map
 
 ```
 core/
-  processor.py        develop paths + render pipeline (the spine)
+  processor.py        develop and render
   config.py           constants, VibeConfig / ImageAdjustments, presets, unit conversions
   gpu.py              wgpu pipeline: Frame, resident stages, arena, adapter selection
   kernels.py          GPU-or-numpy kernels (LUT, blur, grain, ACEScct, colour transform)
@@ -228,7 +181,7 @@ core/
   camera_import.py    USB camera import into date-named folders
   project.py          .lofi save/load
   vibe_state.py       saved-vibe persistence + pre-1.5 migration
-  export_naming.py    deterministic export filenames
+  export_naming.py    export filenames
   auto_exposure_reverse.py   reverse-AE gain from EXIF (profiling)
 
 ui/
@@ -241,8 +194,8 @@ ui/
   native_chrome.py    macOS/Windows title-bar styling
   migration_notice.py post-migration summary dialog
 
-tools/                colour-chart building, matrix calibration, LUT/DNG utilities (dev-only)
-tests/                parity tests (GPU vs numpy oracle) + shader-compile smoke test
+tools/                colour charts, matrix calibration, benchmark (dev-only)
+tests/                GPU vs numpy tests, shader compile test
 ```
 
-See **[DEVELOPMENT.md](DEVELOPMENT.md)** to build, run, and test.
+See [DEVELOPMENT.md](DEVELOPMENT.md) to build, run and test.

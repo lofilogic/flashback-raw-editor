@@ -1,10 +1,4 @@
-// Radial edge (corner) softness, texture-resident.
-//
-// Emulates lens field curvature: the centre stays sharp and the image softens
-// smoothly toward the corners. Implemented as a sharp->blurred blend whose
-// weight grows with radius — cheap, GPU-friendly, and reads like gentle
-// defocus. The blurred input is a full Gaussian blur of the sharp image
-// (produced by blur_frame); this pass only chooses how much of it to mix in.
+// Corner softness: blend toward a blurred copy with distance from the centre.
 //
 //   r_norm = dist(p, centre) / dist(corner, centre)        in [0, 1]
 //   w      = smoothstep(start, 1.0, r_norm) * strength

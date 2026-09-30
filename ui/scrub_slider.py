@@ -1,10 +1,5 @@
-"""Minimal precision slider styled to match the LoFi Logic handoff mockup.
-
-- 2px track, 14px circular thumb
-- Dual (±) mode: fill grows from the center + a center tick
-- Click-to-jump on the track (Lightroom-style)
-- Drag halo around the thumb while pressed
-"""
+"""Thin slider. Click on the track jumps there; bipolar sliders fill from
+the centre."""
 
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath
@@ -15,9 +10,9 @@ from ui.theme import qcolor, register_theme_listener
 
 class ScrubSlider(QSlider):
     TRACK_H = 2
-    THUMB_R = 7          # thumb radius (diameter 14)
+    THUMB_R = 7
     CENTER_TICK_H = 8
-    HALO_R = 11          # drag halo radius
+    HALO_R = 11          # while dragging
 
     def __init__(self, parent=None, dual: bool = False):
         super().__init__(Qt.Horizontal, parent)
@@ -25,8 +20,7 @@ class ScrubSlider(QSlider):
         self._dragging = False
         self.setMinimumHeight(18)
         self.setFixedHeight(18)
-        # Neutralise the native QSlider subcontrols so they can't bleed through
-        # our custom paintEvent (left-edge groove artefact on some platforms).
+        # Hide the native groove; it showed through on some platforms.
         self.setStyleSheet(
             "QSlider { background: transparent; border: none; }"
             "QSlider::groove:horizontal { background: transparent; border: none; height: 0px; }"

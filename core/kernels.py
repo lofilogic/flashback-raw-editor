@@ -1,12 +1,5 @@
 """
-GPU-accelerated kernels for performance-critical image operations.
-
-Each function tries the GPU path first (via wgpu), then falls back to a
-numpy implementation if GPU is unavailable. The fallbacks are mathematically
-identical — they exist only for CI and systems without a usable GPU.
-
-HAS_GPU reflects whether wgpu loaded. The GPU device itself is lazy-initialized
-on first use (no startup cost, no pre-compilation delay).
+Image operations that use the GPU when available and numpy/cv2 otherwise.
 """
 from __future__ import annotations
 import numpy as np
@@ -16,22 +9,14 @@ from .gpu import gpu, HAS_GPU, Frame
 
 
 def run_resident(img: np.ndarray, stages) -> np.ndarray | None:
-    """Compose GPU-resident ``Frame -> Frame`` stages with a single upload and a
-    single readback.
+    """Run Frame -> Frame stages on the GPU with one upload and one readback.
 
-    ``stages`` is a sequence of callables taking and returning a Frame; the
-    image is uploaded once, each stage runs on the GPU without touching numpy,
-    and the result is read back once at the end. Returns None — so the caller
-    falls back to the CPU path — if the GPU is unavailable or any stage opts out
-    (returns None). Any GPU error is swallowed into a None fallback so a bad
-    driver can never break a render, only slow it.
+    Returns None if there's no GPU, a stage returns None, or anything raises,
+    so the caller can fall back to the CPU.
     """
     if not HAS_GPU:
         return None
-    # A render scope draws each stage's textures/uniforms from a reuse arena
-    # instead of allocating fresh per frame. The readback (frame.cpu()) happens
-    # inside the scope; end_render only flips the arena off afterwards, so the
-    # final texture is still valid when it's read back.
+    # Read back inside the render scope, while the arena textures are valid.
     gpu.begin_render()
     try:
         frame = Frame.from_cpu(img)
@@ -46,20 +31,13 @@ def run_resident(img: np.ndarray, stages) -> np.ndarray | None:
         gpu.end_render()
 
 
-# Below this the numpy BLAS matmul is as fast as the GPU path once the
-# upload+readback round-trip is counted (measured break-even at ~3 MP on M3, and
-# transfers cost more on discrete GPUs), so small/common frames skip the GPU to
-# avoid any chance of a load regression. The GPU only wins once the matmul itself
-# is large — i.e. high-megapixel (generic) raws.
+# Below this numpy is as fast once the transfers are counted (break-even
+# ~3 MP on an M3, later on discrete GPUs).
 _GPU_MATMUL_MIN_PIXELS = 8_000_000
 
 
 def color_transform(img: np.ndarray, M: np.ndarray) -> np.ndarray:
-    """Per-pixel 3x3 colour-space transform, GPU or numpy. Equivalent to
-    ``(img.reshape(-1,3) @ M.T).reshape(img.shape)``; used for the load-time
-    raw -> ACEScg matmul. The GPU path is taken only for large frames (see
-    _GPU_MATMUL_MIN_PIXELS), where it beats numpy despite the transfer.
-    """
+    """img @ M.T per pixel. GPU only for large images."""
     if HAS_GPU and img.size // 3 >= _GPU_MATMUL_MIN_PIXELS:
         result = gpu.color_transform(img, M)
         if result is not None:
@@ -68,16 +46,9 @@ def color_transform(img: np.ndarray, M: np.ndarray) -> np.ndarray:
 
 
 def encode_then_lut(img: np.ndarray) -> np.ndarray | None:
-    """ACEScct-encode then apply the LUT as one resident chain (one upload, one
-    readback). Returns None if unavailable so the caller can use the CPU path."""
+    """ACEScct encode + LUT on the GPU, or None."""
     return run_resident(img, [gpu.encode_frame, gpu.lut_frame])
 
-# Rotation uses OpenCV — fast, correct, and rotation happens rarely
-def rotate_90_clockwise(img: np.ndarray) -> np.ndarray:
-    return cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
-
-def rotate_90_counterclockwise(img: np.ndarray) -> np.ndarray:
-    return cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
 # =============================================================================
 # ACEScct encode / decode
@@ -89,7 +60,6 @@ def acescct_decode(img: np.ndarray) -> np.ndarray:
         result = gpu.acescct_decode(img)
         if result is not None:
             return result
-    # CPU fallback — both branches computed everywhere, np.where selects
     flat = img.ravel().astype(np.float32)
     out = np.where(
         flat < 0.155251141552511,
@@ -104,7 +74,6 @@ def acescct_encode(img: np.ndarray) -> np.ndarray:
         result = gpu.acescct_encode(img)
         if result is not None:
             return result
-    # CPU fallback
     flat = np.maximum(img.ravel(), 1e-10).astype(np.float32)
     out = np.where(
         flat <= 0.0078125,
@@ -118,13 +87,13 @@ def acescct_encode(img: np.ndarray) -> np.ndarray:
 # =============================================================================
 
 def apply_lut_gpu(img: np.ndarray) -> np.ndarray | None:
-    """Apply the LUT that's already uploaded to the GPU. Returns None if GPU unavailable."""
+    """Apply the uploaded LUT, or None without a GPU."""
     if not HAS_GPU:
         return None
     return gpu.apply_lut(img)
 
 def apply_lut_cpu(img: np.ndarray, lut_table: np.ndarray) -> np.ndarray:
-    """Trilinear LUT fallback (numpy vectorized)."""
+    """Trilinear LUT."""
     lut_size = lut_table.shape[0]
     img_scaled = np.clip(img, 0, 1) * (lut_size - 1)
     idx = img_scaled.astype(np.int32)
@@ -165,23 +134,10 @@ def apply_grain(image: np.ndarray, grain_layer: np.ndarray,
         result = gpu.grain_blend(image, grain_layer, intensity, min_grain, highlight_bias)
         if result is not None:
             return result
-    # CPU fallback
     grain_delta = (2.0 * grain_layer - 1.0) * intensity
     weight  = (1.0 - highlight_bias) * (1.0 - image) + highlight_bias * image
     falloff = min_grain + weight * (1.0 - min_grain)
     return np.clip(image + grain_delta * falloff, 0.0, 1.0).astype(np.float32)
-
-# =============================================================================
-# Screen blend (halation)
-# =============================================================================
-
-def screen_blend(base: np.ndarray, blend: np.ndarray) -> np.ndarray:
-    """Screen blend: 1 - (1-base)*(1-blend)."""
-    if HAS_GPU:
-        result = gpu.screen_blend(base, blend)
-        if result is not None:
-            return result
-    return (1.0 - (1.0 - base) * (1.0 - blend)).astype(np.float32)
 
 # =============================================================================
 # Unsharp mask
@@ -200,29 +156,18 @@ def unsharp_mask(image: np.ndarray, blurred: np.ndarray, strength: float) -> np.
 # =============================================================================
 
 def gaussian_blur(img: np.ndarray, sigma: float) -> np.ndarray:
-    """Separable Gaussian blur — GPU or cv2 fallback.
-
-    Accepts (H, W) single-channel or (H, W, C) multi-channel float32 arrays.
-    Matches cv2.GaussianBlur(img, (0,0), sigmaX=sigma) semantics.
-    """
+    """Gaussian blur on (H, W) or (H, W, C), same as cv2.GaussianBlur."""
     if sigma <= 0:
         return img.copy()
     if HAS_GPU:
         result = gpu.gaussian_blur(img, sigma)
         if result is not None:
             return result
-    # cv2 fallback
     return cv2.GaussianBlur(img, (0, 0), sigmaX=sigma, sigmaY=sigma)
 
 
 def exp_blur(img: np.ndarray, lam: float) -> np.ndarray:
-    """Separable exponential blur with a 1-D exp(-|x|/lam) kernel.
-
-    The 2-D response is exp(-(|x|+|y|)/lam) — a sharp central cusp with a long
-    tail, the halation falloff. numpy/cv2 oracle twin of gpu.blur_frame_exp;
-    must match its _exp_kernel (radius = 4*lam). Runs only on the no-GPU path,
-    so cv2.sepFilter2D is fine.
-    """
+    """Separable exp(-|x|/lam) blur. Must match gpu._exp_kernel."""
     if lam <= 0:
         return img.copy()
     radius = max(1, int(round(lam * 4)))
@@ -233,12 +178,7 @@ def exp_blur(img: np.ndarray, lam: float) -> np.ndarray:
 
 
 def disc_blur(img: np.ndarray, radius: float) -> np.ndarray:
-    """Disc (circle-of-confusion) blur: average within `radius` px.
-
-    The defined-edge halation core — numpy/cv2 oracle twin of gpu.disc_blur.
-    A disc is not separable, so this is a single 2D filter2D with a circular
-    kernel. Runs only on the no-GPU path.
-    """
+    """Average within `radius` px (a defocus disc)."""
     if radius <= 0:
         return img.copy()
     r = max(1, int(round(radius)))

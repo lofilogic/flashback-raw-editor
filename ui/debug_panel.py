@@ -1,6 +1,5 @@
 """
-Advanced Settings panel for tuning effects in real-time.
-Toggle visibility with F12.
+Advanced settings panel (F12).
 """
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -13,7 +12,7 @@ from core.config import (
     VibeConfig, VIBE_FIELD_NAMES,
     HALATION_THRESHOLD_STOPS, HALATION_BLUR_RADIUS, HALATION_STRENGTH_PCT,
     HALATION_WARMTH_PCT,
-    CA_PIXELS, CA_STEPS, CA_BLUE_BLUR, CA_ZOOM_BLUR_PCT,
+    CA_PIXELS,
     SOFTNESS_SIGMA, GRAIN_STRENGTH_PCT, SHARPEN_STRENGTH_PCT, SHARPEN_RADIUS,
     CNR_AMOUNT_PCT, CNR_DESPIKE_PCT, CNR_DESPIKE_BIAS_PCT,
     VIGNETTE_STRENGTH_PCT, VIGNETTE_COLOR_PCT, VIGNETTE_CURVE,
@@ -22,15 +21,13 @@ from core.config import (
 
 
 def _current_vibe(parent_editor) -> VibeConfig:
-    """Tiny helper: return parent_editor.current_vibe (the active VibeConfig)."""
     return parent_editor.current_vibe
 
 
 class DebugPanel(QWidget):
-    """Advanced Settings panel for tuning effects in real-time."""
 
     def __init__(self, processor, parent=None):
-        super().__init__(parent, Qt.Tool)  # Tool window stays on top
+        super().__init__(parent, Qt.Tool)
         self.processor = processor
         self.parent_editor = parent
         self.setWindowTitle("Advanced Settings (F12 to toggle)")
@@ -106,7 +103,7 @@ class DebugPanel(QWidget):
         lut_layout.addWidget(self.btn_load_lut)
         form_layout.addLayout(lut_layout)
 
-        # --- Baked Effects Group (only halation truly bakes into the intermediate) ---
+        # --- Baked at load: halation ---
         baked_group = QGroupBox("Baked Effects (Require Image Reload)")
         baked_group.setStyleSheet("QGroupBox { color: #FF8A35; font-weight: bold; border: 1px solid #555; border-radius: 6px; margin-top: 8px; padding-top: 8px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }")
         baked_layout = QFormLayout(baked_group)
@@ -151,7 +148,7 @@ class DebugPanel(QWidget):
         live_layout = QFormLayout(live_group)
         live_layout.setSpacing(8)
 
-        # CNR — applied per-render in core/processor._render(), not baked.
+        # CNR
         self.chk_cnr = QCheckBox("Enable Color Noise Reduction")
         self.chk_cnr.setChecked(True)
         self.chk_cnr.stateChanged.connect(self.update_preview)
@@ -161,7 +158,7 @@ class DebugPanel(QWidget):
         self.spin_cnr.valueChanged.connect(self.update_preview)
         live_layout.addRow("CNR Amount:", self.spin_cnr)
 
-        # Despike: 3x3-median chroma outlier clamp for fireflies/green spikes.
+        # Despike: removes single-pixel colour spikes
         self.spin_cnr_despike = self._create_double_spin(0.0, 100.0, CNR_DESPIKE_PCT, 1.0, suffix=" %")
         self.spin_cnr_despike.setToolTip(
             "Clamps isolated colour spikes (fireflies) toward their neighbours — "
@@ -194,31 +191,6 @@ class DebugPanel(QWidget):
         self.spin_ca_str = self._create_double_spin(0.0, 40.0, CA_PIXELS, 0.5, suffix=" px")
         self.spin_ca_str.valueChanged.connect(self.update_preview)
         live_layout.addRow("CA Strength:", self.spin_ca_str)
-
-        # CA advanced controls — collapsible (checkable groupbox; unchecked
-        # disables children without hiding them, the closest native Qt
-        # behavior to "collapse"). Kept on by default so existing presets
-        # that depend on zoom_blur stay visible.
-        ca_advanced = QGroupBox("Advanced")
-        ca_advanced.setCheckable(True)
-        ca_advanced.setChecked(True)
-        ca_advanced.setStyleSheet("QGroupBox { color: #888; font-weight: normal; border: 1px solid #444; border-radius: 4px; margin-top: 6px; padding-top: 6px; } QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }")
-        ca_adv_layout = QFormLayout(ca_advanced)
-        ca_adv_layout.setSpacing(6)
-
-        self.spin_ca_steps = self._create_spin(1, 10, CA_STEPS)
-        self.spin_ca_steps.valueChanged.connect(self.update_preview)
-        ca_adv_layout.addRow("CA Steps:", self.spin_ca_steps)
-
-        self.spin_ca_blue_blur = self._create_double_spin(0.0, 5.0, CA_BLUE_BLUR, 0.1, suffix=" px")
-        self.spin_ca_blue_blur.valueChanged.connect(self.update_preview)
-        ca_adv_layout.addRow("CA Blue Blur:", self.spin_ca_blue_blur)
-
-        self.spin_ca_zoom_blur = self._create_double_spin(0.0, 500.0, CA_ZOOM_BLUR_PCT, 5.0, suffix=" %")
-        self.spin_ca_zoom_blur.valueChanged.connect(self.update_preview)
-        ca_adv_layout.addRow("CA Zoom Blur:", self.spin_ca_zoom_blur)
-
-        live_layout.addRow(ca_advanced)
 
         live_layout.addRow(self._create_separator())
 
@@ -276,8 +248,7 @@ class DebugPanel(QWidget):
         self.spin_vignette_color.valueChanged.connect(self.update_preview)
         live_layout.addRow("Vignette Color Shift:", self.spin_vignette_color)
 
-        # Signed curve: positive = softer falloff, negative = harder edge,
-        # 0 = neutral cosine. Maps to a power exponent via 2^(-curve/50).
+        # Positive is softer, negative harder.
         self.spin_vignette_feather = self._create_double_spin(-100.0, 100.0, VIGNETTE_CURVE, 1.0)
         self.spin_vignette_feather.valueChanged.connect(self.update_preview)
         live_layout.addRow("Vignette Curve:", self.spin_vignette_feather)
@@ -435,8 +406,7 @@ class DebugPanel(QWidget):
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
 
-        # Schema-driven field → widget table for sync. Boolean fields use
-        # setChecked; numeric fields use setValue.
+        # VibeConfig field -> widget
         self._bool_widgets = {
             'enable_halation': self.chk_halation,
             'enable_chromatic_aberration': self.chk_ca,
@@ -454,9 +424,6 @@ class DebugPanel(QWidget):
             'halation_strength_pct': self.spin_halation_str,
             'halation_warmth_pct': self.spin_halation_warmth,
             'ca_pixels': self.spin_ca_str,
-            'ca_steps': self.spin_ca_steps,
-            'ca_blue_blur': self.spin_ca_blue_blur,
-            'ca_zoom_blur_pct': self.spin_ca_zoom_blur,
             'softness_sigma': self.spin_softness,
             'grain_strength_pct': self.spin_grain,
             'sharpen_strength_pct': self.spin_sharpen_str,
@@ -504,7 +471,7 @@ class DebugPanel(QWidget):
     # ===================================================================
 
     def update_config(self):
-        """Write all widget values into the current vibe (schema-driven)."""
+        """Widgets -> current vibe."""
         if not self.parent_editor:
             return
         vibe = self.parent_editor.current_vibe
@@ -516,7 +483,7 @@ class DebugPanel(QWidget):
         self.status_label.setText("Config updated. Click 'Reload Image' to apply baked effects.")
 
     def sync_from_config(self):
-        """Update all panel widgets from the current vibe."""
+        """Current vibe -> widgets."""
         if not self.parent_editor:
             return
         vibe = self.parent_editor.current_vibe
@@ -534,11 +501,7 @@ class DebugPanel(QWidget):
         self.refresh_lut_label()
 
     def refresh_lut_label(self):
-        """Update the LUT label to show the active LUT name + origin.
-
-        Factory refs show the id ("factory: disposable"); user refs show
-        the filename only ("user: my_look.cube"); empty ref reads as
-        "Default" (tone-curve fallback)."""
+        """"factory: <id>", "user: <file name>" or "Default"."""
         from pathlib import Path as _P
         from core.config import LUT_REF_FACTORY, LUT_REF_USER
         ref = self.parent_editor.current_vibe.lut_ref if self.parent_editor else ''
@@ -552,7 +515,7 @@ class DebugPanel(QWidget):
             self.lut_label.setText(f"Current LUT: {ref}")
 
     def update_modified_indicator(self):
-        """Show '• modified' next to the vibe header when session ≠ saved-or-factory."""
+        """Show '• modified' when the vibe differs from saved or factory."""
         if not self.parent_editor or not hasattr(self.parent_editor, 'current_vibe_id'):
             return
         vibe_id = self.parent_editor.current_vibe_id()
@@ -638,14 +601,13 @@ class DebugPanel(QWidget):
             self.parent_editor.reset_current_vibe_to_factory()
 
     def update_preview(self):
-        """Update real-time preview immediately."""
         self.update_config()
         self.update_modified_indicator()
         if self.parent_editor:
             self.parent_editor.refresh_from_debug()
 
     def reload_image(self):
-        """Force reload current image."""
+        """Reload the image, for baked effects."""
         if self.parent_editor:
             self.parent_editor.reload_current_image()
             self.status_label.setText("Image reloaded with new baked settings.")

@@ -67,16 +67,12 @@ a = Analysis(
         'cv2',
         'cv2.cv2',
 
-        # Export libraries (CRITICAL - for JPEG export in builds)
+        # JPEG export
         'PIL',
         'PIL.Image',
         'PIL.JpegImagePlugin',
         'PIL.ImageFile',
         'PIL._imaging',
-        'imageio',
-        'imageio.plugins',
-        'imageio.plugins.pillow',
-        'imageio.plugins.pillowmulti',
 
         # NumPy support
         'numpy.core._dtype_ctypes',

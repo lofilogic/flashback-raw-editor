@@ -18,12 +18,10 @@ log = logging.getLogger(__name__)
 
 
 class _LoFiApplication(QApplication):
-    """QApplication that routes OS 'open document' events to the editor.
+    """Passes macOS file-open events to the editor.
 
-    macOS delivers a file-association double-click / "Open With" as a
-    QFileOpenEvent (not via argv). On a cold launch that event can arrive before
-    the window exists, so it's buffered and flushed once the editor registers.
-    (Windows/Linux pass the path on argv instead — handled in main().)
+    These can arrive before the window exists, so they're buffered.
+    Windows and Linux use argv instead.
     """
 
     def __init__(self, argv):
@@ -48,8 +46,7 @@ class _LoFiApplication(QApplication):
             editor.open_os_path(p)
         self._pending.clear()
 
-# Identity used by builds before the LoFi Logic rename. Kept only so a one-time
-# migration can carry a beta user's settings + saved vibes across the rename.
+# Names before the LoFi Logic rename, for migrating settings.
 _LEGACY_ORG, _LEGACY_APP = "Flashback", "Flashback One35 v2"
 _LEGACY_SETTINGS = ("Flashback", "Editor")
 ORG_NAME, APP_NAME = "LoFi Logic", "LoFi Logic"
@@ -57,17 +54,10 @@ SETTINGS_SCOPE = ("LoFi Logic", "Editor")
 
 
 def _migrate_app_identity():
-    """Best-effort one-time carry-over of pre-rename user data.
-
-    Renaming the app/org name moves both the QSettings store and Qt's
-    AppDataLocation (saved vibes). Copy the old data into the new locations once,
-    only when the new ones are still empty, so an existing beta install keeps its
-    settings and tuned vibes instead of silently resetting. Never clobbers data
-    the user already created under the new name. Must run after the new
-    application/organization names are set (so AppDataLocation resolves to the
-    new dir) and before the editor reads anything.
+    """Copy settings and saved vibes from the pre-rename locations, if the new
+    ones are empty. Run after setting the app names, before the editor starts.
     """
-    # 1) QSettings (default folders, DNG profile, window state, last project).
+    # QSettings
     new_qs = QSettings(*SETTINGS_SCOPE)
     if not new_qs.allKeys():
         old_qs = QSettings(*_LEGACY_SETTINGS)
@@ -78,9 +68,7 @@ def _migrate_app_identity():
             new_qs.sync()
             log.info("Migrated %d app setting(s) from the previous app name.", len(keys))
 
-    # 2) AppDataLocation (saved vibes). Derive the old dir from the new one by
-    #    swapping the org/app path segment — robust across platforms since Qt
-    #    builds the path as <base>/<org>/<app>.
+    # Saved vibes. Qt builds the path as <base>/<org>/<app>.
     new_dir = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
     if not new_dir:
         return
@@ -90,7 +78,7 @@ def _migrate_app_identity():
         return
     os.makedirs(new_dir, exist_ok=True)
     if any(f.startswith("vibe_state") for f in os.listdir(new_dir)):
-        return  # user already has state under the new name — don't overwrite
+        return
     for name in os.listdir(old_dir):
         src, dst = os.path.join(old_dir, name), os.path.join(new_dir, name)
         if os.path.isfile(src) and not os.path.exists(dst):
@@ -99,38 +87,34 @@ def _migrate_app_identity():
 
 
 def main():
-    """Main entry point."""
-    # Plain-message format preserves the look of the existing log lines
-    # (which already carry their own [module] prefixes and ✓ / ⚠ / ✗ glyphs).
+    # Messages carry their own [module] prefixes.
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    # Allow fractional DPI scaling (e.g. 125%, 150%) — must be set before QApplication
+    # Fractional DPI scaling; must be set before QApplication
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
 
     if platform.system() == 'Darwin':
-        # Force sRGB color space to prevent P3 display oversaturation
+        # sRGB, or P3 displays oversaturate
         fmt = QSurfaceFormat.defaultFormat()
         fmt.setColorSpace(QSurfaceFormat.ColorSpace.sRGBColorSpace)
         QSurfaceFormat.setDefaultFormat(fmt)
 
-        # Patch CFBundleName so the macOS app menu shows the correct name
-        # when running directly as `python main.py` (bundled builds use Info.plist).
+        # App menu name when run from source; builds use Info.plist.
         try:
             from Foundation import NSBundle
             bundle_info = NSBundle.mainBundle().infoDictionary()
             bundle_info['CFBundleName'] = 'LoFi Logic'
         except Exception:
-            pass  # pyobjc not available — bundled app uses Info.plist instead
+            pass
 
     app = _LoFiApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(ORG_NAME)
     _migrate_app_identity()
 
-    # Fusion style with an explicit dark palette — ensures consistent appearance
-    # regardless of the OS light/dark mode setting (important for Windows VMs).
+    # Fusion with our own palette, independent of the OS theme.
     app.setStyle("Fusion")
     dark = QPalette()
     dark.setColor(QPalette.ColorRole.Window,          QColor(49,  49,  49))
@@ -156,8 +140,7 @@ def main():
     window.show()
     app.register_editor(window)
 
-    # Windows/Linux hand a double-clicked / "Open with" file on the command line
-    # (macOS uses the QFileOpenEvent path above). Open the first real path.
+    # Windows/Linux pass opened files on the command line.
     for arg in sys.argv[1:]:
         if os.path.exists(arg):
             window.open_os_path(arg)

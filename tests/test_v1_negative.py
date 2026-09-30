@@ -1,12 +1,5 @@
-"""Tests for V1 negative detection and its cache.
-
-is_v1_negative() reads and JSON-parses a sidecar on every call, and the
-thumbnail worker asks it once per frame on every vibe change — so it is cached.
-The cache is only sound while the answer for a path cannot change behind it,
-which makes extract_negatives_from_zip's cache_clear() load-bearing rather than
-defensive: that is the one place the app turns a non-negative path into a
-negative one.
-"""
+"""V1 negative detection and its cache, which extract_negatives_from_zip
+must clear."""
 import json
 import zipfile
 
@@ -19,7 +12,7 @@ W, H = 4, 3
 
 @pytest.fixture(autouse=True)
 def _clear_cache():
-    """Detection is process-wide cached; keep tests independent of each other."""
+    """Clear the cache between tests."""
     is_v1_negative.cache_clear()
     yield
     is_v1_negative.cache_clear()
@@ -46,8 +39,7 @@ def test_detects_a_valid_negative(tmp_path):
 
 
 def test_rejects_a_raw_whose_size_contradicts_its_sidecar(tmp_path):
-    """The payload must be exactly width*height — that check is what separates a
-    real negative from any other extensionless file sitting next to a .json."""
+    """The raw must be exactly width*height bytes."""
     raw = _write_negative(tmp_path)
     raw.write_bytes(bytes(W * H + 1))
     is_v1_negative.cache_clear()
@@ -68,9 +60,8 @@ def test_repeated_calls_are_served_from_cache(tmp_path):
 
 
 def test_extracting_a_roll_invalidates_a_stale_negative_result(tmp_path):
-    """Dropping a folder probes every file in it, so a destination path can be
-    cached as 'not a negative' before the roll that fills it is imported. The
-    extract must clear that, or the frames stay invisible for the session."""
+    """A path cached as 'not a negative' before the roll is extracted there
+    must be detected afterwards."""
     dest = tmp_path / 'out'
     probe = str(dest / 'frame002')
     assert is_v1_negative(probe) is False

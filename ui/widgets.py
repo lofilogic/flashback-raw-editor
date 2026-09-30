@@ -1,13 +1,5 @@
 """
-Custom Qt widgets for the LoFi Logic editor.
-
-  ThumbnailWorker   — background QThread for generating thumbnails
-  ThumbnailWidget   — individual thumbnail with dual selection states
-  FadeOverlayWidget — edge-fade gradient over the thumbnail strip
-  LoaderOverlay     — animated full-window loading overlay
-  ThumbnailStrip    — horizontal scrollable strip of ThumbnailWidgets
-  RoundedLabel      — QLabel with anti-aliased rounded corners
-  ZoomableImageWidget — pan/zoom image viewer
+Widgets and worker threads for the editor window.
 """
 import logging
 import sys
@@ -41,8 +33,7 @@ from ui.theme import C, qcolor, register_theme_listener, ui_font, UI_FONT
 
 
 def _choose_lut(file_path, lut, lut_v1):
-    """Per-file LUT: V1 negatives use the V1 variant when one was supplied;
-    everything else uses the base LUT."""
+    """lut_v1 for V1 negatives if given, else lut."""
     if lut_v1 is not None and is_v1_negative(str(file_path)):
         return lut_v1
     return lut
@@ -53,11 +44,7 @@ def _choose_lut(file_path, lut, lut_v1):
 # =============================================================================
 
 class ThumbnailWorker(QThread):
-    """
-    Background worker thread for generating thumbnails.
-    Loads each RAW file in fast mode (LINEAR demosaic) and emits
-    the display image and the linear ACEScg intermediate for each.
-    """
+    """Loads each file and emits its thumbnail and ACEScg intermediate."""
 
     progress = Signal(int, int)            # current, total
     thumbnail_ready = Signal(int, object, object, bool)  # index, thumb_array, intermediate, is_flashback
@@ -69,27 +56,19 @@ class ThumbnailWorker(QThread):
         super().__init__()
         self.image_files = image_files
         self.processor_lut = processor_lut
-        # V1-variant LUT (e.g. disposable_V1). When set, V1 negatives render
-        # with it instead of processor_lut; the base LUT covers everything else.
+        # LUT for V1 negatives, if the vibe has one.
         self.lut_v1 = lut_v1
-        # Optional dict: target_path_str -> source_path_str. When a target path
-        # appears here AND does not yet exist on disk, the worker exports the
-        # source DNG to the target before loading the thumbnail. This is what
-        # the camera-import flow uses to write into the dated output folders.
+        # Camera import: {target: source}. Missing targets are imported first.
         self.export_sources = export_sources or {}
-        # Optional dict: path_str -> degrees (0/90/180/270). When set, the
-        # thumbnail is generated from the rotated intermediate so project
-        # reloads show oriented thumbs.
+        # {path: degrees}, so project thumbnails come out rotated.
         self.rotations = rotations or {}
         self._is_running = True
 
     def run(self):
-        """Generate thumbnails in background."""
         processor = FlashbackProcessor(None)
         processor.lut = self.processor_lut
-        # This worker renders on its own thread, so the GPU LUT it uploads is
-        # private to it (thread-local) — it can swap per file without racing the
-        # main preview. Tracked so a homogeneous roll only uploads once.
+        # The GPU LUT is per thread, so this can swap it freely. Tracked to
+        # upload only on change.
         uploaded = object()
 
         total = len(self.image_files)
@@ -120,8 +99,7 @@ class ThumbnailWorker(QThread):
                     continue
 
             try:
-                # If we just exported, the processor already holds the loaded
-                # image / intermediate / is_flashback flag — skip re-reading.
+                # The import already loaded it.
                 img_display = preloaded_display if preloaded_display is not None \
                     else processor.load_image(file_path_str)
 
@@ -159,22 +137,13 @@ class ThumbnailWorker(QThread):
 # =============================================================================
 
 class RenderWorker(QThread):
-    """
-    Latest-wins background renderer for interactive slider scrubbing.
+    """Background renderer for slider scrubbing; the latest request wins.
 
-    Call request(downscale) from the main thread whenever a new render is
-    needed. If a render is already in flight, the new parameters replace any
-    queued request. The running render is allowed to finish and emit its
-    result (so the user keeps seeing frames during a fast scrub); the next
-    request then fires immediately, eventually converging on the latest state.
+    A request made during a render replaces any queued one. The running render
+    still finishes and is shown, so scrubbing keeps producing frames.
 
-    Call invalidate() when the processor's state (intermediate, LUT, settings)
-    changes out from under the worker — image switch, rotate, paste, vibe
-    change. Any in-flight render's result is dropped instead of emitted.
-
-    render_done(img_array, was_downscaled) is emitted on the main thread.
-    The was_downscaled flag lets the caller decide whether to bump the
-    thumbnail / persist settings.
+    Call invalidate() on image switch, rotate, paste or vibe change to drop
+    the in-flight result.
     """
 
     render_done = Signal(object, bool)   # img_array, was_downscaled
@@ -183,10 +152,10 @@ class RenderWorker(QThread):
         super().__init__()
         self._processor = processor
         self._lock = threading.Condition()
-        self._pending = None          # None | bool (downscale flag)
-        self._epoch = 0               # bumped on invalidate(); in-flight result is dropped if epoch changed
+        self._pending = None          # None or the downscale flag
+        self._epoch = 0               # bumped by invalidate()
         self._running = True
-        self._uploaded_lut = object()  # last LUT uploaded to THIS thread's GPU state
+        self._uploaded_lut = object()  # last LUT uploaded on this thread
 
     def request(self, downscale: bool):
         with self._lock:
@@ -194,9 +163,7 @@ class RenderWorker(QThread):
             self._lock.notify()
 
     def invalidate(self):
-        """Drop any pending request and discard the in-flight render's result.
-        Call this when the processor's intermediate, LUT, or settings change
-        out from under the worker (image switch, rotate, paste, vibe change)."""
+        """Drop the pending request and the in-flight result."""
         with self._lock:
             self._pending = None
             self._epoch += 1
@@ -218,9 +185,7 @@ class RenderWorker(QThread):
                 self._pending = None
                 start_epoch = self._epoch
 
-            # The LUT buffer is thread-local, so this worker must mirror the
-            # processor's active LUT (set on the main thread, already V1-resolved)
-            # into its own GPU state before rendering. Re-upload only on change.
+            # The GPU LUT is per thread; upload the processor's when it changes.
             lut = self._processor.lut
             if lut is not self._uploaded_lut:
                 if lut is not None:
@@ -231,8 +196,7 @@ class RenderWorker(QThread):
 
             with self._lock:
                 if self._epoch != start_epoch:
-                    # Invalidated mid-render — the result is computed against
-                    # state that no longer matches the UI. Drop it.
+                    # Invalidated mid-render.
                     continue
 
             if img is not None:
@@ -244,12 +208,8 @@ class RenderWorker(QThread):
 # =============================================================================
 
 class VibeRefreshWorker(QThread):
-    """
-    Background worker that re-renders thumbnails after a vibe switch.
-
-    Takes a snapshot of the image cache at construction time (main thread)
-    so the worker never races against cache mutations during initial load.
-    """
+    """Re-renders thumbnails after a vibe switch, from a snapshot of the
+    cache taken on the main thread."""
 
     thumbnail_ready = Signal(int, object)  # index, thumb_array
     finished = Signal()
@@ -263,17 +223,17 @@ class VibeRefreshWorker(QThread):
         self.image_settings = image_settings      # {path_str: settings_dict}
         self.current_index = current_index
         self.lut = lut
-        self.lut_v1 = lut_v1                       # V1-variant LUT (see ThumbnailWorker)
+        self.lut_v1 = lut_v1
         self.grain_tiles = grain_tiles
         self.default_settings = default_settings
-        self.vibe = vibe                          # snapshot of the active VibeConfig
+        self.vibe = vibe                          # a copy
         self._is_running = True
 
     def run(self):
         processor = FlashbackProcessor(vibe=self.vibe)
         processor.lut = self.lut
         processor.grain_tiles = self.grain_tiles
-        # Thread-local GPU LUT: swap per file (V1 negatives get the V1 variant).
+        # Per-thread GPU LUT, swapped per file.
         uploaded = object()
 
         for idx, path in enumerate(self.image_files):
@@ -315,21 +275,17 @@ class VibeRefreshWorker(QThread):
 # =============================================================================
 
 class ThumbnailWidget(QFrame):
-    """
-    Individual thumbnail widget with TWO independent selection states + status:
-    1. Process selection (right-click): accent border glow
-    2. Paste selection (shift/cmd + left click): white overlay + marker
-    Plus an index label ("01") and a green "processed" dot per mockup.
-    """
+    """One thumbnail. Two independent selections: export (right-click,
+    accent border) and paste (shift/cmd-click, white overlay). Also shows the
+    index and a dot once exported."""
 
     clicked = Signal(int)        # left click
     right_clicked = Signal(int)  # right click
-    # Emitted when the user drags a thumbnail downward and releases below
-    # the bottom edge of the application window — a "throw it away" gesture.
+    # Dragged out below the window: remove it.
     remove_requested = Signal(int)
 
-    THUMBNAIL_HEIGHT = 70  # Fixed height, variable width based on aspect ratio
-    DRAG_THRESHOLD = 8     # pixels of motion before a press is treated as a drag
+    THUMBNAIL_HEIGHT = 70
+    DRAG_THRESHOLD = 8     # px
 
     def __init__(self, index, parent=None):
         super().__init__(parent)
@@ -366,7 +322,6 @@ class ThumbnailWidget(QFrame):
         super().leaveEvent(event)
 
     def set_pixmap(self, pixmap):
-        """Set the thumbnail image and update size to match aspect ratio."""
         self.pixmap = pixmap
         if pixmap:
             aspect_ratio = pixmap.width() / pixmap.height()
@@ -391,7 +346,6 @@ class ThumbnailWidget(QFrame):
         self.update()
 
     def paintEvent(self, event):
-        """Custom paint: thumbnail + index label + processed/paste markers + selection ring."""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
@@ -416,7 +370,7 @@ class ThumbnailWidget(QFrame):
             marker.setAlpha(50)
             painter.fillRect(self.rect(), marker)
 
-        # Index label "01" in the top-left corner
+        # Index, top left
         idx_col = qcolor("text_primary")
         idx_col.setAlpha(200)
         painter.setPen(idx_col)
@@ -425,13 +379,13 @@ class ThumbnailWidget(QFrame):
         painter.setFont(f)
         painter.drawText(6, 14, f"{self.index + 1:02d}")
 
-        # Processed dot (bottom-right)
+        # Exported dot, bottom right
         if self.is_processed:
             painter.setBrush(qcolor("processed"))
             painter.setPen(Qt.NoPen)
             painter.drawEllipse(self.width() - 12, self.height() - 12, 6, 6)
 
-        # Paste-selected marker (top-right)
+        # Paste marker, top right
         if self.is_paste_selected:
             painter.setBrush(qcolor("paste_marker"))
             painter.setPen(Qt.NoPen)
@@ -489,7 +443,7 @@ class ThumbnailWidget(QFrame):
             window = self.window()
             try:
                 release_global_y = event.globalPosition().toPoint().y()
-            except AttributeError:  # PySide6 <6.0 fallback
+            except AttributeError:
                 release_global_y = event.globalPos().y()
             if window is not None:
                 window_bottom = window.frameGeometry().bottom()
@@ -512,7 +466,7 @@ class ThumbnailWidget(QFrame):
 # =============================================================================
 
 class FadeOverlayWidget(QWidget):
-    """Overlay that draws fade gradients on left/right edges of the thumbnail strip."""
+    """Fades the left and right edges of the thumbnail strip."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -561,7 +515,7 @@ class FadeOverlayWidget(QWidget):
 # =============================================================================
 
 class LoaderOverlay(QWidget):
-    """Full-window semi-opaque loader overlay with animated GIF and progress text."""
+    """Full-window loading overlay with progress text."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -620,11 +574,9 @@ class LoaderOverlay(QWidget):
 
         self.hide()
         self._fade_anim = None
-        # Fade via a graphics effect, NOT setWindowOpacity: windowOpacity only
-        # affects top-level windows, and animating it on this child overlay
-        # composites wrong on macOS — the dim survives only where the widget is
-        # continuously repainted (the GIF + text), leaving the rest transparent.
-        # The effect composites the whole widget rect, so the dim stays full.
+        # A graphics effect, not setWindowOpacity: that's for top-level
+        # windows, and on this child it only dimmed the repainted parts on
+        # macOS.
         self._opacity_effect = QGraphicsOpacityEffect(self)
         self._opacity_effect.setOpacity(1.0)
         self.setGraphicsEffect(self._opacity_effect)
@@ -704,28 +656,18 @@ class LoaderOverlay(QWidget):
 # =============================================================================
 
 class ThumbnailStrip(QScrollArea):
-    """
-    Horizontal scrollable thumbnail strip with TWO independent selection systems:
+    """Horizontal thumbnail strip.
 
-    1. PROCESS SELECTION (orange border):
-       - Right-click: Toggle selection for processing
-       - None selected = process all images
-
-    2. PASTE SELECTION (white overlay):
-       - Shift+Left click: Toggle single / range select
-       - Cmd+Left click: Toggle individual
-       - Cmd+A: Select all
-       - Used by: Paste settings (Cmd+V)
-
-    3. PLAIN LEFT CLICK:
-       - Just loads the image in preview
-       - Does NOT affect either selection
+    Export selection: right-click toggles; none selected exports all.
+    Paste selection: shift-click for ranges, cmd-click to toggle, cmd-A for
+    all. Used by paste settings.
+    A plain click only opens the image.
     """
 
-    thumbnail_clicked = Signal(int)              # plain left click - load image
-    thumbnail_right_clicked = Signal(int)        # right click - toggle process selection
+    thumbnail_clicked = Signal(int)
+    thumbnail_right_clicked = Signal(int)
     thumbnail_paste_selected = Signal(int, bool) # (index, is_selected) feedback
-    thumbnail_remove_requested = Signal(int)     # dragged out of window — remove from project
+    thumbnail_remove_requested = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -785,11 +727,9 @@ class ThumbnailStrip(QScrollArea):
             super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event):
-        # Touchpads (and hi-res mice on macOS) deliver pixelDelta — use it
-        # directly for pixel-accurate, smooth scrolling. Combine x and y so a
-        # horizontal two-finger swipe scrolls the strip naturally and a vertical
-        # wheel still works. Fall back to angleDelta only when pixelDelta is
-        # absent (classic notched mouse), quantised to one thumbnail step.
+        # Touchpads send pixelDelta; use both axes so horizontal swipes and
+        # vertical wheels both scroll. Notched wheels only send angleDelta:
+        # one thumbnail per notch.
         pixel = event.pixelDelta()
         if not pixel.isNull():
             dx = pixel.x() + pixel.y()
@@ -816,12 +756,10 @@ class ThumbnailStrip(QScrollArea):
         self.paste_selected_indices.clear()
 
     def set_current_index(self, index: int):
-        """Highlight the thumbnail for the currently-displayed image."""
         for i, t in enumerate(self.thumbnails):
             t.set_current(i == index)
 
     def set_processed(self, index: int, processed: bool):
-        """Mark a thumbnail as exported (green dot)."""
         if 0 <= index < len(self.thumbnails):
             self.thumbnails[index].set_processed(processed)
 
@@ -849,8 +787,7 @@ class ThumbnailStrip(QScrollArea):
             self.thumbnails[index].set_pixmap(pixmap)
 
     def remove_at(self, index: int):
-        """Drop one thumbnail and renumber the rest so their index labels
-        and click signals stay aligned with the editor's image_files list."""
+        """Remove a thumbnail and renumber the rest."""
         if not (0 <= index < len(self.thumbnails)):
             return
         thumb = self.thumbnails.pop(index)
@@ -1015,18 +952,12 @@ class RoundedLabel(QLabel):
 # =============================================================================
 
 class ZoomableImageWidget(QScrollArea):
-    """
-    Custom zoomable image viewer with pan support.
-
-    - Left click: zoom to 125% (or pan if already zoomed)
-    - Scroll: zoom in/out through fixed steps
-    - Mouse drag: pan when zoomed in
-    - Double click: fit to window
-    """
+    """Image view. Click zooms to 125%, scroll zooms, drag pans, double-click
+    fits."""
 
     ZOOM_LEVELS = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0]
-    ZOOM_FACTOR = 1.18  # multiplicative step per scroll tick
-    CLICK_ZOOM_LONG_EDGE = round(1.25 * 2072)  # px on screen; Flashback frame at 125%
+    ZOOM_FACTOR = 1.18  # per scroll step
+    CLICK_ZOOM_LONG_EDGE = round(1.25 * 2072)  # a Flashback frame at 125%
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1078,9 +1009,7 @@ class ZoomableImageWidget(QScrollArea):
             )
 
     def _create_zoom_cursor(self):
-        # Rasterise assets/icons/zoom.svg into a plain 32×32 cursor pixmap.
-        # Uses a single 1× pixmap so every platform treats it as a standard
-        # 32-pixel cursor (some WMs clip oversized pixmaps from the top-left).
+        # Plain 32x32 at 1x; some window managers clip larger cursor pixmaps.
         from PySide6.QtSvg import QSvgRenderer
         from PySide6.QtCore import QByteArray, QRectF
 
@@ -1124,10 +1053,8 @@ class ZoomableImageWidget(QScrollArea):
         bytes_per_line = channels * width
         q_image = QImage(img_8bit.data, width, height, bytes_per_line, QImage.Format_RGB888)
 
-        # When zoomed, keep the view stable across a change of pixmap size
-        # (low-res preview -> full render, or images of different resolution):
-        # hold magnification relative to fit-to-window and the view centre as a
-        # fraction of the image, instead of absolute pixmap pixels.
+        # Keep zoom and centre relative to the image, so swapping the preview
+        # for the full render doesn't move the view.
         keep = None
         if (not self._fit_to_window and self._original_pixmap is not None
                 and self.widget() is self.image_label
@@ -1152,8 +1079,7 @@ class ZoomableImageWidget(QScrollArea):
             return
 
         if self.widget() is not self.image_label:
-            # takeWidget detaches the current widget without destroying it,
-            # so we can swap back to the same placeholder_label later in clear().
+            # takeWidget keeps the placeholder alive for clear().
             old = self.takeWidget()
             if old is not None and old is not self.image_label:
                 old.setParent(None)
@@ -1162,13 +1088,8 @@ class ZoomableImageWidget(QScrollArea):
         self._update_display()
 
     def set_scrub_image(self, img_array):
-        """Display a downscaled scrub frame without replacing the full-res reference pixmap.
-
-        When zoomed in, a slider-drag render is downscaled for speed.  Calling
-        set_image() would overwrite _original_pixmap with the small frame, making
-        _zoom_level * new_width < expected size and causing a visible jump.  This
-        method renders the scrub frame at the correct on-screen size instead.
-        """
+        """Show a downscaled scrub frame at the current zoom without replacing
+        _original_pixmap, which would make the view jump."""
         if self._original_pixmap is None or self._fit_to_window:
             self.set_image(img_array)
             return
@@ -1190,16 +1111,13 @@ class ZoomableImageWidget(QScrollArea):
     def clear(self):
         self._pixmap = None
         self._original_pixmap = None
-        # Detach (don't destroy) the current widget — setWidget below would
-        # otherwise delete it, and on a second clear the image_label would
-        # be a dangling Qt object.
+        # setWidget would delete image_label otherwise.
         old = self.takeWidget()
         if old is self.image_label:
             old.clear()
             old.setFixedSize(1, 1)
             old.setParent(None)
-        # Recreate the placeholder if Qt destroyed the previous instance the
-        # first time we swapped to image_label.
+        # Recreate the placeholder if Qt deleted it.
         from PySide6.QtWidgets import QLabel
         try:
             _ = self.placeholder_label.text()  # touches the Qt object
@@ -1248,16 +1166,14 @@ class ZoomableImageWidget(QScrollArea):
         return min(scale_w, scale_h)
 
     def _set_zoom_at(self, zoom_level, cursor_vp=None):
-        """Zoom to zoom_level, keeping the point under cursor_vp (viewport coords) fixed."""
+        """Zoom, keeping the point under cursor_vp in place."""
         if self._original_pixmap is None:
             return
 
         old_zoom = self._get_fit_zoom() if self._fit_to_window else self._zoom_level
         zoom_ratio = zoom_level / old_zoom
 
-        # Sample label-space position under cursor BEFORE layout changes.
-        # image_label.mapFrom(viewport, p) already accounts for both scroll
-        # offset and centering alignment, giving true label coordinates.
+        # Before the layout changes. mapFrom includes scroll and centring.
         label_pos = (
             self.image_label.mapFrom(self.viewport(), cursor_vp)
             if cursor_vp is not None else None
@@ -1269,7 +1185,6 @@ class ZoomableImageWidget(QScrollArea):
 
         self._update_display()
 
-        # Anchor: label_pos * zoom_ratio must end up at cursor_vp in the viewport.
         # new_scroll = label_pos * zoom_ratio - cursor_vp
         if label_pos is not None and zoom_ratio != 1.0:
             new_h = round(label_pos.x() * zoom_ratio - cursor_vp.x())
@@ -1297,9 +1212,8 @@ class ZoomableImageWidget(QScrollArea):
                 self._last_mouse_pos = event.pos()
                 self.image_label.setCursor(Qt.ClosedHandCursor)
             else:
-                # Constant magnification relative to the frame: the long edge
-                # lands where a Flashback frame's does at 125%, whatever the
-                # image's (or the on-screen preview's) resolution.
+                # Same size on screen for any resolution: a Flashback frame at
+                # 125%.
                 pm = self._original_pixmap
                 self._set_zoom_at(self.CLICK_ZOOM_LONG_EDGE / max(pm.width(), pm.height()),
                                   event.pos())
@@ -1362,7 +1276,7 @@ class ZoomableImageWidget(QScrollArea):
 # =============================================================================
 
 class VibePicker(QWidget):
-    """Film-character preset selector — styled dropdown matching the HTML design."""
+    """Vibe dropdown."""
 
     vibe_changed = Signal(str)
 

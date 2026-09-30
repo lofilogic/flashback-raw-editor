@@ -1,18 +1,10 @@
 """
-GPU compute pipeline via wgpu (WebGPU native).
+wgpu compute pipeline.
 
-Provides a singleton GPUPipeline with methods for each accelerated operation.
-Falls back gracefully if no GPU is available.
-
-Usage:
-    from .gpu import gpu, HAS_GPU
-    if HAS_GPU:
-        result = gpu.apply_lut(img, lut_table)
-    else:
-        result = cpu_fallback(img, lut_table)
-
-All methods accept and return float32 numpy arrays with shape (H, W, 3).
-The LUT buffer is persistent on the GPU — upload once per vibe change.
+``gpu`` is a lazily initialised GPUPipeline singleton. The *_frame methods
+take and return Frames and keep pixels on the GPU between stages; the older
+buffer methods take numpy arrays. Callers check HAS_GPU and fall back to the
+numpy versions in kernels.py / effects.py.
 """
 from __future__ import annotations
 import logging
@@ -28,16 +20,13 @@ try:
     _WGPU_AVAILABLE = True
 except ImportError:
     _WGPU_AVAILABLE = False
-    # Without wgpu there is no GPU path at all — every render falls back to the
-    # slow numpy CPU pipeline. Say so loudly at import: a from-source run that
-    # skipped `pip install -r requirements.txt` is the common cause, and the
-    # symptom (seconds-long renders) otherwise looks like a GPU/driver problem.
+    # Usually a source checkout without requirements installed. Warn, since
+    # slow renders otherwise look like a driver problem.
     log.warning("⚠ 'wgpu' is not installed — GPU acceleration is OFF and "
                 "rendering will be slow. Install dependencies with: "
                 "pip install -r requirements.txt")
 
-# wgpu's instance is process-global; its backend set can only be chosen once,
-# before the instance is created. Tracks whether we've done so (see _init).
+# Backends can only be set once, before the wgpu instance exists (see _init).
 _INSTANCE_EXTRAS_SET = False
 
 
@@ -48,9 +37,8 @@ def _read_shader(name: str) -> str:
 
 
 def _destroy_gpu_resource(resource):
-    """Best-effort release of a wgpu texture/buffer. ``destroy()`` frees the
-    backing allocation immediately rather than waiting for GC; absent (CPU
-    fallback / test doubles), dropping the reference is enough."""
+    """Free a texture/buffer now instead of at GC. Test doubles may not have
+    destroy()."""
     try:
         resource.destroy()
     except Exception:
@@ -58,27 +46,20 @@ def _destroy_gpu_resource(resource):
 
 
 class _RenderArena:
-    """Thread-local bump allocator for per-render GPU textures and uniforms.
+    """Thread-local bump allocator for per-render textures and uniforms.
 
-    The shipped pipeline keeps pixels GPU-resident but still allocated a fresh
-    texture (~96 MB at 3 MP) and uniform buffer per stage, every frame. That
-    per-frame allocation churn — CPU-side driver work, not GPU compute — is the
-    top remaining interactive cost. This arena kills it: within one render
-    ``acquire`` hands out a distinct resource per call (a bump index advances),
-    and ``begin`` resets the indices to 0 so the *next* render on the same
-    thread reuses the same physical resources instead of allocating fresh.
+    Allocating a fresh texture per stage per frame was the largest
+    interactive cost (driver work on the CPU). Within a render, each acquire
+    returns a new slot; begin() rewinds the indices so the next render reuses
+    the same resources.
 
-    Bump-arena, not a freeing pool, on purpose: each allocation in a render gets
-    its own slot, so no two live Frames in a render ever share a texture — that
-    preserves the write-once ``Frame`` invariant. It relies on no Frame
-    outliving its render (``run_resident`` reads back before ``end``); reused
-    textures hold stale data between renders, which is fine because every stage
-    fully overwrites its dst (see the dirty-arena parity test).
+    Every allocation in a render gets its own slot, so live Frames never share
+    a texture. This relies on no Frame outliving its render. Reused textures
+    contain stale data, which is fine because every stage overwrites its whole
+    output (covered by the dirty-arena parity test).
 
-    State is thread-local because RenderWorker (interactive scrub) and
-    VibeRefreshWorker (thumbnails) render concurrently on the shared GPU
-    singleton. Per-thread pools mean no lock and no cross-thread corruption;
-    peak retained memory is one render's worth of textures per render thread.
+    Thread-local because the preview and thumbnail workers render
+    concurrently on the shared device.
     """
 
     def __init__(self):
@@ -100,8 +81,7 @@ class _RenderArena:
         return self._state().active
 
     def begin(self):
-        """Open a render scope (reentrant). Resets bump indices on the outermost
-        begin so this render reuses the pools from a clean start."""
+        """Open a render scope. Reentrant; the outermost call rewinds."""
         s = self._state()
         s.depth += 1
         if s.depth == 1:
@@ -110,8 +90,7 @@ class _RenderArena:
             s.uni_idx = {}
 
     def end(self):
-        """Close a render scope. The pools persist for the next render; only the
-        active flag flips off, after the caller has read its result back."""
+        """Close a render scope. Call after the result has been read back."""
         s = self._state()
         s.depth = max(0, s.depth - 1)
         if s.depth == 0:
@@ -119,18 +98,11 @@ class _RenderArena:
             self._evict_unused(s)
 
     def _evict_unused(self, s):
-        """Drop pools whose key was NOT touched by the render that just ended,
-        destroying their GPU resources.
+        """Free pools the last render didn't use.
 
-        The pools are keyed by texture (h, w) / uniform nbytes, so without this
-        they retain a full render's worth of textures for EVERY distinct image
-        resolution ever seen. Navigating raws of differing sizes then leaks
-        unbounded GPU memory — which on unified-memory GPUs is system RAM. The
-        keys acquired this render are exactly ``tex_idx`` / ``uni_idx`` (reset on
-        the outermost ``begin``); everything else is a stale resolution. Same-
-        image scrubbing reuses the same keys, so steady-state churn is zero — it
-        only frees on a resolution change, honouring the one-render-working-set
-        bound this arena's docstring promises."""
+        Pools are keyed by size, so without this every image resolution seen
+        keeps a full render's worth of textures alive. Scrubbing one image
+        reuses the same keys and frees nothing."""
         for key in [k for k in s.tex_pools if k not in s.tex_idx]:
             for tex in s.tex_pools.pop(key):
                 _destroy_gpu_resource(tex)
@@ -144,7 +116,7 @@ class _RenderArena:
         pool = s.tex_pools.setdefault(key, [])
         i = s.tex_idx.get(key, 0)
         if i >= len(pool):
-            pool.append(create_fn())   # grow once; reused on later renders
+            pool.append(create_fn())
         s.tex_idx[key] = i + 1
         return pool[i]
 
@@ -159,7 +131,7 @@ class _RenderArena:
 
 
 class GPUPipeline:
-    """Singleton GPU compute pipeline. Lazy-initialized on first use."""
+    """Compute pipelines and resources. Initialised on first use."""
 
     def __init__(self):
         self._device = None
@@ -170,60 +142,53 @@ class GPUPipeline:
         self._acescct_bg_layout = None
         self._grain_pipeline = None
         self._grain_bg_layout = None
-        self._screen_pipeline = None
         self._unsharp_pipeline = None
         self._blend_bg_layout = None
         self._gauss_pipeline_h = None
         self._gauss_pipeline_v = None
         self._gauss_bg_layout = None
-        self._encode_tex_pipeline = None   # texture-resident ACEScct encode
+        # texture pipelines
+        self._encode_tex_pipeline = None
         self._encode_tex_bg_layout = None
-        self._lut_tex_pipeline = None      # texture-resident tetrahedral LUT
+        self._lut_tex_pipeline = None
         self._lut_tex_bg_layout = None
-        self._gauss_tex_pipeline_h = None  # texture-resident separable blur
+        self._gauss_tex_pipeline_h = None
         self._gauss_tex_pipeline_v = None
         self._gauss_tex_bg_layout = None
-        self._hal_mask_pipeline = None     # texture-resident halation passes
+        self._hal_mask_pipeline = None
         self._hal_mask_bg_layout = None
         self._hal_hi_pipeline = None
         self._hal_hi_bg_layout = None
         self._hal_combine_pipeline = None
         self._hal_combine_bg_layout = None
-        self._unsharp_tex_pipeline = None  # texture-resident unsharp mask
+        self._unsharp_tex_pipeline = None
         self._unsharp_tex_bg_layout = None
-        self._grain_tex_pipeline = None    # texture-resident grain blend
+        self._grain_tex_pipeline = None
         self._grain_tex_bg_layout = None
-        self._ca_tex_pipeline = None       # texture-resident spectral CA
+        self._ca_tex_pipeline = None
         self._ca_tex_bg_layout = None
-        self._edge_soft_pipeline = None    # texture-resident edge (corner) softness
+        self._edge_soft_pipeline = None
         self._edge_soft_bg_layout = None
-        self._vignette_pipeline = None     # texture-resident vignette (pre-LUT)
+        self._vignette_pipeline = None
         self._vignette_bg_layout = None
-        self._bloom_dm_pipeline = None     # texture-resident bloom: downsample+mask
+        self._bloom_dm_pipeline = None     # bloom downsample + mask
         self._bloom_dm_bg_layout = None
-        self._bloom_ua_pipeline = None     # texture-resident bloom: upsample+add
+        self._bloom_ua_pipeline = None     # bloom upsample + add
         self._bloom_ua_bg_layout = None
-        self._cnr_to_lab_pipeline = None   # texture-resident CNR (Lab + bilateral)
+        self._cnr_to_lab_pipeline = None
         self._cnr_to_acescg_pipeline = None
         self._cnr_bil_pipeline = None
         self._cnr_despike_pipeline = None
         self._cnr_io_bg_layout = None
         self._cnr_bil_bg_layout = None
-        self._colormat_pipeline = None     # buffer 3x3 colour transform (load-time)
+        self._colormat_pipeline = None     # 3x3 colour transform on a buffer, at load
         self._colormat_bg_layout = None
-        # The uploaded LUT is per-thread, like the render arena: RenderWorker,
-        # VibeRefreshWorker and ThumbnailWorker each render on their own thread
-        # and may need a *different* LUT than the main preview (V1 negatives get
-        # the V1-tuned variant). Thread-local buffers let each upload its own
-        # without a lock or cross-thread clobbering.
+        # Per-thread LUT: the render workers can each need a different one
+        # (V1 negatives use a V1 variant).
         self._lut_local = threading.local()
-        self._arena = _RenderArena()   # per-render texture/uniform bump allocator
-        # How device selection resolved — populated by _init, read by status()
-        # so the UI/logs can tell whether we're actually on the GPU. A brand-new
-        # GPU with a too-old graphics runtime, missing drivers, or a VM/RDP
-        # session can silently land on a software adapter (WARP / lavapipe) or
-        # fail init entirely and fall back to the slow CPU numpy path; both look
-        # identical to "working" without this.
+        self._arena = _RenderArena()
+        # Filled by _init, reported by status(). Missing drivers or a VM can
+        # land on a software adapter, which otherwise looks like it works.
         self.adapter_info = {}
         self.adapter_summary = None
         self.is_software_adapter = False
@@ -246,16 +211,12 @@ class GPUPipeline:
         self._lut_local.size = value
 
     def status(self) -> dict:
-        """Snapshot of how the GPU pipeline resolved, for diagnostics/UI.
+        """How the device resolved, for the UI. Initialises if needed.
 
-        Triggers lazy init so the adapter is actually selected. ``mode`` is one
-        of 'gpu' (hardware), 'software' (CPU adapter — slow), or 'cpu' (no GPU
-        device; numpy fallback path — slow). ``forced`` is True when the CPU
-        path was selected by LOFILOGIC_FORCE_CPU rather than a real GPU problem."""
-        # When the pipeline is running its CPU fallbacks (forced via env, or
-        # because wgpu is missing), report 'cpu' WITHOUT probing the real
-        # adapter — otherwise the health banner would say GPU while every op
-        # runs on the CPU.
+        mode is 'gpu', 'software' (CPU adapter) or 'cpu' (numpy fallback).
+        forced is True when LOFILOGIC_FORCE_CPU chose the CPU path."""
+        # Don't probe the adapter when the CPU path is in use anyway, or the
+        # banner would report a GPU that isn't being used.
         if not HAS_GPU:
             return {
                 'mode': 'cpu',
@@ -284,14 +245,11 @@ class GPUPipeline:
     # ------------------------------------------------------------------
 
     def begin_render(self):
-        """Open a render scope: subsequent texture/uniform allocations are drawn
-        from the (thread-local) reuse arena instead of being freshly created.
-        Bracket a resident chain with begin_render/end_render (see run_resident)."""
+        """Allocate from the arena until end_render (see run_resident)."""
         self._arena.begin()
 
     def end_render(self):
-        """Close the render scope opened by begin_render. Call after the chain's
-        result has been read back; reused resources persist for the next render."""
+        """Call after the result has been read back."""
         self._arena.end()
 
     # ------------------------------------------------------------------
@@ -304,26 +262,18 @@ class GPUPipeline:
         if not _WGPU_AVAILABLE:
             return False
         try:
-            # Choose which backends the wgpu instance enables (it probes each at
-            # creation, so this must happen before the instance exists — adapter
-            # -level selection happens too late).
+            # Backends are probed when the instance is created, so they have to
+            # be chosen before that.
             #
-            # GL/GLES is excluded ONLY on Linux: its EGL init aborts the whole
-            # process on some setups (e.g. Steam Deck: panic in wgpu-hal
-            # gles/egl.rs, "Aborted"). On Windows (DX12/Vulkan) and macOS (Metal)
-            # GL is never the *selected* backend, but keeping it enabled there
-            # leaves it as a last-ditch fallback when the primary backends fail
-            # to bind a device — e.g. a brand-new GPU on a graphics runtime too
-            # old to drive it on Vulkan/DX12 — at negligible probe cost. So we
-            # widen compatibility off-Linux rather than excluding GL globally.
+            # No GL on Linux: its EGL init aborts the process on some setups
+            # (Steam Deck, panic in wgpu-hal gles/egl.rs). Elsewhere GL is kept
+            # as a last resort for when DX12/Vulkan can't create a device, e.g.
+            # a new GPU on an old graphics runtime.
             import sys as _sys
             backends = (["Primary"] if _sys.platform.startswith("linux")
                         else ["Primary", "GL"])
-            # set_instance_extras is only legal before the wgpu instance exists,
-            # which the first request_adapter creates. On a retry after a failed
-            # init the instance already exists, so calling it again raises
-            # "Instance already exists" — which would mask the *real* error (e.g.
-            # "no suitable graphics adapter found"). Configure backends once.
+            # On a retry the instance already exists and set_instance_extras
+            # would raise, hiding the original error.
             global _INSTANCE_EXTRAS_SET
             if not _INSTANCE_EXTRAS_SET:
                 from wgpu.backends.wgpu_native.extras import set_instance_extras
@@ -333,10 +283,8 @@ class GPUPipeline:
             info = dict(getattr(adapter, 'info', {}) or {})
             self.adapter_info = info
             self.adapter_summary = getattr(adapter, 'summary', None) or info.get('description', '?')
-            # power_preference is only a hint — it does not guarantee a hardware
-            # adapter. Flag software/CPU adapters (DX12 WARP, Vulkan lavapipe,
-            # SwiftShader, Microsoft Basic Render) so the slow path is visible
-            # rather than silently accepted as "GPU ready".
+            # power_preference is only a hint; we may still get a software
+            # adapter.
             adapter_type = str(info.get('adapter_type', '')).lower()
             sl = self.adapter_summary.lower()
             self.is_software_adapter = (
@@ -364,25 +312,19 @@ class GPUPipeline:
             self.init_failed = True
             return False
 
-    # Bind-group layout catalogue. Each row drives one shader's pipeline(s):
-    #   (shader file, layout spec, bgl attribute, ((pipeline attr, entry point), ...))
-    # The spec is one char per binding, in binding order (see _bgl). wgpu
-    # validates the spec against the WGSL at pipeline creation, so a wrong spec
-    # fails loudly at init rather than miswiring silently — that defect surface
-    # is exactly what this table replaces ~300 lines of hand-written layouts to
-    # shrink. Shapes recur (e.g. RRWU x4, TSU x5, TTSU x4), which the table makes
-    # visible at a glance.
+    # (shader, layout spec, bgl attribute, ((pipeline attr, entry point), ...))
+    # One spec char per binding, see _bgl. wgpu checks the spec against the
+    # WGSL at pipeline creation, so a mismatch fails at init.
     _PIPELINE_TABLE = (
-        # buffer (legacy per-op) pipelines
+        # buffer pipelines
         ('lut.wgsl',               'RRWU',  '_lut_bg_layout',         (('_lut_pipeline', 'main'),)),
         ('acescct.wgsl',           'RW',    '_acescct_bg_layout',     (('_acescct_pipeline_decode', 'main_decode'),
                                                                        ('_acescct_pipeline_encode', 'main_encode'))),
         ('grain.wgsl',             'RRWU',  '_grain_bg_layout',       (('_grain_pipeline', 'main'),)),
-        ('blend.wgsl',             'RRWU',  '_blend_bg_layout',       (('_screen_pipeline', 'main_screen'),
-                                                                       ('_unsharp_pipeline', 'main_unsharp'))),
+        ('blend.wgsl',             'RRWU',  '_blend_bg_layout',       (('_unsharp_pipeline', 'main_unsharp'),)),
         ('gaussian_blur.wgsl',     'RRWU',  '_gauss_bg_layout',       (('_gauss_pipeline_h', 'main_h'),
                                                                        ('_gauss_pipeline_v', 'main_v'))),
-        # texture-resident pipelines
+        # texture pipelines
         ('encode_tex.wgsl',        'TS',    '_encode_tex_bg_layout',  (('_encode_tex_pipeline', 'main'),)),
         ('lut_tex.wgsl',           'TRSU',  '_lut_tex_bg_layout',     (('_lut_tex_pipeline', 'main'),)),
         ('gaussian_blur_tex.wgsl', 'TRS',   '_gauss_tex_bg_layout',   (('_gauss_tex_pipeline_h', 'main_h'),
@@ -408,11 +350,10 @@ class GPUPipeline:
     )
 
     def _bgl(self, spec: str):
-        """Create a COMPUTE bind-group layout from a compact spec: one char per
-        binding, in binding order —
-            R read-only-storage buffer   W storage buffer   U uniform buffer
-            T sampled texture (unfilterable f32, 2d)
-            S write-only storage texture (_TEX_FORMAT, 2d)
+        """Compute bind-group layout, one char per binding:
+            R read-only storage buffer   W storage buffer   U uniform buffer
+            T sampled texture (unfilterable f32)
+            S write-only storage texture (_TEX_FORMAT)
         """
         kind = {
             'R': {'buffer': {'type': wgpu.BufferBindingType.read_only_storage}},
@@ -430,10 +371,8 @@ class GPUPipeline:
         ])
 
     def _build_pipelines(self):
-        """Compile every compute pipeline from _PIPELINE_TABLE: build each bind-
-        group layout from its spec, store it on its attribute, then create the
-        pipeline(s) that share it. Shader modules are cached so a file used by
-        two rows (cnr.wgsl) compiles once."""
+        """Build everything in _PIPELINE_TABLE. A shader used by two rows is
+        compiled once."""
         dev = self._device
         modules = {}
         for shader, spec, bgl_attr, pipes in self._PIPELINE_TABLE:
@@ -452,8 +391,7 @@ class GPUPipeline:
     # ------------------------------------------------------------------
 
     def upload_lut(self, lut_table: np.ndarray):
-        """Upload a LUT table to the GPU. Call once per vibe change.
-        lut_table: float32 array of shape (N, N, N, 3), N=lut_size."""
+        """Upload an (N, N, N, 3) LUT for the current thread."""
         if not self._init():
             return
         flat = np.ascontiguousarray(lut_table.astype(np.float32)).ravel()
@@ -496,11 +434,7 @@ class GPUPipeline:
         return result.reshape(shape)
 
     def _download(self, buf, shape) -> np.ndarray:
-        """Read an arbitrary resident storage buffer back into a float32 array.
-
-        Same readback as the per-op methods, but against a buffer the caller
-        already owns (used by Frame.cpu()). Allocates its own staging buffer.
-        """
+        """Read a storage buffer back into a float32 array."""
         if not self._init():
             raise RuntimeError("GPU device unavailable")
         n = int(np.prod(shape))
@@ -514,25 +448,19 @@ class GPUPipeline:
         return result.reshape(shape)
 
     # ------------------------------------------------------------------
-    # Texture-resident image transfer (rgba32float working space)
+    # Texture transfer
     # ------------------------------------------------------------------
     #
-    # The resident render image is an rgba32float 2D texture. f32 (not f16) is
-    # the right call *here*: this pipeline is CPU-bound, and half-float would
-    # trade ~29 ms of CPU conversion per render (≈130 ms on the slow Windows
-    # CPU) to save ~25 MB of GPU memory — sub-ms of bandwidth at 3 MP. f32 keeps
-    # full precision (so the resident path matches the f32 CPU oracle to float
-    # rounding), needs no pack/unpack passes, and costs only 2D texture
-    # bandwidth we have to spare. RGB carries the image; alpha is 1.0. Most
-    # stages use textureLoad (no filtering); the rare stage that wants bilinear
-    # does it manually, so f32's non-filterability costs nothing.
+    # Images live in rgba32float textures, alpha unused. Not f16: the pipeline
+    # is CPU-bound, and packing to half floats costs ~29 ms of CPU per render
+    # (~130 ms on a slow Windows machine) to save bandwidth we don't need. f32
+    # also keeps results matching the CPU versions to rounding. Stages use
+    # textureLoad, so f32 not being filterable doesn't matter.
 
     _TEX_FORMAT = 'rgba32float'
 
     def _create_tex(self, shape):
-        # Inside a render scope, reuse a pooled texture of this shape (kills the
-        # per-frame allocation churn); otherwise allocate a fresh one as before
-        # (per-op paths and tests are unaffected).
+        # Pooled inside a render scope, fresh otherwise.
         if self._arena.active:
             return self._arena.acquire_tex(shape, lambda: self._alloc_tex(shape))
         return self._alloc_tex(shape)
@@ -565,15 +493,12 @@ class GPUPipeline:
         return tex
 
     def _download_tex(self, tex, shape) -> np.ndarray:
-        """Read an rgba32float texture back into an (H, W, 3) float32 array.
-
-        copy_texture_to_buffer requires bytes_per_row to be a multiple of 256,
-        so we copy into a row-padded buffer and strip the padding on the host.
-        """
+        """Read a texture back into an (H, W, 3) float32 array."""
         if not self._init():
             raise RuntimeError("GPU device unavailable")
         h, w = shape[:2]
-        unpadded = w * 16                     # rgba32float = 16 bytes / texel
+        # bytes_per_row must be a multiple of 256.
+        unpadded = w * 16
         padded = ((unpadded + 255) // 256) * 256
         buf = self._device.create_buffer(
             size=padded * h,
@@ -593,17 +518,12 @@ class GPUPipeline:
         return np.ascontiguousarray(rgba[:, :, :3], dtype=np.float32)
 
     # ------------------------------------------------------------------
-    # Resident stages (Frame -> Frame). These never upload or read back;
-    # transfers happen only when a caller asks a Frame for the other side.
+    # Frame -> Frame stages. They don't transfer anything themselves and
+    # return None if there's no GPU, so the caller can fall back.
     # ------------------------------------------------------------------
 
     def encode_frame(self, frame: "Frame"):
-        """ACEScct encode, texture-resident: Frame in -> Frame out, no readback.
-
-        Resident twin of kernels.acescct_encode — same math (clamped to 1e-10),
-        but consumes and produces a GPU texture so it chains with neighbouring
-        GPU stages. Returns None if the GPU is unavailable (caller falls back).
-        """
+        """ACEScct encode. CPU version: kernels.acescct_encode."""
         if not self._init():
             return None
         h, w = frame.shape[:2]
@@ -622,12 +542,7 @@ class GPUPipeline:
         return Frame.from_gpu(dst, frame.shape, self)
 
     def lut_frame(self, frame: "Frame"):
-        """Tetrahedral 3D LUT, texture-resident: Frame in -> Frame out.
-
-        Resident twin of apply_lut — same Sakamoto tetrahedral math against the
-        persistently-uploaded LUT (see upload_lut). Returns None if the GPU is
-        unavailable or no LUT is loaded (caller falls back).
-        """
+        """Tetrahedral LUT with the uploaded table. None if no LUT is loaded."""
         if not self._init() or self._lut_buf is None:
             return None
         h, w = frame.shape[:2]
@@ -649,11 +564,7 @@ class GPUPipeline:
         return Frame.from_gpu(dst, frame.shape, self)
 
     def blur_frame(self, frame: "Frame", sigma: float):
-        """Separable Gaussian blur, texture-resident: Frame in -> Frame out.
-
-        Matches gpu.gaussian_blur (clamp-to-edge, same normalised kernel) but
-        keeps the image on the GPU. Both passes share one command encoder.
-        """
+        """Separable Gaussian blur, clamp-to-edge."""
         if not self._init():
             return None
         if sigma <= 0:
@@ -661,14 +572,8 @@ class GPUPipeline:
         return self._separable_blur(frame, self._gauss_kernel(sigma))
 
     def blur_frame_exp(self, frame: "Frame", lam: float):
-        """Separable EXPONENTIAL blur, texture-resident: Frame in -> Frame out.
-
-        Same separable machinery as blur_frame but with a 1-D exp(-|x|/lam)
-        kernel, so the 2-D response is exp(-(|x|+|y|)/lam): a sharp central cusp
-        with a long tail. This is the halation falloff — film back-reflection
-        decays roughly exponentially, which reads as a *defined* halo rather
-        than a Gaussian's soft shoulder. See halation_frame.
-        """
+        """Separable exp(-|x|/lam) blur: a sharp peak with a long tail, used
+        for the halation scatter."""
         if not self._init():
             return None
         if lam <= 0:
@@ -676,12 +581,8 @@ class GPUPipeline:
         return self._separable_blur(frame, self._exp_kernel(lam))
 
     def disc_blur(self, frame: "Frame", radius: float):
-        """Disc (circle-of-confusion) blur: average within `radius` texels.
-
-        The defined-edge halation core (see disc_blur_tex.wgsl). Single 2D pass,
-        O(r^2); halation runs it at half res, so radius is already halved by the
-        caller. radius <= 0 is a no-op.
-        """
+        """Average within `radius` texels (a defocus disc). O(r^2), so it's
+        run at half resolution."""
         if not self._init():
             return None
         if radius <= 0:
@@ -732,7 +633,7 @@ class GPUPipeline:
         return Frame.from_gpu(dst, frame.shape, self)
 
     def _run2d(self, pipeline, bind_group, w: int, h: int):
-        """Submit a single 2D compute pass over a w*h image (8x8 workgroups)."""
+        """One compute pass over w*h in 8x8 workgroups."""
         enc = self._device.create_command_encoder()
         cp = enc.begin_compute_pass()
         cp.set_pipeline(pipeline)
@@ -742,9 +643,7 @@ class GPUPipeline:
         self._device.queue.submit([enc.finish()])
 
     def _downsample(self, frame: "Frame", factor: int):
-        """Area-average downsample by ``factor``, texture-resident. Used to shrink
-        a layer before a wide blur (halation glow); floors at 4 px so a tiny
-        preview can't collapse to nothing."""
+        """Box downsample by ``factor``, at least 4 px."""
         h, w = frame.shape[:2]
         small_shape = (max(4, h // factor), max(4, w // factor), 3)
         sh, sw = small_shape[:2]
@@ -757,8 +656,7 @@ class GPUPipeline:
         return Frame.from_gpu(dst, small_shape, self)
 
     def _upsample(self, frame: "Frame", target_shape):
-        """Bilinear upsample to ``target_shape``, texture-resident (the inverse of
-        _downsample for the downsample -> blur -> upsample glow path)."""
+        """Bilinear upsample to ``target_shape``."""
         th, tw = target_shape[:2]
         dst = self._create_tex(target_shape)
         bg = self._device.create_bind_group(layout=self._upsample_bg_layout, entries=[
@@ -783,8 +681,7 @@ class GPUPipeline:
     def _halation_highlights(self, img: "Frame", mask: "Frame", tint):
         h, w = img.shape[:2]
         dst = self._create_tex(img.shape)
-        # tint is (r, g, b) with the scale weight folded in; std140 pads vec3 to
-        # 16 bytes, so a trailing float keeps the uniform 16-byte aligned.
+        # vec3 tint padded to 16 bytes.
         uni = self._uniform(struct.pack('4f', tint[0], tint[1], tint[2], 0.0))
         bg = self._device.create_bind_group(layout=self._hal_hi_bg_layout, entries=[
             {'binding': 0, 'resource': img.gpu().create_view()},
@@ -813,13 +710,7 @@ class GPUPipeline:
 
     def halation_frame(self, frame: "Frame", threshold: float, blur_radius: float,
                        strength: float, warmth_pct: float = 100.0, k: float = 20.0):
-        """Three-scale halation, fully texture-resident: Frame in -> Frame out.
-
-        Mirrors effects.apply_halation (same scale table, tints and screen
-        blend) but uploads once and reads back once instead of the many
-        CPU<->GPU round-trips the per-op path makes. Returns None if the GPU is
-        unavailable (caller falls back to the numpy/buffer path).
-        """
+        """Three-scale halation. CPU version: effects.apply_halation."""
         if not self._init():
             return None
 
@@ -829,12 +720,8 @@ class GPUPipeline:
             mask = self._halation_mask(frame, thresh, k)
             mask = self.blur_frame(mask, 2.0)
             hi = self._halation_highlights(frame, mask, tint)
-            # All scales blur at half resolution: quarter the pixels, half the
-            # size, then bilinear-upsample. ~8x cheaper, and for the disc the
-            # upsample IS the rim-soften we want (a softened bokeh). The 'disc'
-            # core gives the defined circle-of-confusion edge; 'exp' tails are
-            # the fainter diffuse scatter. Tint is baked into `hi` upstream, so
-            # the downsample preserves it.
+            # Blur at half resolution: ~8x cheaper, and the bilinear upsample
+            # softens the disc rim, which looks better anyway.
             small = self._downsample(hi, 2)
             if small is None:
                 return None
@@ -852,26 +739,15 @@ class GPUPipeline:
         return self._halation_combine(frame, glows, strength)
 
     # ------------------------------------------------------------------
-    # Post-LUT resident tail (display sRGB): softness, grain, sharpen
+    # Post-LUT stages (display sRGB)
     # ------------------------------------------------------------------
 
     def softness_frame(self, frame: "Frame", sigma: float):
-        """Film-softness Gaussian blur, texture-resident: Frame in -> Frame out.
-
-        Resident twin of effects.apply_softness — it is exactly a separable
-        Gaussian blur, so this just forwards to blur_frame (kept as a named
-        stage so the post-LUT chain reads like the per-op pipeline).
-        """
+        """CPU version: effects.apply_softness."""
         return self.blur_frame(frame, sigma)
 
     def sharpen_frame(self, frame: "Frame", strength: float, radius: float):
-        """Unsharp-mask sharpen, texture-resident: Frame in -> Frame out.
-
-        Resident twin of effects.apply_sharpen: blur the image, then combine
-        ``img + (img - blurred) * strength`` (same math as gpu.unsharp_mask),
-        all on the GPU. The result is left unclamped, matching the per-op path;
-        the host clips once after the final readback.
-        """
+        """Unsharp mask, unclamped. CPU version: effects.apply_sharpen."""
         if not self._init():
             return None
         blurred = self.blur_frame(frame, radius)
@@ -892,14 +768,8 @@ class GPUPipeline:
     def grain_frame(self, frame: "Frame", grain_layer: np.ndarray,
                     intensity: float, min_grain: float = 0.2,
                     highlight_bias: float = 0.0):
-        """Film-grain blend, texture-resident: Frame in -> Frame out.
-
-        Resident twin of gpu.grain_blend — same per-channel falloff math. The
-        grain layer is generated on the CPU (random tiles, see processor) and
-        uploaded as a texture here; the image itself stays GPU-resident, so this
-        saves the image upload+readback of the per-op path. ``grain_layer`` must
-        be an (H, W, 3) float32 array matching ``frame``'s spatial size.
-        """
+        """Blend a CPU-generated (H, W, 3) grain layer. Same math as
+        grain_blend."""
         if not self._init():
             return None
         h, w = frame.shape[:2]
@@ -916,15 +786,8 @@ class GPUPipeline:
         return Frame.from_gpu(dst, frame.shape, self)
 
     def ca_frame(self, frame: "Frame", scale: float, samples: int = 16):
-        """Spectral chromatic aberration, texture-resident: Frame in -> Frame out.
-
-        Resident twin of effects.apply_chromatic_aberration (the spectral model):
-        integrates ``samples`` points across the spectrum, each radially
-        displaced by its own magnification (red at 1.0, blue at 1.0 + ``scale``)
-        and weighted by that band's RGB sensitivity. ``scale`` is the same value
-        the per-op path takes (ca_pixels_to_scale). Returns None if the GPU is
-        unavailable, or the input Frame unchanged when there's nothing to do.
-        """
+        """Spectral CA: ``samples`` wavelengths, magnified from 1.0 (red) to
+        1.0 + scale (blue). CPU version: effects.apply_chromatic_aberration."""
         if not self._init():
             return None
         if scale <= 0:
@@ -942,14 +805,8 @@ class GPUPipeline:
 
     def edge_softness_frame(self, frame: "Frame", sigma: float, strength: float,
                             start: float):
-        """Radial edge (corner) softness, texture-resident: Frame in -> Frame out.
-
-        Blurs the frame once (blur_frame) and blends sharp->blurred with a weight
-        that grows from ``start`` (as a fraction of the corner radius) out to the
-        corners, scaled by ``strength`` (0..1). Resident twin of
-        effects.apply_edge_softness. Returns the input unchanged when there is
-        nothing to do, or None if the GPU is unavailable.
-        """
+        """Blend toward a blurred copy from ``start`` (fraction of the corner
+        radius) outward. CPU version: effects.apply_edge_softness."""
         if not self._init():
             return None
         if strength <= 0 or sigma <= 0:
@@ -970,15 +827,13 @@ class GPUPipeline:
         return Frame.from_gpu(dst, frame.shape, self)
 
     # ------------------------------------------------------------------
-    # Pre-LUT resident stages (linear ACEScg): vignette
+    # Pre-LUT stages (linear ACEScg)
     # ------------------------------------------------------------------
 
     def vignette_frame(self, frame: "Frame", strength: float, color_shift: float,
                        feather: float):
-        """Cosine vignette with cool-edge tint, texture-resident: Frame in ->
-        Frame out. Resident twin of effects.apply_vignette (linear ACEScg).
-        Returns the input unchanged when strength<=0, or None if no GPU.
-        """
+        """Cosine vignette with a cool edge tint. CPU version:
+        effects.apply_vignette."""
         if not self._init():
             return None
         if strength <= 0:
@@ -996,14 +851,8 @@ class GPUPipeline:
         return Frame.from_gpu(dst, frame.shape, self)
 
     def bloom_frame(self, frame: "Frame", strength: float, threshold: float):
-        """Large-radius bloom, texture-resident: Frame in -> Frame out.
-
-        Resident twin of effects.apply_bloom (the linear/additive render path):
-        area-downsample 4x, mask highlights above ``threshold`` (ACEScct), blur
-        the small layer, bilinear-upsample and add ``strength`` * layer back.
-        Everything stays on the GPU. Returns the input unchanged when there's
-        nothing to do, or None if the GPU is unavailable.
-        """
+        """Downsample 4x with a highlight mask, blur, upsample and add.
+        CPU version: effects.apply_bloom."""
         if not self._init():
             return None
         if strength <= 0:
@@ -1013,7 +862,7 @@ class GPUPipeline:
         bh, bw = max(4, h // scale), max(4, w // scale)
         small_shape = (bh, bw, 3)
 
-        # Stage 1: area-downsample + highlight mask -> small bloom source.
+        # Downsample + highlight mask.
         small = self._create_tex(small_shape)
         uni_dm = self._uniform(struct.pack('4f', float(threshold), 0.0, 0.0, 0.0))
         bg_dm = self._device.create_bind_group(layout=self._bloom_dm_bg_layout, entries=[
@@ -1023,15 +872,13 @@ class GPUPipeline:
         ])
         self._run2d(self._bloom_dm_pipeline, bg_dm, bw, bh)
 
-        # Blur the small layer (same kernel as the per-op gaussian_blur).
-        # Derive sigma from the long downsampled edge so the glow size is
-        # orientation-invariant (rotation swaps bw/bh but not their max).
+        # Sigma from the long edge so rotation doesn't change the glow.
         sigma = max(2, max(bw, bh) // 5)
         blurred = self.blur_frame(Frame.from_gpu(small, small_shape, self), float(sigma))
         if blurred is None:
             return None
 
-        # Stage 2: bilinear upsample + additive blend onto the full image.
+        # Upsample + add.
         dst = self._create_tex(frame.shape)
         uni_ua = self._uniform(struct.pack('4f', float(strength), 0.0, 0.0, 0.0))
         bg_ua = self._device.create_bind_group(layout=self._bloom_ua_bg_layout, entries=[
@@ -1044,7 +891,7 @@ class GPUPipeline:
         return Frame.from_gpu(dst, frame.shape, self)
 
     def _cnr_io(self, pipeline, src_tex, shape):
-        """Run a CNR tex->tex pass (Lab transform) and return the dst texture."""
+        """ACEScg <-> Lab pass."""
         h, w = shape[:2]
         dst = self._create_tex(shape)
         bg = self._device.create_bind_group(layout=self._cnr_io_bg_layout, entries=[
@@ -1055,7 +902,7 @@ class GPUPipeline:
         return dst
 
     def _cnr_lab_pass(self, pipeline, src_tex, shape, uni):
-        """Run a Lab->Lab CNR pass (despike or bilateral) with a uniform."""
+        """Despike or bilateral pass in Lab."""
         h, w = shape[:2]
         dst = self._create_tex(shape)
         bg = self._device.create_bind_group(layout=self._cnr_bil_bg_layout, entries=[
@@ -1067,16 +914,10 @@ class GPUPipeline:
         return dst
 
     def cnr_frame(self, frame: "Frame", sigma: float, despike=(0.0, 0.0)):
-        """Chroma noise reduction in Lab, texture-resident: Frame in -> Frame out.
+        """Chroma NR: optional despike, then a bilateral on a*/b* in Lab.
 
-        Resident twin of effects.reduce_color_noise_chroma: ACEScg -> Lab, an
-        optional 3x3-median outlier clamp on a*/b* (``despike`` = the
-        (thr_green, thr_other) pair from config.cnr_despike_thresholds; skipped
-        when thr_green<=0), then an edge-preserving bilateral on a*/b* only (L*
-        untouched, so luma is preserved), then Lab -> ACEScg. Window/sigmas
-        mirror the cv2 call (d = max(5, int(sigma)*2+3) odd, range sigma 15).
-        Returns the input unchanged when sigma<=0 and despike is off, or None if
-        the GPU is unavailable.
+        ``despike`` comes from config.cnr_despike_thresholds. The window
+        matches the cv2 version, effects.reduce_color_noise_chroma.
         """
         if not self._init():
             return None
@@ -1105,10 +946,6 @@ class GPUPipeline:
     def _uniform(self, data: bytes):
         # Uniform buffers must be multiples of 16 bytes
         padded = data + b'\x00' * (16 - len(data) % 16) if len(data) % 16 else data
-        # Inside a render scope, reuse a pooled buffer of this size and rewrite it
-        # in place (write_buffer) instead of allocating a fresh one per stage. The
-        # pool is keyed by byte length, so the returned buffer's .size matches the
-        # data — callers that bind {'size': uni.size} stay correct unchanged.
         if self._arena.active:
             buf = self._arena.acquire_uni(len(padded), lambda n=len(padded): self._device.create_buffer(
                 size=n,
@@ -1123,8 +960,8 @@ class GPUPipeline:
 
     def _dispatch(self, pipeline, bind_group, n_elements: int, workgroup_size: int = 256):
         n_wg = (n_elements + workgroup_size - 1) // workgroup_size
-        # WebGPU limits each dispatch dimension to 65535; use 2D for large images.
-        # Shaders reconstruct the linear index as: id.y * (65535 * workgroup_size) + id.x
+        # Dispatch dimensions are limited to 65535, so large images go 2D.
+        # Shaders rebuild the index as id.y * (65535 * workgroup_size) + id.x
         if n_wg <= 65535:
             nx, ny = n_wg, 1
         else:
@@ -1139,11 +976,11 @@ class GPUPipeline:
         return enc
 
     # ------------------------------------------------------------------
-    # Public GPU operations
+    # Buffer operations (numpy in, numpy out)
     # ------------------------------------------------------------------
 
     def apply_lut(self, img: np.ndarray) -> np.ndarray:
-        """Apply the currently-uploaded LUT via tetrahedral interpolation."""
+        """Tetrahedral LUT with the uploaded table."""
         if not self._init() or self._lut_buf is None:
             return None
         h, w = img.shape[:2]
@@ -1171,11 +1008,7 @@ class GPUPipeline:
         return result.reshape(h, w, 3)
 
     def color_transform(self, img: np.ndarray, M: np.ndarray) -> np.ndarray | None:
-        """Per-pixel 3x3 colour-space transform: out = (img.reshape(-1,3) @ M.T).
-
-        Load-time helper for raw -> ACEScg. Returns None if the GPU is
-        unavailable (caller falls back to numpy). M is a (3, 3) float array.
-        """
+        """img @ M.T per pixel. Used at load for raw -> ACEScg."""
         if not self._init():
             return None
         shape = img.shape
@@ -1204,7 +1037,7 @@ class GPUPipeline:
         return result.reshape(shape)
 
     def acescct_decode(self, img: np.ndarray) -> np.ndarray:
-        """ACEScct → linear. Operates in-place semantics (returns new array)."""
+        """ACEScct → linear."""
         if not self._init():
             return None
         orig_shape = img.shape
@@ -1284,34 +1117,6 @@ class GPUPipeline:
         buf_stg.unmap()
         return result.reshape(orig_shape)
 
-    def screen_blend(self, base: np.ndarray, blend: np.ndarray) -> np.ndarray:
-        """Screen blend: 1 - (1-base)*(1-blend)."""
-        if not self._init():
-            return None
-        orig_shape = base.shape
-        n = base.size
-
-        buf_base  = self._upload(base.ravel())
-        buf_blend = self._upload(blend.ravel())
-        buf_out   = self._make_output(n)
-        buf_stg   = self._make_staging(n)
-        uni       = self._uniform(struct.pack('4f', 0.0, 0.0, 0.0, 0.0))
-
-        bg = self._device.create_bind_group(layout=self._blend_bg_layout, entries=[
-            {'binding': 0, 'resource': {'buffer': buf_base,  'offset': 0, 'size': buf_base.size}},
-            {'binding': 1, 'resource': {'buffer': buf_blend, 'offset': 0, 'size': buf_blend.size}},
-            {'binding': 2, 'resource': {'buffer': buf_out,   'offset': 0, 'size': buf_out.size}},
-            {'binding': 3, 'resource': {'buffer': uni,       'offset': 0, 'size': uni.size}},
-        ])
-        enc = self._dispatch(self._screen_pipeline, bg, n)
-        enc.copy_buffer_to_buffer(buf_out, 0, buf_stg, 0, n * 4)
-        self._device.queue.submit([enc.finish()])
-
-        buf_stg.map_sync(mode=wgpu.MapMode.READ)
-        result = np.frombuffer(buf_stg.read_mapped(), dtype=np.float32).copy()
-        buf_stg.unmap()
-        return result.reshape(orig_shape)
-
     def unsharp_mask(self, image: np.ndarray, blurred: np.ndarray, strength: float) -> np.ndarray:
         """Unsharp mask: image + (image - blurred) * strength."""
         if not self._init():
@@ -1346,7 +1151,7 @@ class GPUPipeline:
 
     @staticmethod
     def _gauss_kernel(sigma: float) -> np.ndarray:
-        """Compute a normalised 1-D Gaussian kernel matching cv2's auto-size rule."""
+        """Normalised 1-D Gaussian, radius 3 sigma."""
         radius = max(1, int(round(sigma * 3)))
         x = np.arange(-radius, radius + 1, dtype=np.float32)
         k = np.exp(-0.5 * (x / sigma) ** 2).astype(np.float32)
@@ -1354,22 +1159,15 @@ class GPUPipeline:
 
     @staticmethod
     def _exp_kernel(lam: float) -> np.ndarray:
-        """Normalised 1-D exponential kernel exp(-|x|/lam).
-
-        Sized to 4*lam: the exp tail decays slower than a Gaussian, so it needs
-        a wider window than the 3-sigma Gaussian rule to avoid truncating the
-        halo. Must match kernels.exp_blur (the numpy oracle)."""
+        """Normalised 1-D exp(-|x|/lam), radius 4 lam so the tail isn't cut
+        off. Must match kernels.exp_blur."""
         radius = max(1, int(round(lam * 4)))
         x = np.arange(-radius, radius + 1, dtype=np.float32)
         k = np.exp(-np.abs(x) / lam).astype(np.float32)
         return k / k.sum()
 
     def gaussian_blur(self, img: np.ndarray, sigma: float) -> np.ndarray | None:
-        """Separable Gaussian blur on a single-channel or 3-channel image.
-
-        Accepts (H, W) single-channel or (H, W, 3) three-channel float32 arrays.
-        Returns the same shape. Returns None if GPU unavailable.
-        """
+        """Separable Gaussian blur on an (H, W) or (H, W, 3) array."""
         if not self._init():
             return None
         if sigma <= 0:
@@ -1377,7 +1175,7 @@ class GPUPipeline:
 
         single_ch = img.ndim == 2
         if single_ch:
-            img3 = img[:, :, np.newaxis]   # treat as 1-channel
+            img3 = img[:, :, np.newaxis]
             num_ch = 1
         else:
             img3 = img
@@ -1390,7 +1188,7 @@ class GPUPipeline:
 
         flat = np.ascontiguousarray(img3.astype(np.float32)).ravel()
         buf_in  = self._upload(flat)
-        buf_mid = self._make_output(n)   # intermediate between H and V
+        buf_mid = self._make_output(n)
         buf_out = self._make_output(n)
         buf_stg = self._make_staging(n)
         buf_k   = self._device.create_buffer_with_data(
@@ -1409,7 +1207,7 @@ class GPUPipeline:
         enc1 = self._dispatch(self._gauss_pipeline_h, bg_h, h * w, workgroup_size=64)
         self._device.queue.submit([enc1.finish()])
 
-        # Vertical pass: buf_mid → buf_out (separate submit ensures H finishes first)
+        # Vertical pass: buf_mid → buf_out
         bg_v = self._device.create_bind_group(layout=self._gauss_bg_layout, entries=[
             {'binding': 0, 'resource': {'buffer': buf_mid, 'offset': 0, 'size': buf_mid.size}},
             {'binding': 1, 'resource': {'buffer': buf_k,   'offset': 0, 'size': buf_k.size}},
@@ -1431,22 +1229,11 @@ class GPUPipeline:
 
 
 class Frame:
-    """Render-scoped image handle that lazily lives on the CPU or the GPU.
+    """An (H, W, 3) image held as a float32 array, a GPU texture, or both.
 
-    Holds one image in (H, W, 3) layout. The CPU side is float32; the GPU side
-    is an rgba32float 2D texture (the resident render representation, full f32 —
-    see the _TEX_FORMAT note for why f32 not f16 here). Making a stage
-    GPU-resident changes only *where* the pixels live, not the values, so a
-    resident round-trip is lossless against the f32 CPU oracle.
-
-    The "truth" is on whichever side last wrote it. ``cpu()`` and ``gpu()``
-    materialise the other side on demand and cache it, so a CPU<->GPU transfer
-    happens only at a real backend boundary. When two GPU-resident stages run
-    back to back the intermediate never round-trips through numpy — that is the
-    entire point of the resident-by-default guideline: as stages are converted
-    to take and return GPU-backed Frames, the transfers between converted
-    neighbours drop out on their own, with no stage knowing about its
-    neighbours.
+    cpu() and gpu() create the missing side on demand and cache it, so
+    consecutive GPU stages never go through numpy. Frames are written once;
+    stages return new ones.
     """
 
     __slots__ = ("_p", "_cpu", "_tex", "_shape")
@@ -1463,12 +1250,12 @@ class Frame:
 
     @classmethod
     def from_cpu(cls, arr, pipeline: "GPUPipeline" = None) -> "Frame":
-        """Wrap a numpy array. No upload happens until .gpu() is first called."""
+        """Wrap a numpy array. Uploads on the first .gpu()."""
         return cls(pipeline or gpu, cpu=arr)
 
     @classmethod
     def from_gpu(cls, tex, shape, pipeline: "GPUPipeline" = None) -> "Frame":
-        """Wrap a GPU texture. No readback happens until .cpu() is called."""
+        """Wrap a texture. Reads back on the first .cpu()."""
         return cls(pipeline or gpu, tex=tex, shape=shape)
 
     @property
@@ -1477,25 +1264,20 @@ class Frame:
 
     @property
     def on_gpu(self) -> bool:
-        """True if the image currently has a GPU-resident (texture) copy."""
         return self._tex is not None
 
     def cpu(self) -> np.ndarray:
-        """Return the image as float32, reading back from the GPU only if needed."""
         if self._cpu is None:
             self._cpu = self._p._download_tex(self._tex, self._shape)
         return self._cpu
 
     def gpu(self):
-        """Return the rgba32float texture, uploading from the CPU only if needed."""
         if self._tex is None:
             self._tex = self._p._upload_tex(self._cpu)
         return self._tex
 
 
-# Singleton — one GPU device shared across the app
 gpu = GPUPipeline()
-# LOFILOGIC_FORCE_CPU=1 forces the numpy/cv2 fallback paths even when wgpu is
-# available — for debugging the CPU oracle or reproducing no-GPU behaviour.
+# LOFILOGIC_FORCE_CPU=1 uses the numpy paths even when wgpu is available.
 _FORCE_CPU = os.environ.get('LOFILOGIC_FORCE_CPU', '').lower() in ('1', 'true', 'yes')
 HAS_GPU = _WGPU_AVAILABLE and not _FORCE_CPU

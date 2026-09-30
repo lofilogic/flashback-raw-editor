@@ -1,12 +1,9 @@
-// Bloom stage 2 (texture-resident): bilinear upsample of the blurred bloom layer
-// + additive blend onto the full-res image.
-//
-// Twin of the second half of effects.apply_bloom (linear path):
+// Bloom, second half: upsample the blurred layer and add it.
 //   bloom_layer = bilinear_upsample(blurred_small)        # cv2 INTER_LINEAR
 //   out         = max(0, full + bloom_layer * strength)
 //
-// The upsample uses cv2's coordinate convention: src = (dst+0.5)*ssize/dsize-0.5,
-// bilinear with clamp-to-edge. rgba32float is not filterable, so it's manual.
+// Manual bilinear (f32 isn't filterable) with cv2's convention:
+// src = (dst+0.5)*ssize/dsize-0.5, clamp-to-edge.
 
 struct U {
     strength: f32,

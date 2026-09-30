@@ -1,11 +1,6 @@
-// Disc (circle-of-confusion) blur: averages every texel within `radius` of the
-// centre. This is the halation core kernel — back-reflection off the film base
-// is a defocused copy of the highlights (a geometric circle of confusion set by
-// base thickness), so it has a DEFINED edge, unlike a Gaussian/exponential that
-// only decays. Not separable, so this is a single O(r^2) 2D pass; halation runs
-// it at half resolution (the bilinear upsample afterwards is the rim-soften).
-//
-// `radius` is in texels of THIS texture; r2 = radius*radius (the circle test).
+// Average of all texels within `radius`. The halation core: back-reflection
+// off the film base is a defocused copy of the highlights, with a defined
+// edge. Not separable, O(r^2), so it runs at half resolution.
 
 struct U { r2: f32, radius: i32, _p0: f32, _p1: f32, }
 

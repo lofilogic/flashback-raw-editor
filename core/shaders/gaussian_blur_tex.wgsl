@@ -1,13 +1,5 @@
-// Separable Gaussian blur, texture-resident twin of gaussian_blur.wgsl.
-//
-// Run main_h (horizontal) then main_v (vertical). Reads/writes rgba32float
-// textures so blurs chain with neighbouring resident stages without a readback.
-// Boundary handling is clamp-to-edge, matching the buffer version. Kernel is a
-// pre-normalised 1-D Gaussian storage buffer; its length is the tap count.
-//
-// All four channels are blurred uniformly: for 3-channel data alpha is a
-// constant (1.0) and blurs to 1.0; for single-channel masks the value is
-// replicated across channels, so .r carries the result either way.
+// Separable blur on textures: main_h, then main_v. Clamp-to-edge. The kernel
+// buffer's length is the tap count; it's also used for the exponential blur.
 
 @group(0) @binding(0) var                  src:    texture_2d<f32>;
 @group(0) @binding(1) var<storage, read>   kernel: array<f32>;

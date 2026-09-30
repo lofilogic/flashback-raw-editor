@@ -1,11 +1,5 @@
-// Unsharp mask, texture-resident twin of blend.wgsl `main_unsharp`.
-//
 // out = img + (img - blurred) * strength
-//
-// Same math as gpu.unsharp_mask but reads/writes rgba32float textures so the
-// sharpen stage chains with neighbouring resident stages without a readback.
-// The result is intentionally NOT clamped (the per-op path doesn't clamp here
-// either); the final clip happens once on the host after the readback.
+// Not clamped; the render clips once at the end.
 
 struct Uniforms {
     strength: f32,

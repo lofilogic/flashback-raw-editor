@@ -1,23 +1,18 @@
-"""Headless render-pipeline benchmark — no GUI, deterministic, cross-platform.
+"""Render benchmark without the GUI.
 
-Loads one DNG through the real FlashbackProcessor and runs the full-quality
-render several times, printing the built-in per-stage timing (the same
-LOFILOGIC_DEBUG_TIMING output the app emits) plus a per-run wall time and a
-median. Run the identical command on the M3 and the Windows/3090 box to get an
-apples-to-apples, slider-free comparison of where the milliseconds go.
-
-This is a measurement tool only — it never writes an image and never changes
-pipeline output.
+Loads one DNG and runs the full render several times, printing the
+per-stage timings (LOFILOGIC_DEBUG_TIMING) and the median wall time. Useful
+for comparing machines.
 
 Usage:
     python tools/bench_pipeline.py path/to/file.dng
     python tools/bench_pipeline.py path/to/file.dng --vibe disposable --runs 7
 
 Vibes: flashback_classic_v1 (default), disposable, point_shoot, rangefinder,
-       monochrome — these drive which effects run (CA, grain, bloom, etc.).
+       monochrome.
 """
 import os
-# Must be set before any core.* import so core.config picks it up at module load.
+# Before any core import.
 os.environ.setdefault("LOFILOGIC_DEBUG_TIMING", "1")
 
 import sys
@@ -30,7 +25,7 @@ import statistics
 # Make the repo root importable when run as `python tools/bench_pipeline.py`.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# INFO so the GPU adapter line ("✓ GPU pipeline ready: ...") is visible.
+# INFO shows which GPU adapter was picked.
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 from core.config import vibe_config_for, VIBE_PRESETS, ImageAdjustments  # noqa: E402
@@ -64,18 +59,13 @@ def main():
     vibe = vibe_config_for(args.vibe)
     processor = FlashbackProcessor(vibe=vibe, adjustments=ImageAdjustments())
 
-    # The processor loads self.lut from the vibe's lut_ref, but uploading it to
-    # the GPU buffer is normally the editor's job (ui/editor.py). Without this
-    # the GPU LUT path returns None and falls back to slow CPU trilinear, so the
-    # bench must mirror the editor to measure the real GPU LUT cost.
+    # The editor normally uploads the LUT; without it the CPU LUT would run.
     if processor.lut is not None:
         gpu.upload_lut(processor.lut.table)
         print(f"  LUT uploaded to GPU buffer (size {processor.lut.table.shape})")
     else:
         print("  ⚠ no LUT resolved for this vibe — tone-curve path will run instead")
 
-    # load_image emits its own load-stage timings (raw_develop, raw->ACEScg,
-    # halation, ...) and triggers lazy GPU init (logs the adapter line).
     print("\n--- load (includes raw develop, highlight recovery, halation) ---")
     if processor.load_image(args.dng) is None:
         print("✗ load failed — see log above")
@@ -86,7 +76,7 @@ def main():
     for i in range(args.runs):
         print(f"\n[run {i + 1}/{args.runs}]")
         t0 = time.time()
-        processor.render_export()          # full render, downscale=False
+        processor.render_export()
         dt = (time.time() - t0) * 1000.0
         times_ms.append(dt)
         print(f"  >> full render wall: {dt:8.2f} ms")

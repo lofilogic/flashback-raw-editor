@@ -1,15 +1,8 @@
-// Separable Gaussian blur — two entry points share the same bind group layout.
+// Separable Gaussian blur on a flat buffer: main_h, then main_v.
+// 1 or 3 interleaved channels: index = (y * width + x) * num_channels + c.
 //
-// Run main_h first (horizontal pass), then main_v (vertical pass) on the result.
-// Both passes support 1-channel (H×W) and 3-channel (H×W×3) images via
-// the num_channels uniform. Images are stored as flat f32 arrays with
-// interleaved channels: index = (y * width + x) * num_channels + c.
-//
-// Kernel weights are a pre-computed normalised 1-D Gaussian passed as a
-// storage buffer. Boundary pixels are handled by clamping to edge (repeat
-// the edge value), which matches cv2.BORDER_REFLECT_101... actually
-// cv2.GaussianBlur default is BORDER_REFLECT_101 but BORDER_REPLICATE is
-// close enough for the large sigmas we use here (halation, CNR, desat).
+// Clamp-to-edge. cv2 defaults to BORDER_REFLECT_101, which is close enough at
+// these sigmas.
 
 struct Uniforms {
     width:        u32,
@@ -25,7 +18,7 @@ struct Uniforms {
 
 @compute @workgroup_size(64)
 fn main_h(@builtin(global_invocation_id) id: vec3u) {
-    let pixel = id.y * 4194240u + id.x; // 65535 * 64 — supports 2D dispatch for large images
+    let pixel = id.y * 4194240u + id.x; // 65535 * 64, for 2D dispatch
     if pixel >= u.width * u.height { return; }
 
     let x    = i32(pixel % u.width);

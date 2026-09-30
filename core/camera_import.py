@@ -1,5 +1,4 @@
-"""Helpers for importing DNGs from a connected Flashback camera into
-date-named subfolders of the app output directory."""
+"""Import DNGs from a connected camera into <root>/<YYYY-MM-DD>/_RAW/."""
 import logging
 import os
 import shutil
@@ -15,20 +14,17 @@ log = logging.getLogger(__name__)
 
 
 def date_folder_name(dt: datetime) -> str:
-    """ISO 8601 (YYYY-MM-DD) — unambiguous across regions and sorts
-    chronologically when listed alphabetically."""
     return dt.strftime('%Y-%m-%d')
 
 
 def read_capture_date(source_path: Path) -> datetime:
-    """Best-effort capture date for a DNG. Falls back to file mtime."""
+    """Capture date from EXIF, else the file mtime."""
     try:
         with open(source_path, 'rb') as f:
             tags = exifread.process_file(f, details=False, stop_tag='EXIF DateTimeOriginal')
         for key in ('EXIF DateTimeOriginal', 'Image DateTime', 'EXIF DateTimeDigitized'):
             if key in tags:
                 raw = str(tags[key]).strip()
-                # Standard EXIF format: 'YYYY:MM:DD HH:MM:SS'
                 for fmt in ('%Y:%m:%d %H:%M:%S', '%Y-%m-%d %H:%M:%S'):
                     try:
                         return datetime.strptime(raw, fmt)
@@ -40,14 +36,14 @@ def read_capture_date(source_path: Path) -> datetime:
 
 
 def target_path_for(source: Path, output_root: Path) -> Path:
-    """Resolve <output_root>/<YYYY-MM-DD>/_RAW/<source.name> for a camera DNG."""
+    """<output_root>/<YYYY-MM-DD>/_RAW/<source.name>"""
     dt = read_capture_date(source)
     folder = output_root / date_folder_name(dt) / '_RAW'
     return folder / source.name
 
 
 def _embed_thumb_from_display(display_img):
-    """Downscale a processor display image to a small RGB embed thumbnail."""
+    """120 px high thumbnail for the DNG."""
     if display_img is None or display_img.size == 0:
         return None
     h, w = display_img.shape[:2]
@@ -60,21 +56,15 @@ def _embed_thumb_from_display(display_img):
 
 
 def export_camera_dng(source_path, target_path, processor):
-    """Load source via `processor`, derive a small embedded thumbnail, and
-    export the DNG to `target_path`.
+    """Load the source, write it as our DNG, or copy it if that fails.
 
-    Falls back to a plain file copy if the DNG rewrite fails. Returns the
-    display image the processor produced (or None) so callers can reuse it
-    instead of reading the file a second time.
+    Returns the rendered image so the caller doesn't have to load it again.
     """
     source_str = str(source_path)
     target_str = str(target_path)
     img_display = processor.load_image(source_str)
     embed_thumb = _embed_thumb_from_display(img_display)
     os.makedirs(os.path.dirname(target_str), exist_ok=True)
-    # ProfileName is an app-wide preference (see editor._apply_vibe), so an
-    # imported DNG must carry the same one the Export > DNG route writes —
-    # otherwise the name the user chose only ever reaches exported files.
     profile_name = processor.vibe.dng_profile_name
     if not export_dng(source_str, target_str, embed_thumb, profile_name):
         log.warning("DNG rewrite failed; falling back to copy: %s", source_str)
@@ -83,13 +73,8 @@ def export_camera_dng(source_path, target_path, processor):
 
 
 def plan_imports(sources, output_root: Path):
-    """Return (to_import, skipped).
-
-    to_import: list[(source_path, target_path)] for files that need exporting.
-    skipped: list[target_path] for files whose target already exists, in the
-        order they appear among `sources` — useful when the caller wants to
-        still surface those already-imported files in the thumbnail strip.
-    """
+    """Returns (to_import, skipped): (source, target) pairs to import, and
+    targets that already exist, in source order."""
     to_import = []
     skipped = []
     for src in sources:

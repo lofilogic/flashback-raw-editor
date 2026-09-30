@@ -1,17 +1,9 @@
-"""Save/load LoFi Logic project files (.lofi; legacy .fbproj still opens).
+"""Project files (.lofi, and the old .fbproj).
 
-A project file is JSON containing:
-  - schema version
-  - list of image file paths (stored relative to the project file when on the
-    same drive; absolute otherwise — projects survive being moved alongside
-    their image tree, and absolute paths still work for images outside it)
-  - per-image settings dict (path -> ImageAdjustments.to_dict())
-  - per-image rotation dict (path -> degrees)
-  - current selected index
-
-Paths in `image_settings` and `image_rotations` always use the original
-absolute path of the image file at load time (the in-memory representation),
-not the relative form stored on disk. Conversion happens at save/load.
+JSON with the image list, per-image settings and rotations, and the current
+index. Image paths are stored relative to the project where possible, so a
+project can be moved together with its images. In memory, paths are always
+absolute.
 """
 import json
 import logging
@@ -21,44 +13,32 @@ from pathlib import Path, PurePosixPath
 log = logging.getLogger(__name__)
 
 PROJECT_EXT = '.lofi'
-# Pre-rename extension. Still accepted on open (the file is identified by its
-# JSON content, not its suffix); new saves always use PROJECT_EXT.
+# Opens, but new saves use PROJECT_EXT.
 LEGACY_PROJECT_EXT = '.fbproj'
 SCHEMA_VERSION = 2
 
 
 def _to_portable(image_path: Path, project_dir: Path) -> str:
-    """Return a string path suitable for serialising in the project file.
-
-    Uses a POSIX-style relative path when the image lives on the same drive
-    as the project (works across OSes). Falls back to the platform-native
-    absolute path when relativisation isn't possible.
-    """
+    """POSIX relative path if on the same drive, else absolute."""
     image_path = image_path.resolve()
     try:
         rel = image_path.relative_to(project_dir.resolve())
         return str(PurePosixPath(*rel.parts))
     except ValueError:
-        # Not under project_dir; try a common-ancestor relative path so e.g.
-        # a sibling folder still serialises portably.
         try:
             rel = os.path.relpath(image_path, start=project_dir.resolve())
-            # Reject if the relative path escapes to a different drive on
-            # Windows (relpath raises ValueError for that case).
             if os.path.isabs(rel):
                 return str(image_path)
             return str(PurePosixPath(*Path(rel).parts))
-        except ValueError:
+        except ValueError:  # different drive on Windows
             return str(image_path)
 
 
 def _from_portable(stored: str, project_dir: Path) -> Path:
-    """Inverse of _to_portable. Resolves stored value to an absolute Path."""
-    # Absolute path on either OS → use as-is.
+    """Inverse of _to_portable."""
     p = Path(stored)
     if p.is_absolute() or (len(stored) >= 2 and stored[1] == ':'):
         return p
-    # Treat as POSIX-style relative; convert separators for the host OS.
     posix = PurePosixPath(stored)
     return (project_dir / Path(*posix.parts)).resolve()
 
@@ -70,9 +50,8 @@ def save_project(path, image_files, image_settings, image_rotations=None, curren
         path = path.with_suffix(PROJECT_EXT)
     project_dir = path.parent
 
-    # Map every input form (pre- and post-resolve) to its portable form so
-    # the dict-rekey below tolerates callers that pass keys as `/tmp/x` while
-    # image_files holds Path('/tmp/x') (resolves to /private/tmp/x on macOS).
+    # Map both the given and the resolved path, since they can differ
+    # (/tmp -> /private/tmp on macOS).
     abs_to_portable = {}
     stored_files = []
     for p in image_files:
@@ -91,16 +70,13 @@ def save_project(path, image_files, image_settings, image_rotations=None, curren
                         or abs_to_portable.get(str(Path(k_str).resolve())
                                               if Path(k_str).exists() else k_str))
             if portable is None:
-                # Unknown image (e.g. setting for a file no longer in the
-                # project) — keep the original key so we don't silently drop.
                 portable = k_str
             out[portable] = v
         return out
 
     payload = {
         'schema': SCHEMA_VERSION,
-        'app': 'flashback_editor',   # on-disk format marker — keep (the rename
-                                     # didn't change it so older projects still load)
+        'app': 'flashback_editor',   # format marker, predates the rename
         'image_files': stored_files,
         'image_settings': _rekey(image_settings),
         'image_rotations': {k: int(v) for k, v in _rekey(image_rotations).items()},
@@ -111,12 +87,8 @@ def save_project(path, image_files, image_settings, image_rotations=None, curren
 
 
 def load_project(path):
-    """Read a project file.
-
-    Returns (image_files, image_settings, image_rotations, current_index).
-    Image paths are returned as absolute Paths. Missing image files are
-    dropped; their settings/rotations are dropped with them.
-    """
+    """Returns (image_files, image_settings, image_rotations, current_index).
+    Missing images are dropped."""
     path = Path(path)
     project_dir = path.parent
     payload = json.loads(path.read_text())
@@ -142,7 +114,7 @@ def load_project(path):
         for k, v in (d or {}).items():
             abs_key = portable_to_abs.get(k)
             if abs_key is None:
-                # Tolerate older v1 payloads that stored absolute keys directly.
+                # Schema 1 stored absolute keys.
                 if Path(k).exists():
                     abs_key = str(Path(k).resolve())
                 else:

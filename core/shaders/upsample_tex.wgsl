@@ -1,9 +1,4 @@
-// Bilinear upsample, texture-resident (rgba32float).
-//
-// Reads a small src and writes a larger dst, manual bilinear (f32 textures are
-// not filterable, so no hardware sampler). Same cv2 coordinate convention +
-// clamp-to-edge as bloom_upadd.wgsl, but a plain resize with no additive blend —
-// the upsample half of halation's downsample -> blur -> upsample glow.
+// Bilinear upsample to the size of dst. Same convention as bloom_upadd.wgsl.
 
 @group(0) @binding(0) var small: texture_2d<f32>;
 @group(0) @binding(1) var dst:   texture_storage_2d<rgba32float, write>;

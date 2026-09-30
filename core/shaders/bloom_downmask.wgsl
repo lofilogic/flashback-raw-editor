@@ -1,9 +1,4 @@
-// Bloom stage 1 (texture-resident): area-downsample + highlight mask.
-//
-// Twin of the first half of effects.apply_bloom (linear path). Each output texel
-// area-averages its src block (~4x4), then keeps only the highlights: luma is
-// taken with ACEScg/AP1 weights, ACEScct-encoded, and turned into a soft mask
-// above `threshold`; the masked, downsampled colour is written out for blurring.
+// Bloom, first half: box downsample + highlight mask. See effects.apply_bloom.
 //
 //   small   = mean(src over block)
 //   luma    = dot(small, AP1)

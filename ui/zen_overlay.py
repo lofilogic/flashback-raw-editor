@@ -1,9 +1,5 @@
 """
-Frameless fullscreen "zen" overlay — distraction-free preview with gesture-
-based exposure / WB / tint adjustments.
-
-Communicates with the main editor via signals (closed / navigated / rotated)
-and direct calls on `self.main_window` (set as the parent at construction).
+Zen mode: fullscreen preview with mouse-drag exposure, WB and tint.
 """
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QWidget, QLabel, QPushButton
@@ -41,7 +37,6 @@ class FullscreenZenOverlay(QWidget):
         self._current_raw_pixmap = None
 
     def update_preview(self, pixmap):
-        """Stores the pixmap and triggers a redraw."""
         if not pixmap or pixmap.isNull():
             return
         self._current_raw_pixmap = pixmap
@@ -52,7 +47,7 @@ class FullscreenZenOverlay(QWidget):
         self._recalculate_layout()
 
     def _recalculate_layout(self):
-        """The math that prevents jumping and handles Retina scaling."""
+        """Fit the pixmap to the screen, accounting for the device pixel ratio."""
         if self._current_raw_pixmap is None:
             return
 
@@ -115,8 +110,7 @@ class FullscreenZenOverlay(QWidget):
         if event.buttons() & Qt.LeftButton:
             if self.lock_axis == 'v':
                 move_y = (curr_pos.y() - self.drag_start_pos.y())
-                # Divisor sets vertical-drag sensitivity: full exposure range
-                # (~0.40 units) sweeps over ~300 px of travel. Larger = calmer.
+                # Full exposure range over ~300 px of drag.
                 val = self.base_exposure + (-move_y / 750.0)
                 self.main_window.slider_exposure.setValue(int(val * 100))
             elif self.lock_axis == 'h':
@@ -133,9 +127,8 @@ class FullscreenZenOverlay(QWidget):
         self.drag_start_pos = None
         self.lock_axis = None
 
-        # Persist the gesture-adjusted values for the current image. The
-        # slider_*Released handlers do this in normal mode; zen drives the
-        # sliders via setValue() and bypasses those signals entirely.
+        # Zen sets the sliders with setValue(), which skips the release
+        # handlers that normally save.
         self.main_window.save_current_settings()
 
         img_array = self.main_window.processor._render_fast()
@@ -166,9 +159,8 @@ class FullscreenZenOverlay(QWidget):
             self.main_window.reset_all_sliders()
         elif event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
             self.remove_requested.emit()
-            # If that emptied the project, close ourselves here — closing from
-            # within zen's own keyPressEvent is more reliable than scheduling
-            # hide() from the main-window handler.
+            # Close here if nothing is left; more reliable than from the main
+            # window.
             if not self.main_window.image_files:
                 self.close_zen()
         elif event.key() in (Qt.Key_1, Qt.Key_2, Qt.Key_3, Qt.Key_4, Qt.Key_5):

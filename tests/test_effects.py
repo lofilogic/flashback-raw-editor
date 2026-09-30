@@ -1,9 +1,5 @@
 """
-Tests for image-effect functions.
-
-These don't check that the result *looks* right — they check shape, dtype,
-and the explicit "strength=0 means no-op" contracts that the render
-pipeline relies on for short-circuiting.
+Shape, dtype and strength=0 checks for the effect functions.
 """
 import numpy as np
 import pytest

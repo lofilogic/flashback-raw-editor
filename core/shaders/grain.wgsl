@@ -1,5 +1,4 @@
-// Film grain blend with luma-based highlight bias.
-// Formula matches the Numba kernel exactly:
+// Grain blend on a flat buffer. Same as kernels.apply_grain:
 //   grain_delta = (2*grain - 1) * intensity
 //   weight = (1-bias)*(1-pixel) + bias*pixel
 //   falloff = min_grain + weight*(1-min_grain)
@@ -19,7 +18,7 @@ struct Uniforms {
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) id: vec3u) {
-    let i = id.y * 16776960u + id.x; // 65535 * 256 — supports 2D dispatch for large images
+    let i = id.y * 16776960u + id.x; // 65535 * 256, for 2D dispatch
     if i >= arrayLength(&image) { return; }
     let img_val    = image[i];
     let grain_val  = grain[i];

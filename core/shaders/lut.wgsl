@@ -1,9 +1,5 @@
-// Tetrahedral 3D LUT interpolation (Sakamoto algorithm).
-//
-// Tetrahedral uses 4 cell corners instead of trilinear's 8, and divides
-// each cube cell into 6 tetrahedra. This eliminates the color discontinuities
-// at cell boundaries that trilinear produces, and is the algorithm used by
-// DaVinci Resolve and other professional color tools.
+// Tetrahedral 3D LUT interpolation on a flat buffer. Avoids the colour
+// errors trilinear gives at cell boundaries.
 //
 // LUT layout: flat array[lut_size * lut_size * lut_size * 3]
 //   index = ((r_idx * lut_size + g_idx) * lut_size + b_idx) * 3 + channel
@@ -68,7 +64,7 @@ fn tetrahedral(rgb: vec3f) -> vec3f {
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3u) {
-    let pixel = id.y * 4194240u + id.x; // 65535 * 64 — supports 2D dispatch for large images
+    let pixel = id.y * 4194240u + id.x; // 65535 * 64, for 2D dispatch
     if pixel >= u.width * u.height { return; }
     let base = pixel * 3u;
     let result = tetrahedral(vec3f(img_in[base], img_in[base + 1u], img_in[base + 2u]));

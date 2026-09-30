@@ -1,9 +1,5 @@
-// Tetrahedral 3D LUT interpolation — texture-resident twin of lut.wgsl.
-//
-// Identical Sakamoto tetrahedral math (kept deliberately: it avoids the cell-
-// boundary hue errors hardware trilinear would introduce). Only the image I/O
-// moves to textures so the LUT can chain with neighbouring resident stages;
-// the LUT table itself stays a storage buffer (small, indexed not sampled).
+// Tetrahedral LUT on textures, same math as lut.wgsl. The table stays a
+// storage buffer.
 
 struct Uniforms {
     lut_size: u32,

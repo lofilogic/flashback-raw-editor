@@ -1,9 +1,4 @@
-// Area-average downsample, texture-resident (rgba32float).
-//
-// Each output texel averages its source block; dst is smaller than src. Used to
-// shrink a layer before a wide blur (halation glow) so the expensive blur runs
-// on far fewer pixels — the glow is low-frequency, so the lost detail is
-// imperceptible. Same area-average as bloom_downmask.wgsl, without the mask.
+// Box downsample to the size of dst, before wide blurs.
 
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var dst: texture_storage_2d<rgba32float, write>;

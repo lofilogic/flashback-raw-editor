@@ -1,5 +1,4 @@
-// Halation highlight mask: sigmoid of the ACEScct-encoded luma above a
-// threshold. Matches the numpy mask in effects._halation_glow:
+// Halation mask, as in effects._halation_glow:
 //   gray = max(r,g,b);  m = 1/(1+exp(-k*(encode(gray) - threshold)))
 
 struct U { threshold: f32, k: f32, _p0: f32, _p1: f32, }

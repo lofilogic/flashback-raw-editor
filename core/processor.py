@@ -1,7 +1,7 @@
 """
-Flashback One35 raw processor — DNG-spec color pipeline.
+Develop and render.
 
-Pipeline (Flashback DNG):
+Flashback DNG:
     rawpy.postprocess(user_wb=[1,1,1,1], user_black=SENSOR_BLACK,
                       gamma=(1,1), output_color=raw, output_bps=16)
       -> raw RGB (pre-WB)
@@ -10,16 +10,16 @@ Pipeline (Flashback DNG):
     XYZ_D50 = FM1 @ raw_wb
     ACEScg = XYZ_D50_TO_ACESCG @ XYZ_D50          <- cached intermediate
     user WB + tint + exposure + push/pull (linear ACEScg)
-    bloom / vignette (linear ACEScg)
-    CNR in Lab space
+    vignette / bloom (linear ACEScg)
+    CNR in Lab
     ACEScct encode -> LUT -> post-LUT effects -> display sRGB
 
-Pipeline (generic raw — non-Flashback):
+Other raws:
     rawpy.postprocess(user_wb=daylight_whitebalance, output_color=sRGB,
                       gamma=(1,1), half_size=True, output_bps=16)
       -> linear sRGB (libraw applies camera matrix + daylight WB)
     linear sRGB -> ACEScg via LINSRGB_TO_ACESCG    <- cached intermediate
-    same render pipeline from here (LUT, sliders, grain, etc.)
+    same render pipeline from here
 """
 import logging
 import os
@@ -72,12 +72,7 @@ from .effects import (
 
 @contextmanager
 def _timed(label: str):
-    """Log wall-time for a single render stage.
-
-    Diagnostic only: the actual printing is gated inside _timing_print by the
-    LOFILOGIC_DEBUG_TIMING env flag, so this is a no-op (beyond two time reads)
-    in normal runs and never touches the rendered output.
-    """
+    """Print a stage's wall time if LOFILOGIC_DEBUG_TIMING is set."""
     t0 = time.time()
     try:
         yield
@@ -89,14 +84,11 @@ def _timed(label: str):
 # COLOR MATRICES (DNG dual-illuminant)
 # =============================================================================
 
-# AsShotNeutral from real D50 grey-patch measurement (matches the asn
-# embedded in DNGs by core/dng_export.py and used by Camera Raw at render
-# time).
+# AsShotNeutral measured from a grey patch under D50. Also written to
+# exported DNGs.
 ASN_D50 = np.array([0.541, 1.0, 0.597], dtype=np.float32)
 
-# ForwardMatrix1: camera_wb_rgb (raw / ASN) -> XYZ_D50.
-# Calibrated under D50 daylight (matches CalibrationIlluminant1 in the
-# DNGs we emit and the --illuminant d50 flag used to derive the matrix).
+# ForwardMatrix1: (raw / ASN) -> XYZ_D50, calibrated under D50.
 FM1 = np.array([
     [0.53086, 0.22116, 0.21219],
     [0.08570, 0.98930, -0.07500],
@@ -131,9 +123,7 @@ XYZ_D50_TO_ACESCG = (XYZ_D60_TO_ACESCG @ BRADFORD_D50_TO_D60).astype(np.float32)
 # Fused: raw -> ACEScg (fast path, no highlight recovery).
 RAW_TO_ACESCG = (XYZ_D50_TO_ACESCG @ FM1_RAW_TO_XYZ_D50).astype(np.float32)
 
-# Fused: wb-normalised camera RGB (= raw / ASN) -> ACEScg.
-# Used in the highlight-recovery path to replace the two-step
-# rgb_wb -> XYZ -> ACEScg chain with a single matmul.
+# Fused: (raw / ASN) -> ACEScg, used after highlight recovery.
 FM1_WB_TO_ACESCG = (XYZ_D50_TO_ACESCG @ FM1).astype(np.float32)
 
 # ACEScg -> linear sRGB.
@@ -143,7 +133,7 @@ ACESCG_TO_LINSRGB = np.array([
     [-0.02400, -0.12897,  1.15297],
 ], dtype=np.float32)
 
-# linear sRGB -> ACEScg (for generic raw files developed via rawpy sRGB output).
+# linear sRGB -> ACEScg, for generic raws.
 LINSRGB_TO_ACESCG = np.linalg.inv(ACESCG_TO_LINSRGB).astype(np.float32)
 
 # XYZ -> linear sRGB (IEC 61966-2-1 / D65 primaries).
@@ -193,14 +183,13 @@ def _wb_shift_to_kelvin(daylight_wb: list, target_k: float,
     rgb_dl = np.clip(_XYZ_TO_LINSRGB @ _planckian_xyz(daylight_k), 1e-6, None)
     rgb_tg = np.clip(_XYZ_TO_LINSRGB @ _planckian_xyz(target_k),   1e-6, None)
     scale  = rgb_dl / rgb_tg
-    scale /= scale[1]                   # G is the Bayer reference channel
+    scale /= scale[1]
     wb     = list(daylight_wb)
     wb[0]  = float(wb[0] * scale[0])   # R
     wb[2]  = float(wb[2] * scale[2])   # B
     if len(wb) > 3:
-        # Sony ARW carries G2=0.0 as a sentinel meaning "G2 tracks G1"; any
-        # non-zero G2 is interpreted by libraw as an independent multiplier
-        # and collapses the WB to near-black. Preserve the sentinel.
+        # Sony uses G2=0 to mean "same as G1". libraw treats any other value
+        # as a real multiplier, so keep the 0.
         if daylight_wb[3] != 0.0:
             wb[3] = wb[1]
     return wb
@@ -240,8 +229,6 @@ def _srgb_eotf(x: np.ndarray) -> np.ndarray:
 _AP1_LUMA = np.array([0.2722287, 0.6740818, 0.0536895], dtype=np.float32)
 
 
-
-
 def _build_jpeg_curve_lut(points, size=4096):
     from scipy.interpolate import CubicSpline
     xs, ys = (np.array(v, dtype=np.float64) / 255.0 for v in zip(*points))
@@ -254,19 +241,16 @@ _PS_LUMA = np.array([0.30, 0.59, 0.11], dtype=np.float32)  # Photoshop Luminosit
 
 
 def _jpeg_tone_curve(acescg: np.ndarray, base_ev: float) -> np.ndarray:
-    """Apply JPEG_TONE_CURVE exactly as it was made: in the TIFF's ACEScct
-    space (incl. the vibe's base exposure offset), per channel, keeping only
-    the luminance change. Values above the TIFF's 0–1 range pass through."""
+    """Apply JPEG_TONE_CURVE the way it was made: in ACEScct including the
+    base exposure offset, luminance only. Values outside 0–1 pass through."""
     gain = np.float32(2.0 ** base_ev)
     enc = acescct_encode(np.maximum(acescg * gain, 1e-10)).astype(np.float32)
-    # Nearest-entry lookup (4096 steps ≫ 8-bit JPEG input); np.interp was
-    # ~20x slower. Outside 0–1 the clamped lookup equals the clamped input,
-    # so the delta is 0 and those values pass through unchanged.
+    # Nearest-entry lookup; 4096 steps is plenty for 8-bit input and
+    # np.interp was ~20x slower.
     n = len(_JPEG_CURVE_LUT)
     clamped = np.clip(enc, 0.0, 1.0)
     idx = (clamped * (n - 1) + 0.5).astype(np.int32)
-    # Luminosity mode, as made in Photoshop (per-channel looked worse); the
-    # lifted shadows this oversaturates are handled by JPEG_SHADOW_SATURATION.
+    # Luminosity blend like in Photoshop; per-channel looked worse.
     d = (_JPEG_CURVE_LUT[idx] - clamped) @ _PS_LUMA
     out = enc + d[..., None]
     return (acescct_decode(out.astype(np.float32)) / gain).astype(np.float32)
@@ -284,9 +268,9 @@ def _jpeg_pre_grade(acescg: np.ndarray, base_ev: float = 0.0) -> np.ndarray:
         y = (x @ _AP1_LUMA)[..., None]
         x = y + (x - y) * np.float32(JPEG_SATURATION)
     if JPEG_SHADOW_SATURATION != 1.0:
-        # The Luminosity-mode curve lifts shadows with their colour ratios
-        # intact, so they read oversaturated. Fade saturation toward JPEG_SHADOW_SATURATION below mid-grey, smoothly
-        # from -5 EV (full) to JPEG_SHADOW_SAT_END_EV (none).
+        # The curve lifts shadows with their colour ratios intact, so they
+        # look oversaturated. Fade saturation from -5 EV up to
+        # JPEG_SHADOW_SAT_END_EV.
         y = x @ _AP1_LUMA
         ev = np.log2(np.maximum(y, 1e-6) / np.float32(0.18))
         t = np.clip((ev + 5.0) / (JPEG_SHADOW_SAT_END_EV + 5.0), 0.0, 1.0)
@@ -319,11 +303,10 @@ def _apply_tone_curve(x: np.ndarray) -> np.ndarray:
 
 def _recover_highlights(rgb_raw: np.ndarray, asn: np.ndarray,
                         threshold: float = 0.95) -> np.ndarray:
-    """Highlight recovery operating in raw space (pre-WB).
+    """Highlight recovery in raw space, before WB.
 
-    For each clipped channel, estimates the lost value as the cube of the
-    average of the cube-roots of the other two channels, with a global
-    chrominance correction to preserve the scene's local color cast.
+    A clipped channel is estimated as the cube of the mean cube root of the
+    other two, plus a chrominance offset sampled around the clipped areas.
     """
     asn_inv = (1.0 / asn).astype(rgb_raw.dtype)
     rgb_wb  = rgb_raw * asn_inv
@@ -362,19 +345,14 @@ def _recover_highlights(rgb_raw: np.ndarray, asn: np.ndarray,
 # =============================================================================
 
 def _read_dng_exif(path: str) -> tuple:
-    """Single exifread pass — returns (is_flashback, exposure_seconds).
-
-    Replaces the previous pattern of calling _is_flashback_dng and
-    extract_exposure_seconds separately (2-3 file opens → 1).
-    """
+    """Returns (is_flashback, exposure_seconds)."""
     try:
         with open(path, 'rb') as f:
             tags = exifread.process_file(f, details=False)
         make = str(tags.get('Image Make', '')).strip().lower()
         is_flashback = (make == 'flashback')
         exp_s = None
-        # Exif IFD (where our DNG writer + Adobe put it) first, then IFD0
-        # (where the camera writes it directly).
+        # Our exported DNGs put it in the Exif IFD, the camera in IFD0.
         tag = tags.get('EXIF ExposureTime') or tags.get('Image ExposureTime')
         if tag is not None:
             from fractions import Fraction
@@ -385,30 +363,12 @@ def _read_dng_exif(path: str) -> tuple:
         return False, None
 
 
-# Tier-2 fallback: per-make exposure RESIDUAL (EV), added on top of
-# GENERIC_RAW_ANCHOR_EV, used ONLY for non-DNG raws that carry no embedded
-# BaselineExposure (Sony ARW, Fuji RAF, Pentax PEF, non-ProRAW Apple). It is the
-# per-camera difference from libraw's generic normalization level — the same job
-# BaselineExposure does for DNGs, but for these proprietary formats ACR uses an
-# internal per-model profile that is NOT present in the file, so there is no
-# universal signal to read and the value can only come from measurement.
+# Exposure residual (EV) on top of GENERIC_RAW_ANCHOR_EV for non-DNG raws,
+# which have no BaselineExposure to read. ACR keeps this per model inside its
+# own profiles, so these are measured by eye against ACR's default render
+# (2026-06-17). Only add cameras that have actually been measured.
 #
-# DELIBERATELY MEASURED-ONLY. We do not list cameras we haven't verified: an
-# unmeasured make is wrong in an unknown direction, whereas falling through to
-# the Tier-3 default (see _TIER3_DEFAULT_EV) is the lowest-risk universal choice.
-# Add an entry here only after measuring that body against an ACR-default render.
-#
-# Note on ISO: published Adobe BaselineExposure data (RawDigger, diglloyd) shows
-# the per-camera value is small and tightly clustered (~0..+0.35 EV) at native
-# ISO across makes; the large swings are ISO-dependent — down to ~-1 EV at
-# extended-LOW (pull) ISOs (50/64/80). DNGs capture this via Tier 1, but the
-# per-ISO term (Adobe BaselineExposureOffset) lives in the DCP profile, not the
-# raw, so non-DNG files here cannot read it. Consequence: these flat residuals
-# are accurate at native/standard ISO (the common case) but may render ~1 stop
-# bright at extended-low/pull ISOs. Accepted limitation — not worth per-camera
-# ISO tables for this app.
-#
-# Measured perceptually vs ACR default render, 2026-06-17:
+# Not ISO-aware: expect ~1 stop too bright at extended low ISOs (50-80).
 _BOOST_EV_BY_MAKE = {
     'sony':                         -1.00,   # ARW
     'fujifilm':                      0.00,   # via RAF
@@ -419,35 +379,26 @@ _BOOST_EV_BY_MAKE = {
     'apple':                        -0.50,   # non-ProRAW iPhone raw; ProRAW DNGs use Tier 1
 }
 
-# Used only when Make can't be read from EXIF — primarily Fuji RAF, which
-# is a proprietary container exifread can't parse. Residual on top of the
-# anchor; 0.00 measured for Fuji RAF on 2026-06-17.
+# For files exifread can't get a Make from (Fuji RAF).
 _BOOST_EV_BY_EXT = {
     '.raf': 0.00,
 }
 
-# Tier 3 residual (EV) for a non-DNG raw whose make/ext we have NOT measured.
-# Held at 0: the published-BaselineExposure centroid (~+0.2 EV) made unmeasured
-# bodies read consistently hot across a wide test set, so with no file-specific
-# or measured signal we apply no per-camera lift and let the anchor + base
-# offset stand alone.
+# Residual for unmeasured cameras. The average published BaselineExposure
+# (~+0.2 EV) made them consistently too bright, so 0.
 _TIER3_DEFAULT_EV = 0.0
 
-# DNG IFD0 tag 0xC62A (50730), BaselineExposure — the manufacturer/Adobe's
-# intended lift (EV) from raw mid-grey to display mid-grey. When present this is
-# the exact per-model/per-ISO value ACR honors, so we prefer it over the
-# hand-tuned per-make table. SRATIONAL (type 10): one signed num/den pair.
+# DNG BaselineExposure (IFD0, SRATIONAL). Preferred over the table above.
 _DNG_BASELINE_EXPOSURE_TAG = 0xC62A
 _TIFF_TYPE_SIZES = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8,
                     11: 4, 12: 8}
 
 
 def _read_dng_baseline_exposure(path: str) -> 'float | None':
-    """Read the embedded DNG ``BaselineExposure`` (EV), or ``None`` if absent.
+    """DNG BaselineExposure in EV, or None.
 
-    DNG is a TIFF, so we parse IFD0 directly rather than depend on a raw-aware
-    reader (libraw doesn't expose this tag, and tifffile isn't in the packaged
-    build). Returns ``None`` for non-DNG files, missing tag, or any parse error.
+    Parses IFD0 by hand: libraw doesn't expose the tag and tifffile isn't
+    bundled.
     """
     try:
         with open(path, 'rb') as f:
@@ -460,7 +411,7 @@ def _read_dng_baseline_exposure(path: str) -> 'float | None':
             elif bo == b'MM':
                 end = '>'
             else:
-                return None  # not a TIFF/DNG
+                return None
             if struct.unpack(end + 'H', header[2:4])[0] != 42:
                 return None
             ifd_off = struct.unpack(end + 'I', header[4:8])[0]
@@ -473,7 +424,7 @@ def _read_dng_baseline_exposure(path: str) -> 'float | None':
                     continue
                 val_field = entries[i*12+8:i*12+12]
                 size = _TIFF_TYPE_SIZES.get(typ, 0) * count
-                # SRATIONAL is 8 bytes → stored out-of-line at this offset.
+                # Values over 4 bytes are stored at an offset.
                 if size > 4:
                     off = struct.unpack(end + 'I', val_field)[0]
                     f.seek(off)
@@ -491,22 +442,12 @@ def _read_dng_baseline_exposure(path: str) -> 'float | None':
 
 
 def _read_generic_raw_boost_ev(path: str) -> float:
-    """Return the per-file exposure boost (EV) for a non-Flashback raw.
+    """Exposure boost (EV) for a non-Flashback raw.
 
-    Always ``GENERIC_RAW_ANCHOR_EV`` (re-anchors libraw's linear develop to the
-    FM1 intermediate level the render pipeline expects) plus a per-file residual,
-    chosen by a strict confidence tier:
-
-      Tier 1 — embedded DNG ``BaselineExposure``. The manufacturer/ACR's own
-        per-model/per-ISO intent; the only universal, non-guessed signal. Used
-        for any DNG (Ricoh GR, Pixel, iPhone ProRAW, DJI, Leica, DNG-converted).
-      Tier 2 — measured per-make residual, for the handful of proprietary-raw
-        bodies we have actually verified (see ``_BOOST_EV_BY_MAKE``). Proprietary
-        formats carry no readable exposure intent, so these come from measurement
-        only — never from un-verified ballpark.
-      Tier 3 — unknown body → anchor + _TIER3_DEFAULT_EV (the native-ISO centroid
-        of published Adobe BaselineExposure values), the lowest-risk default for
-        files we've never seen.
+    GENERIC_RAW_ANCHOR_EV plus the first of:
+      1. the DNG's BaselineExposure
+      2. the measured value for its make (_BOOST_EV_BY_MAKE)
+      3. _TIER3_DEFAULT_EV
     """
     anchor = GENERIC_RAW_ANCHOR_EV
 
@@ -541,15 +482,10 @@ def _read_generic_raw_boost_ev(path: str) -> float:
 # =============================================================================
 
 class FlashbackProcessor:
-    """Raw processor for Flashback DNGs and generic camera raws.
+    """Develops a file into the ACEScg intermediate and renders it.
 
-    Owns:
-      * vibe         — the active VibeConfig (film-stock settings)
-      * adjustments  — the per-image ImageAdjustments (sliders + rotation)
-
-    Both are passed by reference; the UI mutates them directly and the
-    next render picks up the new values. The processor never reads
-    global state.
+    ``vibe`` and ``adjustments`` are shared with the UI, which mutates them
+    directly; the next render picks up the change.
     """
 
     def __init__(self, vibe: VibeConfig = None, adjustments: ImageAdjustments = None):
@@ -574,16 +510,14 @@ class FlashbackProcessor:
             except Exception as e:
                 log.error("[processor] Could not load LUT %s: %s", path, e)
         elif self.vibe.lut_ref:
-            # Ref was set but resolved to nothing. The editor handles the
-            # user-facing notice; here we just log so the cause is visible.
+            # The editor shows the notice.
             log.warning("[processor] LUT ref %r could not be resolved (origin=%s)",
                         self.vibe.lut_ref, origin)
 
         self.grain_tiles = []
         self._load_grain_tiles()
-        # Multiplier on every px-denominated effect (halation/softness/sharpen
-        # radii, CA offset, grain tile size), set per image by
-        # _set_spatial_scale. Those effects are calibrated at WORKING_LONG_EDGE.
+        # Multiplier for pixel-sized effects, set per image by
+        # _set_spatial_scale.
         self.spatial_scale = 1.0
         self._scaled_grain_tiles = {}
         # Vignette strength multiplier; JPEGs set JPEG_VIGNETTE_MULT.
@@ -613,7 +547,7 @@ class FlashbackProcessor:
         if s == 1.0 or not self.grain_tiles:
             return self.grain_tiles
         if s not in self._scaled_grain_tiles:
-            self._scaled_grain_tiles.clear()  # scale varies per image; keep one
+            self._scaled_grain_tiles.clear()  # only keep the current scale
             self._scaled_grain_tiles[s] = [
                 cv2.resize(t, (max(1, round(t.shape[1] * s)), max(1, round(t.shape[0] * s))),
                            interpolation=cv2.INTER_LINEAR)
@@ -661,11 +595,10 @@ class FlashbackProcessor:
         return out
 
     def _resident_pre_lut_stages(self, v, lut_path):
-        """Build the pre-LUT resident stages (vignette -> bloom -> CNR) plus
-        matching CPU fallback ops, in render order. Vignette precedes bloom so
-        glow is generated from the vignetted image; CNR is gated to the LUT path
-        (legacy behaviour). Returns (stages, cpu_ops) where cpu_ops[i] is an
-        img->img callable mirroring stages[i] for the no-GPU fallback.
+        """Vignette -> bloom -> CNR, as (gpu_stages, cpu_ops) in the same order.
+
+        Vignette goes first so the glow comes from the darkened edges. CNR only
+        runs when a LUT is active.
         """
         stages, cpu_ops = [], []
         if v.enable_vignette and v.vignette_strength_pct > 0:
@@ -687,13 +620,10 @@ class FlashbackProcessor:
         return stages, cpu_ops
 
     def _resident_post_lut_stages(self, v, shape, grain_driver):
-        """Build the post-LUT resident tail (CA -> softness -> grain -> sharpen)
-        as a list of Frame->Frame stages, matching the per-op order and
-        parameters in _render's per-op block.
+        """CA -> edge softness -> softness -> grain -> sharpen.
 
-        Returns (stages, grain_layer). The grain layer is generated here (CPU,
-        random tiles) when grain is enabled so it exists regardless of which path
-        ultimately runs.
+        Returns (stages, grain_layer). The grain layer is made here on the CPU
+        so the CPU fallback can use the same one.
         """
         stages = []
         if v.enable_chromatic_aberration and v.ca_pixels > 0:
@@ -727,32 +657,24 @@ class FlashbackProcessor:
     # ---- generic raw pipeline ------------------------------------------------
 
     def _develop_generic_raw(self, path: str) -> np.ndarray:
-        """Develop a non-Flashback raw file to ACEScg using libraw's camera matrix.
+        """Develop a non-Flashback raw to ACEScg with libraw's camera matrix.
 
-        Uses rawpy's built-in camera profile (DNG metadata or libraw database)
-        with use_camera_wb=True so libraw applies pre_mul × cam_mul correctly
-        (see body comment); the camera WB is then undone and replaced with a
-        fixed BASE_KELVIN WB post-develop, so the downstream pipeline behaves
-        as if the file had been shot at the Flashback daylight reference.
-        Output is linear sRGB → converted to ACEScg before returning.
+        WB is fixed at BASE_KELVIN so the WB slider starts from the same
+        neutral as on Flashback files.
         """
         t0 = time.time()
         boost_ev = _read_generic_raw_boost_ev(path)
         boost_gain = float(2.0 ** boost_ev)
         with rawpy.imread(path) as raw:
-            # X-Trans uses a 6x6 CFA; libraw's half_size 2x2 binning misaligns
-            # the pattern and produces color aliasing. Detect via raw_pattern
-            # shape and take a full-size Markesteijn demosaic, then downscale.
-            # Some Sony ARWs (compressed/lossless variants) report raw_pattern
-            # as None; Sony has no X-Trans, so None means Bayer.
+            # X-Trans (6x6 CFA) aliases with 2x2 binning, so demosaic at full
+            # size and downscale. Some Sony ARWs report raw_pattern None; those
+            # are Bayer.
             is_xtrans = raw.raw_pattern is not None and raw.raw_pattern.shape != (2, 2)
 
             daylight_wb = list(raw.daylight_whitebalance or [])
             if not daylight_wb or all(v == 0.0 for v in daylight_wb):
                 daylight_wb = list(GENERIC_DAYLIGHT_WB_FALLBACK)
                 _timing_print(f"  [generic] daylight_whitebalance missing — using D65 fallback")
-            # Target BASE_KELVIN so the generic path lands at the same neutral
-            # point as the Flashback path before the WB slider takes over.
             fixed_wb = _wb_shift_to_kelvin(daylight_wb, BASE_KELVIN)
             _timing_print(f"  [generic] WB shifted D65->{BASE_KELVIN:.0f}K: "
                           f"[{fixed_wb[0]:.4f}, {fixed_wb[1]:.4f}, {fixed_wb[2]:.4f}]")
@@ -773,11 +695,8 @@ class FlashbackProcessor:
                 output_bps=16,
                 output_color=rawpy.ColorSpace.sRGB,
             ).astype(np.float32) / 65535.0
-            # Apply baseline boost in float space — libraw's `bright` parameter
-            # interacts with its auto-brightness state machine and is unreliable
-            # with no_auto_bright=True + linear gamma. Multiplying the float
-            # output is a clean, predictable linear gain; values above 1.0 will
-            # be reined back in by the highlight rolloff downstream.
+            # Boost here rather than with libraw's `bright`, which is unreliable
+            # with no_auto_bright and linear gamma.
             if boost_gain != 1.0:
                 rgb *= boost_gain
         _timing_print(f"  raw_develop (generic{', x-trans' if is_xtrans else ''}): "
@@ -798,11 +717,10 @@ class FlashbackProcessor:
         return acescg
 
     def _develop_srgb_jpeg(self, path: str) -> np.ndarray:
-        """EXPERIMENTAL: decode an sRGB JPEG to ACEScg.
+        """Experimental: sRGB JPEG to ACEScg.
 
-        Rough on purpose: undo the sRGB transfer curve and change primaries.
-        The camera's own tone curve and highlight clip stay baked in, so the
-        film look lands on an already-rendered image, not scene-linear data.
+        The camera's tone curve and clipping stay in; _jpeg_pre_grade only
+        roughly undoes the curve.
         """
         t0 = time.time()
         bgr = cv2.imread(path, cv2.IMREAD_COLOR)  # applies EXIF orientation
@@ -818,17 +736,11 @@ class FlashbackProcessor:
     # ---- public surface -------------------------------------------------------
 
     def get_settings(self) -> dict:
-        """Return a dict copy of the current per-image adjustments.
-
-        Returns a dict (not the ImageAdjustments instance) so the UI can
-        merge in extra fields like 'auto_tint' without touching the
-        canonical dataclass.
-        """
+        """Adjustments as a dict, so the UI can add fields like 'auto_tint'."""
         return self.adjustments.to_dict()
 
     def set_settings(self, adjustments):
-        """Update adjustments. Accepts either an ImageAdjustments instance or
-        a partial dict; unknown keys ignored."""
+        """Takes an ImageAdjustments or a partial dict."""
         if isinstance(adjustments, ImageAdjustments):
             self.adjustments = adjustments
         elif isinstance(adjustments, dict):
@@ -844,18 +756,15 @@ class FlashbackProcessor:
         self.adjustments.rotation = (self.adjustments.rotation - 90) % 360
         return self._apply_rotation_and_render()
 
-    def get_rotation(self):
-        return self.adjustments.rotation
-
     def _render_fast(self, downscale=False):
         return self._render(downscale=downscale)
 
     # ---- pipeline -------------------------------------------------------------
 
     def adopt_cached_intermediate(self, path, acescg):
-        """Make a cached intermediate current without re-developing it, and
-        restore the per-file effect scaling that load_image would have set
-        (otherwise the last *decoded* file's values would leak into this one)."""
+        """Switch to an already developed intermediate. Also resets the
+        per-file scaling, which would otherwise come from the last decoded
+        file."""
         self.intermediate_acescg = acescg
         self.current_file = path
         self.is_jpeg_file = os.path.splitext(path)[1].lower() in ('.jpg', '.jpeg')
@@ -863,10 +772,8 @@ class FlashbackProcessor:
         self._set_spatial_scale(acescg)
 
     def _set_spatial_scale(self, acescg):
-        """Scale px-denominated effects by the developed long edge relative to
-        the Flashback working size, so they keep the same size relative to the
-        frame. Flashback V2 (half_size) and V1 land on exactly 1.0; full-res
-        JPEGs and larger generic raws scale up."""
+        """Scale pixel-sized effects to the image size. 1.0 for Flashback
+        files."""
         self.spatial_scale = max(acescg.shape[:2]) / WORKING_LONG_EDGE
         if self.is_jpeg_file:
             self.spatial_scale *= JPEG_SPATIAL_MULT
@@ -894,8 +801,6 @@ class FlashbackProcessor:
             log.warning("[processor] TIFF import is not supported. Open the original DNG instead.")
             return None
 
-        # V1 negatives are headerless raw + sidecar JSON, not DNGs — detect
-        # them first and skip the (harmless but pointless) DNG EXIF probe.
         is_jpeg = os.path.splitext(dng_path)[1].lower() in ('.jpg', '.jpeg')
         is_v1 = not is_jpeg and is_v1_negative(dng_path)
         self.is_jpeg_file = is_jpeg
@@ -914,10 +819,6 @@ class FlashbackProcessor:
                 self._rev_gain = 1.0
                 self._rev_gain_unconditional = 1.0
             elif is_v1:
-                # Develop the V1 negative to the same ACEScg intermediate the
-                # DNG path emits, then bake halation so it gets the full film
-                # look. AE already metered each frame to mid-grey, so exposure
-                # rides the generic path's neutral reverse-AE gain.
                 acescg = develop_v1(dng_path)
                 self._set_spatial_scale(acescg)
                 acescg = self._bake_halation(acescg)
@@ -926,8 +827,8 @@ class FlashbackProcessor:
             elif is_flashback:
                 t0 = time.time()
                 with rawpy.imread(dng_path) as raw:
-                    # half_size=True performs 2x2 binning and skips demosaicing entirely,
-                    # so demosaic_algorithm has no effect — always pass LINEAR as a no-op.
+                    # half_size bins 2x2 instead of demosaicing; the algorithm
+                    # is ignored.
                     rgb = raw.postprocess(
                         demosaic_algorithm=rawpy.DemosaicAlgorithm.LINEAR,
                         user_wb=[1.0, 1.0, 1.0, 1.0],
@@ -954,7 +855,6 @@ class FlashbackProcessor:
                 _timing_print(f"  raw->ACEScg: {(time.time()-t0)*1000:6.2f} ms  "
                               f"range=[{acescg.min():.4f},{acescg.max():.4f}]")
 
-                # exp_s already read from the single EXIF pass above
                 self._rev_gain = (float(compute_reverse_gain(exp_s, self.vibe.reverse_autoexposure_t_ref))
                                   if (exp_s and self.vibe.enable_reverse_autoexposure) else 1.0)
                 self._rev_gain_unconditional = float(compute_reverse_gain(exp_s, self.vibe.reverse_autoexposure_t_ref)) if exp_s else 1.0
@@ -970,19 +870,12 @@ class FlashbackProcessor:
 
             self.intermediate_acescg = np.ascontiguousarray(acescg, dtype=np.float32)
 
-            # Always return a fast downscaled preview so the UI is responsive
-            # immediately. The caller is responsible for queuing a full-quality
-            # background render via RenderWorker.
+            # Quick downscaled preview; the caller queues the full render.
             result = self.render_preview(downscale=True)
             _timing_print(f"  TOTAL load: {(time.time()-total_start)*1000:6.2f} ms\n")
             return result
 
         except Exception as e:
-            # Returning None lets the caller (UI) decide how to surface the
-            # failure; the full traceback is logged for diagnostics. The
-            # exception is intentionally swallowed because load_image is the
-            # user-facing critical path and a half-loaded image is worse than
-            # a clean miss — we just need to make sure it can't fail silently.
             log.exception("[processor] load failed for %s: %s", dng_path, e)
             return None
 
@@ -996,8 +889,8 @@ class FlashbackProcessor:
 
     def _render(self, downscale=False):
         t0  = time.time()
-        v   = self.vibe          # film-stock parameters
-        a   = self.adjustments   # per-image sliders
+        v   = self.vibe
+        a   = self.adjustments
         img = self.intermediate_acescg
         if downscale:
             h, w = img.shape[:2]
@@ -1021,11 +914,7 @@ class FlashbackProcessor:
         grain_driver = f * rev_ev + push_pull_ev
         lut_path = v.enable_lut and self.lut is not None
 
-        # Resident stage lists (full-res only; downscale previews skip effects).
-        # Pre-LUT order is vignette -> bloom -> CNR: bloom is generated from the
-        # already-vignetted (illumination-falloff) image, as a real lens does, so
-        # dimmed perimeter highlights emit less glow and bloom concentrates where
-        # the image is actually bright.
+        # Downscaled previews skip the effects.
         pre_stages, pre_cpu = (([], []) if downscale
                                else self._resident_pre_lut_stages(v, lut_path))
         post_tail, grain_layer = (([], None) if downscale
@@ -1034,12 +923,8 @@ class FlashbackProcessor:
         img_display = None
         fully_fused = False
 
-        # Grand fusion: when a LUT is active, run the ENTIRE render — vignette,
-        # bloom, CNR, ACEScct-encode, LUT, CA, edge-softness, softness, grain,
-        # sharpen — as one resident chain with a single upload and single
-        # readback. The numpy max(img,1e-10) the per-op path puts before encode is
-        # unnecessary here: the encode shader already clamps to 1e-10. Any GPU
-        # miss returns None and the per-op pipeline below takes over unchanged.
+        # With a LUT, the whole render is one GPU chain: one upload, one
+        # readback. If it fails, the step-by-step path below runs instead.
         if not downscale and lut_path:
             with _timed("full render (resident)"):
                 img_display = run_resident(
@@ -1047,7 +932,7 @@ class FlashbackProcessor:
             fully_fused = img_display is not None
 
         if not fully_fused:
-            # ---- per-op pipeline (no-GPU fallback / downscale preview / non-LUT) ----
+            # Step by step: no GPU, downscaled preview, or no LUT.
             tail_done = False
             if pre_stages:
                 with _timed("pre-LUT (resident)"):
@@ -1082,9 +967,7 @@ class FlashbackProcessor:
                 lin_srgb = (prophoto.reshape(-1, 3) @ PROPHOTO_TO_LINSRGB).reshape(prophoto.shape)
                 img_display = _srgb_oetf(np.clip(lin_srgb, 0.0, 1.0))
 
-            # Post-LUT tail (CA -> edge-softness -> softness -> grain -> sharpen):
-            # one resident sub-chain, else per-op. Skipped when an upstream chain
-            # already ran it (tail_done) or on the downscale preview.
+            # Post-LUT effects, unless the chain above already ran them.
             if not downscale and not tail_done:
                 resident_tail = run_resident(img_display, post_tail) if post_tail else None
                 if resident_tail is not None:
@@ -1147,19 +1030,13 @@ class FlashbackProcessor:
 
 def export_image(processor, output_path, quality=95, as_tiff=False,
                  lut_profiling=False, reverse_ae=True):
-    """Export JPEG or ACEScct TIFF from the current processor state.
+    """Export a JPEG, or an ACEScct TIFF for LUT work in Resolve.
 
-    Standard export produces a JPEG. TIFF export (lut_profiling=True, via the
-    advanced panel) encodes the ACEScg intermediate as ACEScct with the vibe's
-    base exposure offset applied — the level the app feeds the LUT at default
-    exposure — for LUT work in DaVinci Resolve.
-
-    ``reverse_ae`` additionally undoes the camera's per-frame autoexposure (from
-    EXIF ExposureTime, via _rev_gain_unconditional). That's only wanted when
-    *profiling a film stock*, where every frame must be normalised to a common
-    reference level; it darkens/brightens each frame by its own shutter speed
-    (a normally-metered frame can drop several stops). Leave it off to preview a
-    hand-built LUT, so the TIFF matches what the app actually shows.
+    With lut_profiling the TIFF includes the base exposure offset, i.e. what
+    the LUT sees at default exposure. ``reverse_ae`` also undoes the camera's
+    autoexposure so every frame sits at the same reference level; that's for
+    profiling a film stock, not for previewing a LUT, since frames can move by
+    several stops.
     """
     output_dir = os.path.dirname(output_path)
     if output_dir and not os.path.exists(output_dir):

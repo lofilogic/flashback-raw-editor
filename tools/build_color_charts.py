@@ -7,7 +7,7 @@ For each pair (matched by filename stem):
   3. Farthest-point-sample in CIELAB on the film side to spread across the gamut.
   4. Sort by L (rows) then hue (within row) and render two charts with an
      identical grid layout — both as 16-bit TIFFs preserving raw
-     ACEScct/AP1 values (matches processor_v2 TIFF export).
+     ACEScct/AP1 values (matches the LUT-profiling TIFF export).
 
 The TIFFs are written with raw values preserved, so colormatch sees
 exactly the ACEScct/AP1 numbers your runtime LUT would receive.
@@ -407,7 +407,7 @@ def rgb_to_lab(rgb01: np.ndarray, colorspace: str) -> np.ndarray:
         lab = colour.XYZ_to_Lab(xyz, illuminant=cs.whitepoint).astype(np.float32)
     elif colorspace == 'acescct_ap1':
         # True ACEScct: log AP1 -> linear AP1 -> XYZ_D60 -> Lab. Matches what
-        # processor_v2's TIFF export writes.
+        # the LUT-profiling TIFF export writes.
         linear = _acescct_decode(flat)
         cs = colour.RGB_COLOURSPACES['ACEScg']
         xyz = colour.RGB_to_XYZ(linear, cs, apply_cctf_decoding=False)
@@ -564,7 +564,7 @@ def main():
                     default='acescct_ap1',
                     help='encoding of the DIGITAL TIFFs, used for perceptual '
                          'metrics on the digital side. Default acescct_ap1 '
-                         'matches processor_v2 TIFF output. Use '
+                         'matches the LUT-profiling TIFF export. Use '
                          'acescct_rec2020 for v1 TIFFs.')
     ap.add_argument('--flatness-metric', choices=['rgb', 'chroma'],
                     default='chroma',
@@ -575,7 +575,7 @@ def main():
     ap.add_argument('--exposure-boost-ev', type=float, default=0.0,
                     help='linear-space EV boost applied to digital pixels '
                          'before sampling. Default 0 — leave this at 0 if '
-                         'the digital TIFFs were exported from processor_v2 '
+                         'the digital TIFFs were exported from LoFi Logic '
                          'with enable_post_ae_exposure_boost ON (the boost '
                          'is already baked in). Set it to '
                          f'POST_AE_EXPOSURE_BOOST_EV ({POST_AE_EXPOSURE_BOOST_EV}) '

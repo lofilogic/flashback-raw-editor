@@ -1,9 +1,5 @@
-// Cosine vignette with a cool-edge tint, texture-resident.
-//
-// Twin of effects.apply_vignette (runs on linear ACEScg, pre-LUT). All channels
-// share the same `dark` falloff; per-channel edge offsets push the periphery
-// slightly cooler (red darkens a touch more, blue a touch less). Normalised
-// coords match numpy linspace(-1, 1, n): pixel i -> -1 + 2i/(n-1).
+// Cosine vignette with a cool edge, see effects.apply_vignette.
+// Coords match numpy linspace(-1, 1, n): pixel i -> -1 + 2i/(n-1).
 //
 //   r_norm  = clamp(length(xy) / sqrt(2), 0, 1)
 //   falloff = pow(0.5*(1+cos(pi*r_norm)), feather)
@@ -36,9 +32,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     let xy = vec2f(f32(gid.x), f32(gid.y)) / denom * 2.0 - vec2f(1.0);
 
     let r_norm  = clamp(length(xy) * INV_SQRT2, 0.0, 1.0);
-    // base is the cosine falloff in [0,1]; at the exact corners f32 cos(pi) can
-    // round just past -1, making base slightly negative -> pow(neg, frac) = NaN
-    // -> max(0, NaN) = 0 -> black corners. Guard with select so base<=0 -> 0.
+    // cos(pi) can round past -1 in the corners, and pow of a negative is NaN.
     let base    = 0.5 * (1.0 + cos(PI * r_norm));
     let falloff = select(pow(max(base, 0.0), u.feather), 0.0, base <= 0.0);
     let dark    = 1.0 - u.strength * (1.0 - falloff);

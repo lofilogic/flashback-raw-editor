@@ -1,9 +1,7 @@
-"""Design tokens for the LoFi Logic editor UI — one place for colors, fonts,
-spacing, and QSS snippets so the editor and widget modules stay consistent.
+"""Colours, fonts and shared stylesheets.
 
-The active palette lives in ``C`` (mutable dict). Switch themes at runtime via
-``set_theme("light" | "dark")``; registered listeners fire afterwards so the
-editor can re-apply stylesheets and force repaints without tearing down the UI.
+``C`` is the active palette. set_theme() updates it in place and calls the
+registered listeners so the editor can restyle.
 """
 
 from PySide6.QtCore import QByteArray, Qt
@@ -64,8 +62,7 @@ LIGHT_PALETTE = {
 PALETTES = {"light": LIGHT_PALETTE, "dark": DARK_PALETTE}
 _active_name = "light"
 
-# ``C`` is the live palette — modules import it once and continue to read the
-# same dict after a theme change because we mutate in place.
+# Updated in place, so modules can import it once.
 C: dict = {}
 C.update(LIGHT_PALETTE)
 
@@ -78,7 +75,7 @@ def current_theme() -> str:
 
 
 def set_theme(name: str) -> None:
-    """Swap the active palette in-place and fire listeners."""
+    """Switch palette and notify listeners."""
     global _active_name
     if name not in PALETTES:
         return
@@ -108,7 +105,7 @@ def unregister_theme_listener(callback) -> None:
 
 
 def qcolor(token: str) -> QColor:
-    """Convert a token (or raw hex/rgba string) to QColor."""
+    """Token or colour string -> QColor."""
     val = C.get(token, token)
     if val.startswith("rgba"):
         nums = val[val.index("(") + 1 : val.index(")")].split(",")
@@ -124,7 +121,7 @@ MONO_FONT = "JetBrains Mono"
 
 
 def load_app_fonts() -> None:
-    """Register bundled Inter + JetBrains Mono with QFontDatabase."""
+    """Register the bundled fonts."""
     for fname in (
         "Inter-Regular.ttf",
         "Inter-Medium.ttf",
@@ -148,7 +145,7 @@ def mono_font(size: int = 10, weight: QFont.Weight = QFont.Medium) -> QFont:
 
 # ── Icons ───────────────────────────────────────────────────────────────
 def svg_icon(rel_path: str, color_token: str = "text_label", size: int = 16) -> QIcon:
-    """Load an SVG from assets, tint it to a palette color, and return a QIcon."""
+    """SVG icon tinted with a palette colour."""
     from PySide6.QtSvg import QSvgRenderer
 
     abs_path = resource_path(rel_path)
@@ -233,8 +230,7 @@ def section_reset_link_qss() -> str:
 
 
 def process_btn_qss() -> str:
-    # Button text colour for readability on the accent fill: near-black on the
-    # dark theme's brighter orange, white on the light theme's muted orange.
+    # Dark text on the dark theme's brighter orange, white on the light one.
     btn_text = "#1a1410" if current_theme() == "dark" else "#ffffff"
     return f"""
         QPushButton {{

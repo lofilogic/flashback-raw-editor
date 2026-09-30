@@ -1,11 +1,7 @@
-"""Tests for the resident render image (core.gpu.Frame) and the first
-texture-resident stage (ACEScct encode).
+"""Tests for Frame and the GPU stages against their numpy versions.
 
-The resident GPU representation is an rgba16float texture, so round-trips are
-perceptually—not bit—exact: the bar is "below visible (1/255 ≈ 3.9e-3)", which
-half-float clears with room to spare. The numpy path stays the oracle.
-
-GPU-touching tests skip cleanly where no usable device exists (e.g. CI).
+Tolerances are mostly "below one 8-bit code value". GPU tests skip without
+a device (CI).
 """
 import numpy as np
 import pytest
@@ -16,7 +12,7 @@ from core.kernels import encode_then_lut
 
 from parity_utils import assert_parity, max_abs_err
 
-# A half-float round-trip stays well under one 8-bit code value.
+# Under one 8-bit code value (1/255).
 PERCEPTUAL_TOL = 3.0e-3
 
 
@@ -93,13 +89,8 @@ def test_encode_frame_matches_oracle(img):
 
 @requires_gpu
 def test_encode_then_lut_matches_production_path(img):
-    """The resident encode->LUT chain matches today's production GPU path
-    (buffer ACEScct encode + buffer tetrahedral LUT) within perceptual tol."""
-    # A smooth, non-trivial LUT — representative of real film-emulation LUTs.
-    # (A *random* LUT is a pathological worst case: adjacent cells differ wildly,
-    # so f16 input quantization gets amplified; even then the chain measures
-    # ~3.8e-3, still under one 8-bit code value. Real LUTs are smooth, so this
-    # reflects production.)
+    """Texture encode->LUT matches the buffer encode + buffer LUT."""
+    # Smooth, like real LUTs.
     n = 17
     axis = np.linspace(0.0, 1.0, n, dtype=np.float32)
     r, g, b = np.meshgrid(axis, axis, axis, indexing='ij')
@@ -112,10 +103,10 @@ def test_encode_then_lut_matches_production_path(img):
 
     img_max = np.maximum(img, 1e-10)
 
-    def production(a):                       # current behaviour
+    def production(a):
         return gpu.apply_lut(gpu.acescct_encode(a))
 
-    def resident(a):                         # new resident chain
+    def resident(a):
         return encode_then_lut(a)
 
     assert_parity(production, resident, img_max,
@@ -133,16 +124,9 @@ def test_blur_frame_matches_buffer_blur(img):
 
 @requires_gpu
 def test_halation_frame_approximates_per_op():
-    """Resident halation blurs its glow at HALF resolution for speed (downsample
-    -> blur at half size -> bilinear upsample); the numpy fallback keeps the
-    full-res blur. So the resident path is a deliberate APPROXIMATION, not a
-    bit-match. The dominant scale is now a defocus DISC with a defined edge, and
-    that hard rim is exactly where the half-res upsample ramp diverges most from
-    the full-res oracle — so the worst-case error is larger than the old smooth
-    Gaussian's (measured max ~0.04 in linear ACEScg on this hard-edged synthetic,
-    and sub-code-value end-to-end on real images). Perceptual bar, not bit-exact;
-    0.06 leaves headroom over the measured worst case. The intentional small-disc
-    smear (no full-res gate) lives in this regime — br=4 -> r=2 at half res."""
+    """GPU halation blurs at half resolution, so it only approximates the CPU
+    version. The disc's hard rim is where they differ most: ~0.04 in linear
+    ACEScg on this synthetic image, under a code value on real ones."""
     from core import effects
     rng = np.random.default_rng(5)
     img = rng.random((40, 60, 3), dtype=np.float32) * 0.5
@@ -151,7 +135,7 @@ def test_halation_frame_approximates_per_op():
 
     resident = gpu.halation_frame(Frame.from_cpu(img), th, br, st).cpu()
 
-    saved = gpu.halation_frame                       # force the full-res per-op reference
+    saved = gpu.halation_frame                       # force the CPU reference
     gpu.halation_frame = lambda *a, **k: None
     try:
         ref = effects.apply_halation(img, th, br, st)
@@ -184,8 +168,7 @@ def test_sharpen_frame_matches_per_op(img):
 
 @requires_gpu
 def test_grain_frame_matches_buffer_blend(img):
-    """Resident grain blend matches the per-op buffer grain_blend on the same
-    layer (so any difference is GPU float rounding, not a different layer)."""
+    """Texture grain blend matches the buffer grain_blend on the same layer."""
     rng = np.random.default_rng(7)
     grain = rng.random(img.shape, dtype=np.float32)
     intensity, min_grain, bias = 0.3, 0.2, 0.4
@@ -196,11 +179,9 @@ def test_grain_frame_matches_buffer_blend(img):
 
 @requires_gpu
 def test_ca_frame_matches_spectral_oracle():
-    """Resident spectral CA matches the numpy spectral oracle (manual bilinear
-    + clamp-to-edge vs cv2.remap), within perceptual tol on a fringe-y image."""
+    """GPU CA matches the numpy version on an image with hard edges."""
     from core.effects import apply_chromatic_aberration
     rng = np.random.default_rng(3)
-    # An edge-rich image is the worst case for sampling differences.
     a = rng.random((48, 72, 3), dtype=np.float32)
     a[:, 36:, :] *= 0.2                      # hard vertical edge -> visible fringe
     for scale in (0.004, 0.012):
@@ -260,8 +241,7 @@ def test_color_transform_matches_numpy():
 
 @requires_gpu
 def test_cnr_frame_preserves_luma():
-    """CNR filters only a*/b*, so AP1 luminance must be preserved (the whole
-    point of working in Lab — chroma denoise that can't shift luma)."""
+    """CNR preserves AP1 luminance."""
     rng = np.random.default_rng(21)
     a = rng.random((40, 60, 3), dtype=np.float32) * 0.8 + 0.05
     out = gpu.cnr_frame(Frame.from_cpu(a), sigma=3.0).cpu()
@@ -272,8 +252,7 @@ def test_cnr_frame_preserves_luma():
 
 @requires_gpu
 def test_cnr_frame_reduces_chroma_noise():
-    """On a flat patch with chroma noise, CNR must cut the chroma variance
-    substantially (it's removing colour noise) without touching luma."""
+    """CNR reduces chroma noise on a flat patch."""
     rng = np.random.default_rng(22)
     base = np.full((48, 48, 3), 0.3, dtype=np.float32)
     noisy = base + rng.normal(0, 0.05, base.shape).astype(np.float32)
@@ -286,9 +265,8 @@ def test_cnr_frame_reduces_chroma_noise():
 
 @requires_gpu
 def test_cnr_frame_vs_cv2_interior_sanity():
-    """Sanity: the resident CNR tracks the cv2 reference in the interior (borders
-    differ by design — clamp vs reflect-101). Loose tol; the contract is
-    luma-preserving artifact-free denoise, not bit-parity with cv2."""
+    """GPU CNR roughly matches cv2 away from the borders, which use different
+    modes."""
     from core.effects import reduce_color_noise_chroma
     rng = np.random.default_rng(23)
     a = rng.random((48, 64, 3), dtype=np.float32)
@@ -298,9 +276,7 @@ def test_cnr_frame_vs_cv2_interior_sanity():
 
 
 def test_cnr_despike_removes_green_firefly():
-    """The despike clamp pulls an isolated green spike back toward its
-    neighbours (what the edge-preserving bilateral can't do), while a clean
-    pixel far away stays put. CPU oracle — no GPU needed."""
+    """Despike pulls in an isolated green spike and leaves clean pixels."""
     from core.effects import reduce_color_noise_chroma, _acescg_to_lab
     from core.config import cnr_despike_thresholds
     img = np.full((16, 16, 3), 0.2, dtype=np.float32)
@@ -315,8 +291,7 @@ def test_cnr_despike_removes_green_firefly():
 
 
 def test_cnr_despike_green_bias_spares_magenta():
-    """At 100% green bias, thr_other is open so a magenta spike survives while
-    a matching green spike is clamped — the bias targets one direction of a*."""
+    """At 100% bias, green spikes are clamped and magenta ones are not."""
     from core.effects import reduce_color_noise_chroma, _acescg_to_lab
     from core.config import cnr_despike_thresholds
     despike = cnr_despike_thresholds(100.0, 100.0)
@@ -332,8 +307,7 @@ def test_cnr_despike_green_bias_spares_magenta():
 
 @requires_gpu
 def test_cnr_despike_frame_vs_cv2_interior():
-    """Resident despike tracks the cv2/numpy oracle in the interior (borders
-    differ: clamp-to-edge vs cv2 BORDER_REPLICATE — same intent, loose tol)."""
+    """GPU despike matches the CPU version away from the borders."""
     from core.effects import reduce_color_noise_chroma
     from core.config import cnr_despike_thresholds
     rng = np.random.default_rng(24)
@@ -349,13 +323,8 @@ def test_cnr_despike_frame_vs_cv2_interior():
 
 @requires_gpu
 def test_bloom_frame_matches_oracle():
-    """Resident bloom matches the numpy/cv2 oracle within perceptual tol.
-
-    Bloom is a soft low-frequency layer scaled by a small strength, so the
-    downsample/upsample resampling differences (box vs INTER_AREA, manual vs cv2
-    bilinear) stay well under one 8-bit code value in the blended output. Uses a
-    size divisible by 4 so the area-downsample blocks line up exactly.
-    """
+    """GPU bloom matches the CPU version within a code value. Size divisible
+    by 4 so the downsample blocks line up."""
     from core.effects import apply_bloom
     rng = np.random.default_rng(17)
     a = rng.random((64, 96, 3), dtype=np.float32) * 0.3
@@ -372,13 +341,11 @@ def test_bloom_frame_matches_oracle():
 
 @requires_gpu
 def test_vignette_frame_matches_oracle():
-    """Resident vignette matches the numpy oracle (linear ACEScg, pre-LUT)."""
+    """GPU vignette matches the numpy version."""
     from core.effects import apply_vignette
     rng = np.random.default_rng(13)
-    # Bias well above zero so the corner pixels (r_norm == 1) carry real signal —
-    # that's where a fractional-power-of-negative NaN would surface as a black
-    # corner, and a near-zero random corner would hide it. feather 0.4 is the
-    # fractional case that triggers it.
+    # Bright corners and a fractional feather, to catch the pow-of-negative
+    # NaN (black corners).
     a = rng.random((44, 66, 3), dtype=np.float32) * 0.4 + 0.5
     for strength, color, feather in ((0.5, 0.05, 1.0), (0.8, 0.12, 1.6), (0.1, 0.05, 0.4)):
         def oracle(x, s=strength, c=color, f=feather):
@@ -447,10 +414,8 @@ def _smooth_lut(n=17):
 
 @requires_gpu
 def test_arena_reuses_textures_across_renders():
-    """Inside a render scope, distinct allocations get distinct textures
-    (write-once slots); across two scopes the same slot returns the *same*
-    physical texture — i.e. no per-frame allocation. That reuse is the whole
-    point of the per-render arena."""
+    """Within a render, allocations get distinct textures; the next render
+    reuses them."""
     shape = (32, 48, 3)
 
     gpu.begin_render()
@@ -469,17 +434,14 @@ def test_arena_reuses_textures_across_renders():
     finally:
         gpu.end_render()
 
-    # Outside any scope, allocation is fresh (per-op / test paths unaffected).
+    # Outside a scope, allocation is fresh.
     assert gpu._create_tex(shape) is not a0
 
 
 @requires_gpu
 def test_dirty_arena_parity():
-    """A full resident render must produce the same pixels whether or not the
-    arena was just used by a *different* render that left stale data in the
-    pooled textures — the leak a single-render parity test can't catch.
-    Exercises bloom's small downsample texture and the full-res pool across two
-    distinct chains on the same thread."""
+    """Stale data left in pooled textures by another render doesn't change
+    the result."""
     from core.kernels import run_resident
     gpu.upload_lut(_smooth_lut())
 
@@ -501,8 +463,7 @@ def test_dirty_arena_parity():
     clean = run_resident(img_a, chain_a)
     assert clean is not None
 
-    # Dirty the pools: a different chain on a different image of the same shape,
-    # leaving unrelated values in every reused texture (incl. the small one).
+    # Dirty the pools with another chain on another image.
     img_b = (rng.random((64, 96, 3), dtype=np.float32) * 2.0).astype(np.float32)
     dirty_chain = [
         lambda f: gpu.cnr_frame(f, 4.0),
@@ -515,8 +476,7 @@ def test_dirty_arena_parity():
 
     after_dirty = run_resident(img_a, chain_a)
     assert after_dirty is not None
-    # Same GPU math, same input — any difference is stale data leaking from a
-    # recycled texture, so the bar is bit-level, not perceptual.
+    # Same input and math, so it must match exactly.
     assert max_abs_err(after_dirty, clean) <= 1e-6
 
 

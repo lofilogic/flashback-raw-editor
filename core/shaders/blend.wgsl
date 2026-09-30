@@ -1,5 +1,4 @@
-// Screen blend (used for halation) and unsharp mask.
-// Two entry points operating on flat f32 arrays.
+// Unsharp mask on flat f32 buffers.
 
 struct UnsharpUniforms {
     strength: f32,
@@ -13,18 +12,10 @@ struct UnsharpUniforms {
 @group(0) @binding(2) var<storage, read_write> output:  array<f32>;
 @group(0) @binding(3) var<uniform>             u:       UnsharpUniforms;
 
-// Screen blend: 1 - (1-a)*(1-b)
-@compute @workgroup_size(256)
-fn main_screen(@builtin(global_invocation_id) id: vec3u) {
-    let i = id.y * 16776960u + id.x; // 65535 * 256 — supports 2D dispatch for large images
-    if i >= arrayLength(&a) { return; }
-    output[i] = 1.0 - (1.0 - a[i]) * (1.0 - b[i]);
-}
-
-// Unsharp mask: image + (image - blurred) * strength
+// image + (image - blurred) * strength
 @compute @workgroup_size(256)
 fn main_unsharp(@builtin(global_invocation_id) id: vec3u) {
-    let i = id.y * 16776960u + id.x;
+    let i = id.y * 16776960u + id.x; // 65535 * 256, for 2D dispatch
     if i >= arrayLength(&a) { return; }
     output[i] = a[i] + (a[i] - b[i]) * u.strength;
 }

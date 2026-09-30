@@ -1,8 +1,5 @@
 """
-Tests for VibeConfig / ImageAdjustments and the vibe preset machinery.
-
-These are the parts that will need to keep working when projects (saved
-per-image state) get added — so an explicit safety net here is worth it.
+Tests for VibeConfig, ImageAdjustments and the presets.
 """
 from dataclasses import fields
 
@@ -13,15 +10,13 @@ from core.config import (
 
 
 def test_ca_scale_is_orientation_invariant():
-    """CA strength must not change when the frame is rotated (W<->H swap), so a
-    portrait/rotated image fringes like its landscape counterpart. And for a
-    landscape frame the long edge IS the width, so legacy values are unchanged."""
+    """CA scale doesn't change when the frame is rotated."""
     W, H = 6000, 4000
     landscape = ca_pixels_to_scale(8.0, max(W, H))
     portrait  = ca_pixels_to_scale(8.0, max(H, W))
     assert landscape == portrait
-    assert landscape == 8.0 / (W / 2.0)        # unchanged vs the old width-based value
-    assert ca_pixels_to_scale(8.0, 0) == 0.0   # degenerate guard
+    assert landscape == 8.0 / (W / 2.0)
+    assert ca_pixels_to_scale(8.0, 0) == 0.0
 
 
 # =============================================================================
@@ -29,18 +24,14 @@ def test_ca_scale_is_orientation_invariant():
 # =============================================================================
 
 def test_vibeconfig_to_dict_from_dict_roundtrip():
-    """to_dict / from_dict must roundtrip without information loss.
-
-    This is the foundational invariant for Save Projects: if a config
-    can't survive a JSON round-trip, projects will silently corrupt.
-    """
+    """to_dict / from_dict round-trips."""
     original = vibe_config_for('disposable')
     restored = VibeConfig.from_dict(original.to_dict())
     assert restored == original
 
 
 def test_vibeconfig_from_dict_ignores_unknown_keys():
-    """Loading a saved config with extra/renamed keys must not raise."""
+    """Unknown keys are ignored."""
     d = vibe_config_for('disposable').to_dict()
     d['this_key_does_not_exist'] = 42
     restored = VibeConfig.from_dict(d)
@@ -48,14 +39,13 @@ def test_vibeconfig_from_dict_ignores_unknown_keys():
 
 
 def test_vibeconfig_from_dict_coerces_types():
-    """Strings like '0.5' for a float field should be coerced, not silently dropped."""
-    cfg = VibeConfig.from_dict({'grain_strength_pct': '42', 'ca_steps': '7'})
+    """Values are coerced to the field type."""
+    cfg = VibeConfig.from_dict({'grain_strength_pct': '42', 'enable_grain': 0})
     assert cfg.grain_strength_pct == 42.0
-    assert cfg.ca_steps == 7
+    assert cfg.enable_grain is False
 
 
 def test_vibeconfig_copy_is_independent():
-    """copy() must return a deep-enough copy that mutations don't leak."""
     a = vibe_config_for('disposable')
     b = a.copy()
     b.grain_strength_pct = 999.0
@@ -93,12 +83,8 @@ def test_preset_field_types_match_dataclass():
 
 
 def test_default_vibeconfig_is_factory():
-    """VibeConfig() with no args must equal the documented factory baseline.
-
-    This anchors the dataclass defaults to the named module constants.
-    """
+    """VibeConfig() defaults come from the module constants."""
     cfg = VibeConfig()
-    # Spot-check fields against module constants so a future drift fails loudly
     from core.config import (
         HALATION_THRESHOLD_STOPS, GRAIN_STRENGTH_PCT, BLOOM_THRESHOLD_STOPS,
         BASE_EXPOSURE_OFFSET_V2,

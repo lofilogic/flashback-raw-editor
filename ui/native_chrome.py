@@ -1,11 +1,7 @@
-"""Native title-bar styling.
+"""Native title bar.
 
-macOS: transparent title bar + full-size content view + theme-matched window
-background so the app canvas extends all the way to the top edge, with only
-the traffic lights floating over it — the look Apple uses in Music, Podcasts,
-Photos, etc.
-
-Windows: DWM dark-mode attribute follows the active theme. Linux: no-op.
+macOS: transparent title bar, content up to the top edge.
+Windows: dark title bar in dark mode. Linux: nothing.
 """
 
 from __future__ import annotations
@@ -13,7 +9,7 @@ from __future__ import annotations
 import ctypes
 import platform
 
-# Traffic lights sit ~70px from the left edge; expose for toolbar padding.
+# Space for the traffic lights, for toolbar padding.
 MAC_TRAFFIC_LIGHT_WIDTH = 76
 
 _applied_windows: set[int] = set()
@@ -48,18 +44,15 @@ def _apply_mac(qwindow, theme_name: str) -> None:
     )
     ns_window.setTitlebarAppearsTransparent_(True)
     ns_window.setTitleVisibility_(NSWindowTitleHidden)
-    # NOTE: do NOT enable movableByWindowBackground — it makes every drag
-    # anywhere in the window move the window, which breaks slider scrubbing.
+    # Not movableByWindowBackground: dragging sliders would move the window.
 
-    # Hide the 1px separator line that macOS draws below the titlebar on Big Sur+.
+    # Hide the separator below the title bar.
     try:
         from AppKit import NSTitlebarSeparatorStyleNone
         ns_window.setTitlebarSeparatorStyle_(NSTitlebarSeparatorStyleNone)
     except Exception:
         pass
 
-    # Paint the titlebar region in the app's theme colour so there's no grey
-    # strip above our content.
     from ui.theme import C, qcolor as _qcolor
     bg_qc = _qcolor("bg_toolbar")
     ns_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(
@@ -67,7 +60,6 @@ def _apply_mac(qwindow, theme_name: str) -> None:
     )
     ns_window.setBackgroundColor_(ns_color)
 
-    # Theme-matched NSAppearance keeps the traffic-light glyphs readable.
     name = "NSAppearanceNameDarkAqua" if theme_name == "dark" else "NSAppearanceNameAqua"
     appearance = NSAppearance.appearanceNamed_(name)
     if appearance is not None:

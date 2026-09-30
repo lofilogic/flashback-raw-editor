@@ -1,14 +1,7 @@
-// Halation combine: glow = (g_core + g_mid + g_wide) * strength, ADDED to the
-// base image in linear light, clamped to >= 0. The per-scale weights and chroma
-// are already baked into each glow (see halation_highlights + the tint from
-// config.HALATION_SCALES), so this just sums them.
+// out = max(0, img + (g_core + g_mid + g_wide) * strength)
 //
-// Additive, not screen: halation is re-exposure from scattered/back-reflected
-// light, which physically ADDS. Screen blend (1-(1-a)(1-b)) also assumes both
-// operands are in [0,1] — but this runs on linear ACEScg where highlights
-// exceed 1, so screen produced (1-base)(1-glow) > 0 from two negatives and
-// CRUSHED the halo to zero exactly where the source was brightest. Additive
-// keeps the defined, punchy halo around blown highlights.
+// Additive, not screen: screen assumes [0, 1], and with linear values above 1
+// it wiped out the halo exactly around the brightest highlights.
 
 struct U { strength: f32, _p0: f32, _p1: f32, _p2: f32, }
 

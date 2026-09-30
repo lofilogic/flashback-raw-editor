@@ -1,17 +1,11 @@
-// Chroma noise reduction in CIE Lab, texture-resident.
+// Chroma noise reduction in Lab. See effects.reduce_color_noise_chroma.
+//   main_to_lab     ACEScg -> Lab
+//   main_despike    3x3 median clamp on a*/b* (optional)
+//   main_bilateral  bilateral on a*/b*, L* untouched
+//   main_to_acescg  Lab -> ACEScg
 //
-// Twin of effects.reduce_color_noise_chroma. Four passes:
-//   main_to_lab     : linear ACEScg -> Lab (L, a, b) in rgb
-//   main_despike    : optional 3x3-median outlier clamp on a*/b* (kills colour
-//                     fireflies that the edge-preserving bilateral protects)
-//   main_bilateral  : edge-preserving bilateral on a* and b* only; L* copied
-//                     through untouched, so luma is preserved by construction
-//   main_to_acescg  : Lab -> linear ACEScg
-//
-// The bilateral matches cv2.bilateralFilter's two gaussians (spatial=sigma,
-// range=sigma_color) but uses clamp-to-edge borders; only a*/b* are filtered, so
-// it removes colour noise without touching luminance or bleeding across luma
-// edges. Constants mirror effects.py exactly.
+// The bilateral uses the same two Gaussians as cv2.bilateralFilter, with
+// clamp-to-edge borders.
 
 // --- Lab <-> ACEScg constants (D60 white) ---
 const M_RGB2XYZ_0 = vec3f( 0.6624541811,  0.1340042065,  0.1561876744);
@@ -76,9 +70,7 @@ fn main_to_acescg(@builtin(global_invocation_id) gid: vec3u) {
     textureStore(dst_a, p, vec4f(to_acescg(textureLoad(src_a, p, 0).rgb), 1.0));
 }
 
-// ---- shared uniform for the despike + bilateral passes ----
-// One struct so both entry points can bind the single binding-2 uniform var.
-// Each pass reads only the fields it needs; the Python side zero-fills the rest.
+// ---- uniform shared by despike and bilateral; each reads its own fields ----
 struct U {
     sigma_space: f32,   // bilateral spatial sigma
     sigma_color: f32,   // bilateral range sigma
@@ -94,18 +86,13 @@ struct U {
 @group(0) @binding(1) var          dst_b: texture_storage_2d<rgba32float, write>;
 @group(0) @binding(2) var<uniform> u:     U;
 
-// Sort a pair into (lo, hi) — the swap primitive of the median network.
-// Returns by value rather than taking `ptr<function, f32>` args: passing
-// pointers to array elements (`&p[i]`) into a function makes the Naga SPIR-V
-// backend (Vulkan, incl. Linux/RADV on Steam Deck) panic with "Expression is
-// not cached!". The value-returning form sidesteps that codegen path.
+// Sort a pair into (lo, hi). Returns by value: passing `&p[i]` into a function
+// makes Naga's SPIR-V backend panic ("Expression is not cached!").
 fn so(a: f32, b: f32) -> vec2f {
     return vec2f(min(a, b), max(a, b));
 }
 
-// Median of 9 values via the classic 19-comparison selection network.
-// Each step writes the lesser to the lower index and the greater to the higher,
-// matching the original s2(&p[i], &p[j]) semantics exactly.
+// Median of 9, 19-comparison network.
 fn med9(v: array<f32, 9>) -> f32 {
     var p = v;
     var s: vec2f;
@@ -131,14 +118,10 @@ fn med9(v: array<f32, 9>) -> f32 {
     return p[4];
 }
 
-// ---- pass 2a: despike (3x3-median outlier clamp on a*/b*) ----
-// A bilateral filter is edge-preserving, so an isolated colour spike (firefly)
-// looks like a one-pixel edge and survives. Here each chroma channel is clamped
-// into [median +/- thr] of its 3x3 neighbourhood: a smooth region equals its own
-// median (deviation ~0, untouched) while a spike is pulled back toward its
-// neighbours. The green direction (a* below the median) uses thr_green; magenta
-// (a* above) and both b* directions use thr_other, so a green bias clamps green
-// harder while leaving other colours alone. The bilateral then mops up the rest.
+// ---- pass 2a: despike ----
+// Clamp a*/b* to median ± thr of the 3x3 neighbourhood. The bilateral keeps
+// single-pixel spikes because they look like edges. a* below the median uses
+// thr_green, everything else thr_other.
 @compute @workgroup_size(8, 8)
 fn main_despike(@builtin(global_invocation_id) gid: vec3u) {
     let dims = vec2i(textureDimensions(src_b));
@@ -175,7 +158,7 @@ fn main_bilateral(@builtin(global_invocation_id) gid: vec3u) {
     let center = textureLoad(src_b, p, 0).rgb;     // (L, a, b)
 
     let rad = i32(u.radius);
-    let r2 = rad * rad;       // cv2 uses a circular neighbourhood (sqrt(i²+j²) <= radius)
+    let r2 = rad * rad;       // circular window, like cv2
     let cs = -0.5 / (u.sigma_space * u.sigma_space);
     let cr = -0.5 / (u.sigma_color * u.sigma_color);
 

@@ -1,10 +1,5 @@
 """
-Main application window.
-
-FlashbackEditor — QMainWindow: file loading, sliders, thumbnail strip,
-                  export, keyboard shortcuts, drag & drop.
-
-The fullscreen Zen overlay lives in ui.zen_overlay.
+Main window: loading, sliders, thumbnail strip, export, shortcuts, drag & drop.
 """
 import logging
 import sys
@@ -17,7 +12,7 @@ import re
 from collections import OrderedDict
 from pathlib import Path
 
-# core must be imported before colour to apply the NumPy 2.0 compatibility shim
+# before colour, for the NumPy 2 shim
 import core  # noqa: F401
 
 log = logging.getLogger(__name__)
@@ -47,6 +42,7 @@ from core.processor import FlashbackProcessor, export_image
 from core.config import (
     _timing_print, VIBE_PRESETS, VIBE_EXPORT_SUFFIX,
     VibeConfig, ImageAdjustments, vibe_config_for, effective_lut_ref,
+    BASE_KELVIN,
 )
 from core.export_naming import export_basename
 from core.v1_negative import is_v1_negative
@@ -74,8 +70,7 @@ from .theme import (
 # =============================================================================
 
 def _value_nbytes(value):
-    """Bytes held by a cache value: a numpy array, or a tuple/list that
-    contains arrays (preview_cache stores ``(key, img_array)``)."""
+    """Bytes held by an array or a tuple/list of arrays."""
     nb = getattr(value, 'nbytes', None)
     if nb is not None:
         return nb
@@ -85,13 +80,11 @@ def _value_nbytes(value):
 
 
 class _CacheBudget:
-    """Shared, dynamically-sized memory budget for the array caches.
+    """Memory limit shared by all array caches.
 
-    All caches that register share one pool, so the cap is the total resident
-    cache memory — not per-cache. The limit is recomputed live from system RAM
-    (via psutil) as ``min(fraction * total, available - reserve)`` so the caches
-    automatically back off when other software consumes memory, and grow again
-    when it's freed. Falls back to a fixed limit if psutil is unavailable.
+    ``min(fraction * total, available - reserve)``, recomputed from system RAM
+    so the caches shrink when other programs need memory. Fixed limit without
+    psutil.
     """
 
     def __init__(self, fraction=0.25, reserve_bytes=2 * 1024 ** 3,
@@ -116,18 +109,15 @@ class _CacheBudget:
             return max(self.floor, self.fallback)
 
     def enforce(self, protect=()):
-        """Evict least-recently-used entries across all registered caches until
-        the shared total is within the current limit. ``protect`` names keys that
-        must never be evicted (the active image)."""
+        """Evict LRU entries across all caches until under the limit. Keys in
+        ``protect`` are never evicted."""
         limit = self.limit()
-        # Guard bounds the loop against pathological states; normal exit is the
-        # budget condition or running out of evictable entries.
         for _ in range(1_000_000):
             if self.used <= limit:
                 return
             victim = None
             for cache in self._caches:
-                for key in cache:                # OrderedDict: oldest first
+                for key in cache:                # oldest first
                     if key not in protect:
                         victim = (cache, key)
                         break
@@ -140,14 +130,8 @@ class _CacheBudget:
 
 
 class _ByteBudgetLRU(OrderedDict):
-    """LRU cache of numpy arrays sharing a :class:`_CacheBudget`.
-
-    get/set bump recency; inserts trigger a shared-budget enforcement that
-    evicts the globally least-recently-used entries across all caches sharing
-    the budget. Evicted intermediates are re-derived from disk on next visit,
-    and the currently displayed image survives because the processor holds its
-    own reference to that array (and it is passed as ``protect`` on insert).
-    """
+    """LRU cache of arrays in a shared :class:`_CacheBudget`. Evicted
+    entries are rebuilt from disk when needed."""
 
     def __init__(self, budget: _CacheBudget):
         super().__init__()
@@ -173,10 +157,8 @@ class _ByteBudgetLRU(OrderedDict):
         super().__delitem__(key)
 
     def pop(self, key, *default):
-        # Delete through our own __delitem__ (which adjusts the budget) using
-        # the raw OrderedDict accessor — NOT super().pop / self[key], both of
-        # which re-enter the overridden __getitem__ and move_to_end, turning an
-        # absent-key lookup into a KeyError that defeats the `default` arg.
+        # Not super().pop or self[key]: both go through our __getitem__, whose
+        # move_to_end raises KeyError for a missing key.
         if key in self:
             value = OrderedDict.__getitem__(self, key)
             del self[key]
@@ -191,23 +173,17 @@ class _ByteBudgetLRU(OrderedDict):
         super().clear()
 
     def prune_to(self, valid_keys):
-        """Drop entries whose key is not in ``valid_keys`` (e.g. images no
-        longer in the open project)."""
+        """Drop entries whose key isn't in ``valid_keys``."""
         for key in [k for k in self if k not in valid_keys]:
             del self[key]
 
 
-FULL_RENDER_CACHE_SIZE = 3  # full-effect renders kept for quick A/B switching
+FULL_RENDER_CACHE_SIZE = 3
 
 
 class FlashbackEditor(QMainWindow):
-    """Main application window for LoFi Logic image editing."""
 
-    # Permissive: every raw extension libraw can plausibly decode. We let the
-    # actual decode be the gate — an unsupported/corrupt file raises in
-    # rawpy.imread, is caught at load, and surfaces as a clean miss (not a crash).
-    # Exposure handling: DNGs read embedded BaselineExposure (Tier 1); measured
-    # makes hit Tier 2; everything else lands on the Tier-3 default (0 EV).
+    # Everything libraw might decode; files that fail just don't load.
     SUPPORTED_EXTENSIONS = (
         '.dng',                                  # Adobe / Leica / Ricoh / Pixel / iPhone
         '.cr2', '.cr3', '.crw',                  # Canon
@@ -234,8 +210,7 @@ class FlashbackEditor(QMainWindow):
         '.bay',                                  # Casio
         '.ari',                                  # ARRI
     )
-    # EXPERIMENTAL, opt-in from Advanced Settings: camera JPEGs are already
-    # display-referred, so the film look lands on a rendered image.
+    # Experimental, enabled in the advanced panel.
     JPEG_EXTENSIONS = ('.jpg', '.jpeg')
 
     def supported_extensions(self) -> tuple:
@@ -249,44 +224,30 @@ class FlashbackEditor(QMainWindow):
         if sys.platform == 'darwin':
             self.setUnifiedTitleAndToolBarOnMac(True)
 
-        # Application state
         self.processor = None
         self.image_files = []
         self.current_index = 0
         self.image_settings = {}
-        # All array caches share one dynamic, RAM-relative memory budget so the
-        # combined resident cache never exceeds it; entries are LRU-evicted
-        # across caches and re-derived from disk on next visit.
         self.cache_budget = _CacheBudget()
         self.image_cache = _ByteBudgetLRU(self.cache_budget)
         self.preview_cache = _ByteBudgetLRU(self.cache_budget)
-        # Last few full-effect renders (8-bit), so flipping between adjacent
-        # frames shows the finished look at once instead of preview → re-render.
+        # Last few finished renders (8-bit), so flipping back is instant.
         self.full_render_cache = OrderedDict()
         self.export_mode = 'jpeg'  # 'jpeg' | 'tiff' | 'dng'
         self.thumbnail_cache = _ByteBudgetLRU(self.cache_budget)
         self._file_is_flashback: dict = {}  # path_str -> bool
-        # Cumulative rotation in degrees (0/90/180/270) per image path. The
-        # processor *consumes* its rotation field by burning it into the
-        # intermediate, so we keep our own running tally that survives reloads
-        # and gets persisted in project files.
+        # Rotation per image. The processor bakes rotation into the
+        # intermediate and resets its own, so the total is kept here.
         self.image_rotations: dict = {}
-        # Path of the currently-open project file (.lofi), or None if the
-        # current image set didn't come from a project. Save reuses this;
-        # Save As always prompts.
         self.current_project_path = None  # type: ignore[assignment]
 
         self.app_settings = QSettings("LoFi Logic", "Editor")
 
-        # Two folders, two responsibilities:
-        #   camera_import_dir — where the camera-import worker archives rolls
-        #                       (creates YYYY-MM-DD/_RAW/<name>.dng subfolders)
-        #   output_dir        — where regular exports go (DNG / JPG)
-        # Each has a *default* persisted in QSettings (set from the advanced
-        # panel). The runtime value is initialized from that default on every
-        # launch; mid-session changes to output_dir are intentionally not
-        # written back, so a one-off export to elsewhere can't nest the next
-        # camera import inside it.
+        # camera_import_dir: where camera imports go (YYYY-MM-DD/_RAW/).
+        # output_dir: where exports go.
+        # Both start from defaults set in the advanced panel. Changing
+        # output_dir during a session isn't saved, so a one-off export
+        # somewhere else doesn't move the next camera import.
         pictures_loc = QStandardPaths.writableLocation(QStandardPaths.PicturesLocation)
         base_dir = pictures_loc if pictures_loc else str(Path.home())
         fallback = os.path.join(base_dir, "LoFi_Logic")
@@ -300,16 +261,13 @@ class FlashbackEditor(QMainWindow):
         os.makedirs(self.camera_import_dir, exist_ok=True)
         os.makedirs(self.output_dir, exist_ok=True)
 
-        # The active vibe — replaces the old global DebugConfig. Initialized
-        # to factory disposable here; the real vibe is loaded in
-        # _on_vibe_selected() once the picker exists.
+        # Placeholder until _on_vibe_selected() runs.
         self.current_vibe = VibeConfig()
         self.current_vibe.dng_profile_name = self.app_settings.value(
             "dng_profile_name", "Flashback Standard"
         )
 
-        # Theme: load persisted choice (default: light) and register listener
-        # so every setStyleSheet()/icon registered below can be re-applied.
+        # Styles and icons registered below are re-applied on theme change.
         saved_theme = self.app_settings.value("theme", "light")
         if saved_theme in ("light", "dark"):
             theme.set_theme(saved_theme)
@@ -323,23 +281,15 @@ class FlashbackEditor(QMainWindow):
         self.add_thumbnail_worker = None
         self._vibe_refresh_worker = None
         self._lut_cache: dict = {}
-        # The LUT ref currently uploaded to the GPU / set on the processor —
-        # may be a transient V1 override of current_vibe.lut_ref (see
-        # _apply_effective_lut), so it's tracked separately to avoid redundant
-        # re-uploads when scrubbing between frames.
+        # The LUT ref actually loaded; can differ from current_vibe.lut_ref
+        # for V1 files (see _apply_effective_lut).
         self._active_lut_ref = None
 
         self._tint_manual_offset = 0.0  # user's manual tint correction on top of WB coupling
 
-        # Run pre-1.5 → 1.5.0 vibe-state migration once. The report (if
-        # any) is stashed for the post-window-shown notice; vibes loaded
-        # here are not directly used (the editor reads via _vibe_for) but
-        # calling migrate_and_load is what triggers the on-disk rewrite.
+        # Migrate pre-1.5 vibes. Only the report is used here.
         _, self._migration_report = vibe_state.migrate_and_load()
 
-        # LUT is loaded by FlashbackProcessor from current_vibe.lut_ref
-        # (factory:<id> or user:<path>). No path argument anymore — the
-        # processor never reads filesystem paths from the editor.
         self.processor = FlashbackProcessor(
             vibe=self.current_vibe,
             adjustments=ImageAdjustments(),
@@ -373,16 +323,12 @@ class FlashbackEditor(QMainWindow):
         self.zen_overlay.rotated.connect(self.on_zen_rotate)
         self.zen_overlay.remove_requested.connect(self.remove_current_from_project)
 
-        # Defer the post-migration notice until the main window has had a
-        # chance to render; singleShot(0) puts it at the back of the next
-        # event-loop tick, after show().
+        # After show().
         if self._migration_report is not None:
             QTimer.singleShot(0, self._show_migration_notice)
 
-        # Probe how the GPU resolved once the window is up. Init is lazy and a
-        # little slow, so defer it off the constructor; if we landed on a
-        # software adapter or the CPU fallback, surface it instead of letting
-        # the user wonder why renders crawl on capable hardware.
+        # GPU init is slow, so check it once the window is up and warn if
+        # we ended up on the CPU.
         QTimer.singleShot(0, self._check_gpu_health)
 
     def _check_gpu_health(self):
@@ -413,15 +359,11 @@ class FlashbackEditor(QMainWindow):
             self.mode_label.setStyleSheet(f"color: {C['accent']};")
 
     def _show_migration_notice(self):
-        """Show the one-shot post-migration summary dialog (step 6).
-
-        Dismissal persists in the v2 envelope via
-        vibe_state.mark_migration_acknowledged so the dialog never fires
-        twice for the same migration."""
+        """Non-modal migration summary. Shown until dismissed once."""
         from .migration_notice import MigrationNoticeDialog
         dlg = MigrationNoticeDialog(self._migration_report, parent=self)
-        dlg.show()  # non-modal — user can keep working with the editor
-        self._migration_notice_dialog = dlg  # keep a ref so it isn't GC'd
+        dlg.show()
+        self._migration_notice_dialog = dlg  # keep a reference
 
     # ===================================================================
     # ZEN MODE
@@ -484,9 +426,7 @@ class FlashbackEditor(QMainWindow):
     # ===================================================================
 
     def _load_custom_lut(self):
-        """Prompt for a .cube file. Stored on the current vibe as a
-        `user:<absolute path>` ref so it becomes part of the active vibe's
-        session state and can be saved with it."""
+        """Pick a .cube file and set it on the current vibe."""
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Select LUT", "", "LUT Files (*.cube)"
         )
@@ -499,8 +439,6 @@ class FlashbackEditor(QMainWindow):
             gpu.upload_lut(custom_lut.table)
             self.current_vibe.lut_ref = f"user:{file_path}"
             self._active_lut_ref = self.current_vibe.lut_ref
-            # User just imported a fresh LUT — any preserved pre-1.5 path
-            # is no longer the active choice, so drop the breadcrumb.
             self.current_vibe.legacy_user_lut = ''
             self.debug_panel.refresh_lut_label()
             self.debug_panel.update_modified_indicator()
@@ -514,9 +452,8 @@ class FlashbackEditor(QMainWindow):
 
     def eventFilter(self, source, event):
         if event.type() == QEvent.Type.KeyPress:
-            # Always route arrow keys to image navigation/rotation, regardless
-            # of which widget has focus.  Guard against modal dialogs (file
-            # picker, message boxes) and unrelated windows.
+            # Arrow keys always navigate/rotate, whatever has focus, except
+            # in dialogs and other windows.
             active = QApplication.activeWindow()
             if active in (self, getattr(self, 'zen_overlay', None)):
                 key = event.key()
@@ -565,7 +502,7 @@ class FlashbackEditor(QMainWindow):
         self.slider_wb.blockSignals(True)
         self.slider_wb.setValue(0)
         self.slider_wb.blockSignals(False)
-        self.label_wb.setText("5600 K")
+        self.label_wb.setText(f"{BASE_KELVIN:.0f} K")
         self.processor.adjustments.wb_temp = 0.0
         if self.chk_wb_link.isChecked():
             self._tint_manual_offset = 0.0
@@ -607,12 +544,8 @@ class FlashbackEditor(QMainWindow):
         return button
 
     def _apply_theme(self):
-        """Re-run every registered stylesheet and icon with the current palette.
-
-        Each refresh step is guarded so one bad widget can't abort the whole
-        palette swap; failures are logged at debug (off by default) so a
-        systematic breakage is still diagnosable instead of fully silent.
-        """
+        """Re-apply every registered style and icon. One failing widget
+        doesn't stop the rest."""
         for widget, builder in self._themed_styles:
             try:
                 widget.setStyleSheet(builder())
@@ -626,9 +559,7 @@ class FlashbackEditor(QMainWindow):
         # Regenerate drag-overlay strings (they hold cached accent/text colours)
         if hasattr(self, "_rebuild_drag_styles"):
             self._rebuild_drag_styles()
-        # Dynamic styles (format pills, mode label, process-button-done, etc.)
-        # aren't registered — they're reapplied by their owners on the next
-        # state change. Trigger that here so the palette swap is immediate.
+        # State-dependent styles aren't registered; refresh them directly.
         if hasattr(self, "btn_export_jpeg") and hasattr(self, "export_mode"):
             try:
                 self.set_export_mode(self.export_mode)
@@ -658,7 +589,7 @@ class FlashbackEditor(QMainWindow):
         self.app_settings.setValue("dng_profile_name", name)
 
     def toggle_theme(self):
-        new_name = theme.toggle_theme()   # listeners fire → _apply_theme()
+        new_name = theme.toggle_theme()   # calls _apply_theme()
         self.app_settings.setValue("theme", new_name)
         self._refresh_theme_toggle_icon()
 
@@ -666,7 +597,6 @@ class FlashbackEditor(QMainWindow):
         btn = getattr(self, "btn_theme_toggle", None)
         if btn is None:
             return
-        # Unicode glyphs sidestep the need for bundled sun/moon SVGs.
         btn.setText("☀" if theme.current_theme() == "dark" else "☾")
 
     def _rebuild_drag_styles(self):
@@ -710,8 +640,7 @@ class FlashbackEditor(QMainWindow):
         self.setCentralWidget(main_widget)
         self.setAcceptDrops(True)
 
-        # Drag overlays — strings are rebuilt on each theme change so their
-        # accent/text colours stay in sync.
+        # Drag overlays; styles are rebuilt on theme change.
         self.drag_overlay = QFrame(main_widget)
         drag_layout = QVBoxLayout(self.drag_overlay)
         self._drag_label = QLabel("Drop DNG files here")
@@ -804,7 +733,7 @@ class FlashbackEditor(QMainWindow):
         reset_sc.triggered.connect(self.reset_all_sliders)
         self.addAction(reset_sc)
 
-        # 1–4 select vibe preset
+        # 1–5 select a vibe
         for key, vibe_id in (('1', 'disposable'), ('2', 'point_shoot'),
                              ('3', 'rangefinder'), ('4', 'monochrome'),
                              ('5', 'flashback_classic_v1')):
@@ -1022,29 +951,26 @@ class FlashbackEditor(QMainWindow):
         return sec
 
     def _on_vibe_selected(self, vibe_id: str):
-        """Vibe changed: load saved VibeConfig if any, else factory; apply."""
+        """Apply the saved or factory config for `vibe_id`."""
         vibe = self._vibe_for(vibe_id)
         self._apply_vibe(vibe_id, vibe, refresh_thumbnails=True)
 
     def _vibe_for(self, vibe_id: str) -> VibeConfig:
-        """Saved VibeConfig if present for `vibe_id`, otherwise the factory recipe."""
+        """Saved config for `vibe_id`, else the factory preset."""
         saved = vibe_state.load_all().get(vibe_id)
         if saved is not None:
             return saved
         return vibe_config_for(vibe_id)
 
     def _apply_vibe(self, vibe_id: str, vibe: VibeConfig, refresh_thumbnails: bool = False):
-        """Install `vibe` as the active vibe: bind it to the processor, load
-        its LUT, sync the debug panel, and refresh the preview."""
+        """Make `vibe` active: processor, LUT, debug panel, preview."""
         if hasattr(self, '_render_worker'):
             self._render_worker.invalidate()
-        # Preserve the persistent profile name across vibe swaps — it's an
-        # app-wide preference, not a per-vibe field.
+        # The DNG profile name is app-wide, not per vibe.
         profile_name = self.current_vibe.dng_profile_name
         self.current_vibe = vibe
         self.current_vibe.dng_profile_name = profile_name
         self.processor.vibe = self.current_vibe
-        # Tag the per-image record with the new vibe id (for future Save Project).
         self.processor.adjustments.active_vibe_id = vibe_id
         self._apply_effective_lut()
         if hasattr(self, 'debug_panel'):
@@ -1055,12 +981,8 @@ class FlashbackEditor(QMainWindow):
             self._refresh_all_thumbnails()
 
     def _apply_effective_lut(self, file_path: str = None):
-        """Load the LUT actually used to render `file_path` (the current image
-        if omitted), applying any V1 per-file override of the active vibe's LUT.
-
-        The override is transient: it's pushed to the processor/GPU but never
-        written back into current_vibe.lut_ref, so saving the vibe keeps its
-        canonical (V2) LUT. No-ops when the effective ref is already loaded."""
+        """Load the LUT for `file_path` (default: current image), including the
+        V1 variant. The variant is never written to current_vibe.lut_ref."""
         if file_path is None and self.image_files:
             file_path = str(self.image_files[self.current_index])
         is_v1 = bool(file_path) and is_v1_negative(file_path)
@@ -1068,12 +990,10 @@ class FlashbackEditor(QMainWindow):
         eff = effective_lut_ref(base, is_v1)
         if eff == self._active_lut_ref:
             return
-        # Persist only when no override is in play, preserving the existing
-        # user-LUT fallback bookkeeping for the canonical case.
         self._load_lut_from_ref(eff, persist=(eff == base))
 
     def _lut_obj(self, ref: str):
-        """Resolve a tagged LUT ref to a cached `colour` LUT object, or None."""
+        """Tagged LUT ref -> cached LUT object, or None."""
         from core.config import resolve_lut_ref
         if not ref:
             return None
@@ -1089,24 +1009,15 @@ class FlashbackEditor(QMainWindow):
         return self._lut_cache[resolved]
 
     def _v1_variant_lut(self):
-        """The V1-tuned LUT object for the active vibe (e.g. disposable_V1), or
-        None when the vibe's LUT has no V1 variant. Passed to thumbnail workers
-        so V1 negatives in a mixed roll render with the right LUT."""
+        """The active vibe's V1 LUT, or None. For thumbnail workers."""
         base = self.current_vibe.lut_ref
         v1_ref = effective_lut_ref(base, True)
         return self._lut_obj(v1_ref) if v1_ref != base else None
 
     def _load_lut_from_ref(self, lut_ref: str, persist: bool = True):
-        """Resolve a tagged LUT ref (`factory:<id>` or `user:<path>`) to an
-        absolute path via core.config.resolve_lut_ref, load + cache, push
-        into processor + GPU. Empty ref clears the LUT so the tone-curve
-        fallback renders.
+        """Load a LUT ref into the processor and GPU. An empty ref clears it.
 
-        A `user:` ref whose file no longer exists falls back to the LUT
-        the vibe normally ships with (whichever factory id matches the
-        active vibe), so a missing custom LUT doesn't degrade further than
-        the factory look. The post-migration / startup summary handles
-        surfacing this to the user.
+        A missing user LUT falls back to the vibe's factory LUT.
         """
         from core.config import resolve_lut_ref, vibe_config_for, LUT_REF_FACTORY
         if not lut_ref:
@@ -1152,7 +1063,7 @@ class FlashbackEditor(QMainWindow):
         return self.vibe_picker.current_vibe()
 
     def save_current_vibe_defaults(self):
-        """Promote the live VibeConfig to saved defaults for the active vibe."""
+        """Save the current config as the active vibe's defaults."""
         vibe_id = self.current_vibe_id()
         vibe_state.save_one(vibe_id, self.current_vibe)
         if hasattr(self, 'debug_panel'):
@@ -1160,7 +1071,7 @@ class FlashbackEditor(QMainWindow):
             self.debug_panel.status_label.setText(f"Saved defaults for {vibe_id}.")
 
     def reset_current_vibe_to_saved(self):
-        """Discard session edits, reload saved defaults (or factory if no saved)."""
+        """Discard unsaved edits."""
         vibe_id = self.current_vibe_id()
         self._apply_vibe(vibe_id, self._vibe_for(vibe_id), refresh_thumbnails=True)
         if hasattr(self, 'debug_panel'):
@@ -1168,7 +1079,7 @@ class FlashbackEditor(QMainWindow):
             self.debug_panel.status_label.setText(f"Reset {vibe_id} to {label}.")
 
     def reset_current_vibe_to_factory(self):
-        """Wipe saved defaults for the active vibe and apply factory state."""
+        """Delete saved defaults and go back to factory."""
         vibe_id = self.current_vibe_id()
         vibe_state.clear_one(vibe_id)
         self._apply_vibe(vibe_id, vibe_config_for(vibe_id), refresh_thumbnails=True)
@@ -1178,18 +1089,15 @@ class FlashbackEditor(QMainWindow):
     _DEFAULT_USER_SETTINGS = {'exposure_ev': 0.0, 'wb_temp': 0, 'tint': 0.0, 'push_pull_ev': 0.0}
 
     def _refresh_all_thumbnails(self):
-        """Re-render every cached thumbnail in the background after a vibe change."""
+        """Re-render all thumbnails in the background."""
         if not self.image_files:
             return
 
-        # Stop any in-flight refresh before starting a new one.
         self._stop_vibe_refresh_worker()
 
-        # Snapshot cache keys on the main thread so the worker never iterates the
-        # live dict. Share the array references (shallow) rather than deep-copying
-        # every intermediate — that copy duplicated the entire cache (gigabytes)
-        # into the worker. Safe because cache values are never mutated in place
-        # (always replaced) and the worker copies each array before rendering.
+        # Shallow snapshot: a deep copy duplicated gigabytes. Safe because
+        # cache values are replaced, never modified, and the worker copies
+        # each array before use.
         cache_snapshot = dict(self.image_cache.items())
 
         self._vibe_refresh_worker = VibeRefreshWorker(
@@ -1217,7 +1125,7 @@ class FlashbackEditor(QMainWindow):
         v.setContentsMargins(14, 14, 14, 14)
         v.setSpacing(10)
 
-        # Floating "Reset" link (no TONE headline per design)
+        # Reset link
         reset_link = QPushButton("Reset")
         self._themed(reset_link, lambda: section_reset_link_qss())
         reset_link.setCursor(Qt.PointingHandCursor)
@@ -1251,7 +1159,7 @@ class FlashbackEditor(QMainWindow):
         v.setSpacing(10)
 
         # Temperature (WB)
-        self.label_wb = QLabel("5600 K")
+        self.label_wb = QLabel(f"{BASE_KELVIN:.0f} K")
         self.label_wb.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.slider_wb = ScrubSlider(dual=True)
         self.slider_wb.setMinimum(-3000)
@@ -1262,7 +1170,7 @@ class FlashbackEditor(QMainWindow):
         self.slider_wb.installEventFilter(self)
         v.addWidget(self._slider_row("TEMPERATURE", self.label_wb, self.slider_wb))
 
-        # Tint — with AUTO toggle pill in the header
+        # Tint, with the AUTO toggle
         self.label_tint = QLabel("+0")
         self.label_tint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
@@ -1356,7 +1264,7 @@ class FlashbackEditor(QMainWindow):
         pills_row.addWidget(self.btn_export_dng,  1)
         v.addLayout(pills_row)
 
-        # Output path row — single flat shape (no nested button outline)
+        # Output path
         out_row = QWidget()
         self._themed(out_row, lambda: (
             f"QWidget {{"
@@ -1392,7 +1300,7 @@ class FlashbackEditor(QMainWindow):
         ol.addWidget(self.label_output, 1)
         v.addWidget(out_row)
 
-        # Process button + thin progress bar above it
+        # Process button + progress bar
         self.progress_bar = QProgressBar()
         self.progress_bar.setMinimum(0)
         self.progress_bar.setMaximum(100)
@@ -1419,7 +1327,6 @@ class FlashbackEditor(QMainWindow):
         self.btn_process_all.clicked.connect(self.process_all_images)
         v.addWidget(self.btn_process_all)
 
-        # Initialize pill state to default (JPEG)
         self.set_export_mode('jpeg')
         return sec
 
@@ -1468,13 +1375,11 @@ class FlashbackEditor(QMainWindow):
         return bar
 
     def _build_menu_bar(self):
-        """Build the native menu bar."""
         from _version import __version__
         mb = self.menuBar()
 
         # ── About / Help ──────────────────────────────────────────────
-        # "About" with AboutRole moves to the app menu automatically on macOS.
-        # We put it in a Help menu so it appears somewhere on Windows/Linux too.
+        # AboutRole moves it to the app menu on macOS.
         help_menu = mb.addMenu("Help")
 
         act_about = QAction("About LoFi Logic", self)
@@ -1486,7 +1391,7 @@ class FlashbackEditor(QMainWindow):
         file_menu = mb.addMenu("File")
 
         act_open = QAction("Open…", self)
-        act_open.setShortcut(QKeySequence.StandardKey.Open)  # Cmd+O / Ctrl+O
+        act_open.setShortcut(QKeySequence.StandardKey.Open)
         act_open.triggered.connect(self.open_files)
         file_menu.addAction(act_open)
 
@@ -1499,16 +1404,15 @@ class FlashbackEditor(QMainWindow):
 
         self.recent_projects_menu = file_menu.addMenu("Open Recent Project")
         self.recent_projects_menu.aboutToShow.connect(self._rebuild_recent_projects_menu)
-        # Initial population so the menu isn't empty before first show.
         self._rebuild_recent_projects_menu()
 
         act_save_project = QAction("Save Project", self)
-        act_save_project.setShortcut(QKeySequence.StandardKey.Save)  # Cmd+S / Ctrl+S
+        act_save_project.setShortcut(QKeySequence.StandardKey.Save)
         act_save_project.triggered.connect(self.save_project)
         file_menu.addAction(act_save_project)
 
         act_save_project_as = QAction("Save Project As…", self)
-        act_save_project_as.setShortcut(QKeySequence.StandardKey.SaveAs)  # Cmd+Shift+S
+        act_save_project_as.setShortcut(QKeySequence.StandardKey.SaveAs)
         act_save_project_as.triggered.connect(self.save_project_as)
         file_menu.addAction(act_save_project_as)
 
@@ -1530,7 +1434,7 @@ class FlashbackEditor(QMainWindow):
 
         file_menu.addSeparator()
 
-        # ApplicationSpecificRole → macOS app menu; stays in File on Windows/Linux
+        # macOS: app menu
         act_prefs = QAction("Advanced Settings", self)
         act_prefs.setMenuRole(QAction.MenuRole.ApplicationSpecificRole)
         act_prefs.setShortcut(QKeySequence("F12"))
@@ -1538,22 +1442,21 @@ class FlashbackEditor(QMainWindow):
         file_menu.addAction(act_prefs)
 
         # ── Edit ──────────────────────────────────────────────────────
-        # Note: macOS automatically appends "Start Dictation" and "Emoji & Symbols"
-        # to any menu titled exactly "Edit". Naming it differently avoids that.
+        # Not titled "Edit": macOS adds Dictation and Emoji items to that.
         edit_menu = mb.addMenu("Adjustments")
 
         act_copy = QAction("Copy Settings", self)
-        act_copy.setShortcut(QKeySequence.StandardKey.Copy)   # Cmd+C / Ctrl+C
+        act_copy.setShortcut(QKeySequence.StandardKey.Copy)
         act_copy.triggered.connect(self.copy_settings)
         edit_menu.addAction(act_copy)
 
         act_paste = QAction("Paste Settings", self)
-        act_paste.setShortcut(QKeySequence.StandardKey.Paste)  # Cmd+V / Ctrl+V
+        act_paste.setShortcut(QKeySequence.StandardKey.Paste)
         act_paste.triggered.connect(self.paste_settings)
         edit_menu.addAction(act_paste)
 
         act_select_all = QAction("Select All for Paste", self)
-        act_select_all.setShortcut(QKeySequence.StandardKey.SelectAll)  # Cmd+A / Ctrl+A
+        act_select_all.setShortcut(QKeySequence.StandardKey.SelectAll)
         act_select_all.triggered.connect(self._menu_select_all_paste)
         edit_menu.addAction(act_select_all)
 
@@ -1589,7 +1492,7 @@ class FlashbackEditor(QMainWindow):
     # ───────────────────────────────────────────────────────────────────
 
     def _char_icon(self, char, size=16):
-        """Render a Unicode character as a QIcon for use in menus."""
+        """Unicode character as a menu icon."""
         px = QPixmap(size, size)
         px.fill(Qt.transparent)
         painter = QPainter(px)
@@ -1644,12 +1547,8 @@ class FlashbackEditor(QMainWindow):
         self.process_all_images()
 
     def export_lut_tiffs(self, output_dir, reverse_ae=False):
-        """Export ACEScct TIFFs for all selected (or all) images.
-
-        reverse_ae=False (default) exports at the app's standard exposure — the
-        right input for previewing a hand-built LUT. reverse_ae=True normalises
-        each frame by its EXIF shutter speed for real film-stock profiling.
-        """
+        """ACEScct TIFFs of the selected (or all) images. See
+        core.processor.export_image for reverse_ae."""
         if not self.image_files:
             return 0, 0
 
@@ -1670,8 +1569,7 @@ class FlashbackEditor(QMainWindow):
                 self.mode_label.setText(f"Exporting TIFF {i+1}/{total}…")
                 QApplication.processEvents()
 
-                # Always re-load from DNG: needed so _rev_gain_unconditional is
-                # computed from this file's EXIF, not a previously cached image.
+                # Reload so _rev_gain_unconditional comes from this file.
                 self.processor.load_image(file_path)
 
                 if file_path in self.image_settings:
@@ -1705,29 +1603,23 @@ class FlashbackEditor(QMainWindow):
     # FILE MANAGEMENT
     # ===================================================================
 
-    # Volume labels that identify a Flashback camera (fast-path; the camera
-    # is recognised by content even if the user renames the SD card).
+    # Known volume labels. Renamed cards are still recognised by content.
     CAMERA_VOLUME_NAMES = {'ONE35 V2', 'ONE35'}
 
-    # The camera is a disposable-style device with a fixed frame budget; any
-    # volume holding more DNGs than this can't be a Flashback camera and is
-    # almost certainly someone's photo library backup.
+    # More DNGs than a camera can hold means it's a photo library, not a
+    # camera.
     CAMERA_MAX_FRAMES = 27
 
-    # Camera-issued filename shape: SN<serial>_<frame>.dng
+    # SN<serial>_<frame>.dng
     _CAMERA_DNG_PATTERN = re.compile(r'^SN\d+_\d+\.dng$', re.IGNORECASE)
 
     @classmethod
     def _looks_like_flashback_camera(cls, mount: Path, vol_name: str, dng_files: list) -> bool:
-        """Heuristic check: does this mount look like a Flashback camera?
-
-        Rejects anything over the camera's frame capacity, then accepts on
-        any of: known volume label, presence of the camera's UNPROCESSED_JPG
-        sibling folder, or all DNG filenames matching the SN-pattern.
-        """
+        """Guess whether a mount is a Flashback camera: not too many DNGs,
+        and a known label, an UNPROCESSED_JPG folder, or SN-style names."""
         if len(dng_files) > cls.CAMERA_MAX_FRAMES:
             return False
-        # Known label: trust even if the card is empty (freshly erased camera).
+        # Known label counts even when empty.
         if vol_name in cls.CAMERA_VOLUME_NAMES:
             return True
         if not dng_files:
@@ -1740,7 +1632,7 @@ class FlashbackEditor(QMainWindow):
 
     @staticmethod
     def _get_volume_name(path: Path) -> str:
-        """Return the volume label for a mount point (cross-platform)."""
+        """Volume label for a mount point."""
         if sys.platform == 'win32':
             import ctypes
             buf = ctypes.create_unicode_buffer(1024)
@@ -1754,7 +1646,7 @@ class FlashbackEditor(QMainWindow):
         return path.name
 
     def detect_camera(self):
-        """Auto-detect Flashback camera by volume name (cross-platform)."""
+        """Find a connected Flashback camera."""
         mount_points = []
 
         if sys.platform == 'darwin':
@@ -1768,11 +1660,8 @@ class FlashbackEditor(QMainWindow):
                 if drive.exists():
                     mount_points.append(drive)
         else:  # Linux
-            # Modern desktop distros (Ubuntu, Fedora) auto-mount removable
-            # media at /media/<username>/<label> or /run/media/<username>/
-            # <label>. Walk one level deeper than /media so we see actual
-            # volumes, not per-user buckets. /mnt is typically used for
-            # manual mounts and lives at the top level.
+            # Removable media: /media/<user>/<label> or
+            # /run/media/<user>/<label>; manual mounts under /mnt.
             for base in (Path("/media"), Path("/run/media")):
                 if not base.exists():
                     continue
@@ -1822,8 +1711,7 @@ class FlashbackEditor(QMainWindow):
                 if reply == QMessageBox.Yes:
                     target_files = [tgt for _src, tgt in to_import]
                     export_sources = {str(tgt): str(src) for src, tgt in to_import}
-                    # Include the already-imported copies so the strip shows
-                    # the whole roll, not just the freshly-exported subset.
+                    # Show already imported frames too.
                     self.load_image_files(
                         target_files + skipped,
                         export_sources=export_sources,
@@ -1839,7 +1727,7 @@ class FlashbackEditor(QMainWindow):
 
     def _recent_projects(self):
         raw = self.app_settings.value("recent_projects", []) or []
-        if isinstance(raw, str):  # QSettings sometimes returns a single string
+        if isinstance(raw, str):  # QSettings returns a str for one item
             raw = [raw]
         return [str(p) for p in raw]
 
@@ -1909,7 +1797,6 @@ class FlashbackEditor(QMainWindow):
         from core.project import save_project
         if not self.image_files:
             return
-        # Commit any in-flight edits so the saved project reflects the UI.
         cur = str(self.image_files[self.current_index])
         self.image_settings[cur] = self.processor.get_settings()
         try:
@@ -1949,8 +1836,7 @@ class FlashbackEditor(QMainWindow):
         self.app_settings.setValue("last_project_dir", str(Path(path).parent))
         self._remember_recent_project(path)
         self.image_settings = dict(image_settings)
-        # Pick the original active-file path so the alphabetical re-sort
-        # inside load_image_files doesn't drift the selection.
+        # By path, since load_image_files re-sorts.
         active_path = (str(image_files[current_index])
                        if 0 <= current_index < len(image_files) else None)
         self.load_image_files(
@@ -1958,15 +1844,11 @@ class FlashbackEditor(QMainWindow):
             image_rotations=image_rotations,
             current_path=active_path,
         )
-        # load_image_files cleared current_project_path; re-attach so Save
-        # writes back to this file.
+        # load_image_files cleared it.
         self.current_project_path = Path(path)
 
     def open_os_path(self, path):
-        """Open a path the OS handed us (file association double-click, "Open
-        With", or a command-line argument). Routes project files to
-        open_project and image/zip/folder inputs through the normal load path,
-        so double-clicking a .lofi behaves like File → Open Project."""
+        """Open a path from the OS (double-click, Open With, command line)."""
         from core.project import PROJECT_EXT, LEGACY_PROJECT_EXT
         if not path or not os.path.exists(path):
             return
@@ -1994,13 +1876,8 @@ class FlashbackEditor(QMainWindow):
             self.load_image_files(self._resolve_input_paths(files))
 
     def _stop_vibe_refresh_worker(self):
-        """Stop, join, and release the vibe-refresh worker.
-
-        Releasing the reference (not just stopping) is what frees memory: the
-        worker holds a snapshot of the whole image cache, so a lingering
-        ``self._vibe_refresh_worker`` keeps that entire snapshot alive — the
-        cause of RAM not dropping when a project is replaced.
-        """
+        """Stop the vibe-refresh worker and drop the reference; it holds a
+        snapshot of the whole cache."""
         w = self._vibe_refresh_worker
         if w is None:
             return
@@ -2011,12 +1888,9 @@ class FlashbackEditor(QMainWindow):
         self._vibe_refresh_worker = None
 
     def _stop_thumbnail_workers(self):
-        """Stop and join any running thumbnail workers so their QThreads never
-        outlive the Python owner — that aborts with "QThread: Destroyed while
-        thread is still running". signals are blocked first so a stale
-        ``finished`` emission can't fire its slot against a replacement worker.
-        V1 negatives develop slowly, widening the window where a worker is
-        mid-flight on close/reload."""
+        """Stop and join thumbnail workers. A QThread destroyed while running
+        aborts the app. Signals are blocked first so a late ``finished``
+        doesn't reach the next worker."""
         for attr in ('thumbnail_worker', 'add_thumbnail_worker'):
             w = getattr(self, attr, None)
             if w is None:
@@ -2033,17 +1907,13 @@ class FlashbackEditor(QMainWindow):
             return
 
         self._stop_vibe_refresh_worker()
-        # Retire any in-flight thumbnail pass before we replace the worker
-        # reference below, or the old QThread is orphaned while still running.
         self._stop_thumbnail_workers()
 
-        # Always present in alphabetical order (by filename, case-insensitive)
-        # regardless of source ordering or OS settings.
+        # Sorted by filename, case-insensitive.
         image_files = sorted(image_files, key=lambda p: Path(str(p)).name.lower())
 
-        # Any fresh image load detaches us from the previously-open project,
-        # so subsequent Save uses Save-As semantics. open_project re-assigns
-        # current_project_path after calling load_image_files.
+        # A new load detaches from the open project; open_project sets it
+        # again afterwards.
         self.current_project_path = None
 
         self.image_files = image_files
@@ -2055,7 +1925,6 @@ class FlashbackEditor(QMainWindow):
         self.image_rotations = dict(image_rotations) if image_rotations else {}
         self.thumbnail_strip.clear()
 
-        # Pick starting index: caller-provided path wins, else first image.
         self.current_index = 0
         if current_path:
             target = str(current_path)
@@ -2072,12 +1941,8 @@ class FlashbackEditor(QMainWindow):
         final_width = len(self.image_files) * (expected_thumb_width + layout_spacing)
         self.thumbnail_strip.container.setMinimumWidth(final_width)
 
-        # When importing from a camera, the first target file does not yet
-        # exist on disk — export it synchronously so load_current_image() has
-        # something to read. Pre-fill the image cache with what the export
-        # helper already loaded so load_current_image avoids a second read.
-        # The background worker skips this file (target now exists) and moves
-        # on to the next.
+        # Camera import: the first file doesn't exist yet, so import it now
+        # and cache the result. The worker skips it because it exists.
         if export_sources:
             first = str(image_files[0])
             src = export_sources.get(first)
@@ -2132,10 +1997,8 @@ class FlashbackEditor(QMainWindow):
         log.info("✓ Thumbnail generation complete!")
         self.thumbnail_strip.container.setUpdatesEnabled(True)
         if self.thumbnail_worker:
-            # ThumbnailWorker emits its own `finished` as the LAST line of run(),
-            # i.e. while the QThread is still technically running. wait() blocks
-            # until run() has actually returned (instant here) so the queued
-            # deleteLater can't destroy a still-running QThread -> qFatal/abort.
+            # `finished` is emitted from inside run(); wait for run() to return
+            # before deleteLater, or Qt aborts.
             self.thumbnail_worker.wait()
             self.thumbnail_worker.deleteLater()
             self.thumbnail_worker = None
@@ -2146,7 +2009,7 @@ class FlashbackEditor(QMainWindow):
             log.debug("loader overlay hide failed", exc_info=True)
 
     def add_image_files(self, new_files):
-        """Append new images to the current session without resetting existing ones."""
+        """Add images to the current session."""
         if not new_files:
             return
 
@@ -2189,8 +2052,7 @@ class FlashbackEditor(QMainWindow):
     def _on_add_thumbnails_finished(self):
         log.info("✓ Add-images thumbnail generation complete!")
         if hasattr(self, 'add_thumbnail_worker') and self.add_thumbnail_worker:
-            # See _on_thumbnails_finished: join the thread before deleteLater so
-            # the DeferredDelete can't hit a QThread that's still running.
+            # See _on_thumbnails_finished.
             self.add_thumbnail_worker.wait()
             self.add_thumbnail_worker.deleteLater()
             self.add_thumbnail_worker = None
@@ -2230,9 +2092,8 @@ class FlashbackEditor(QMainWindow):
                     temp_processor = _processor or FlashbackProcessor(vibe=self.current_vibe)
                     restore_lut = None
                     if _processor is None:
-                        # Pick this file's LUT (V1 negatives may differ from the
-                        # active image). The GPU LUT is thread-local and holds the
-                        # active image's LUT, so swap in, render, then restore.
+                        # This file may need a different LUT (V1); swap it in
+                        # and restore it afterwards.
                         base = self._lut_obj(self.current_vibe.lut_ref)
                         v1 = self._v1_variant_lut()
                         chosen = v1 if (v1 is not None and is_v1_negative(file_path)) else base
@@ -2293,9 +2154,7 @@ class FlashbackEditor(QMainWindow):
             file_path = str(self.image_files[index])
             self.image_cache[file_path] = intermediate
             if is_flashback is not None:
-                # Persist the Flashback flag alongside the cached intermediate,
-                # otherwise navigating to a worker-cached image leaves the DNG
-                # export button greyed out (it only sees False from .get()).
+                # Needed for the DNG export button.
                 self._file_is_flashback[file_path] = bool(is_flashback)
                 if index == self.current_index:
                     self._update_dng_button_state()
@@ -2309,8 +2168,7 @@ class FlashbackEditor(QMainWindow):
         self.remove_from_project(self.current_index)
 
     def remove_from_project(self, index):
-        """Drop the image at `index` from the open set (no file deletion).
-        Used to curate before saving a project."""
+        """Remove an image from the session. Doesn't delete the file."""
         if not self.image_files:
             return
         if not (0 <= index < len(self.image_files)):
@@ -2329,15 +2187,10 @@ class FlashbackEditor(QMainWindow):
 
         if not self.image_files:
             self.current_index = 0
-            # Drop the cached intermediate so refresh_from_debug() (triggered
-            # by close_zen → on_zen_closed) doesn't re-render the removed
-            # image back into the view.
+            # Otherwise closing zen re-renders the removed image.
             self.processor.intermediate_acescg = None
             self.processor.current_file = None
-            # And cancel any in-flight background render — otherwise its
-            # render_done would fire after the clear and re-set
-            # image_label._original_pixmap, making the image reappear on the
-            # next zoom/scroll.
+            # A pending render would put the image back.
             if hasattr(self, '_render_worker'):
                 self._render_worker.invalidate()
             self._render_needs_commit = False
@@ -2347,16 +2200,12 @@ class FlashbackEditor(QMainWindow):
             self.btn_process_all.setEnabled(False)
             self.update_process_button_text()
             self.update_mode_label()
-            # Zen mode shows the same image; with no images left, exit zen.
-            # Defer the close so it happens after the current key-press handler
-            # in the zen overlay unwinds (calling hide() from inside a child's
-            # keyPressEvent can race with Qt re-asserting focus on the overlay).
+            # Leave zen when nothing is left. Deferred: hiding from inside the
+            # overlay's keyPressEvent races with Qt's focus handling.
             if hasattr(self, 'zen_overlay'):
                 QTimer.singleShot(0, self.zen_overlay.close_zen)
             return
 
-        # Stay on the same slot when possible; if we deleted the tail, fall
-        # back to what is now the last image.
         self.current_index = min(index, len(self.image_files) - 1)
         self.update_process_button_text()
         self.load_current_image()
@@ -2391,7 +2240,7 @@ class FlashbackEditor(QMainWindow):
             self.btn_process_all.setText(f"Process {len(self.image_files)} / {len(self.image_files)}")
 
     def _set_process_button_done(self, count: int):
-        """Post-export state: checkmark + 'N frames processed'."""
+        """Checkmark + 'N frames processed'."""
         self.btn_process_all.setText(f"✓  {count} frame{'s' if count != 1 else ''} processed")
         self.btn_process_all.setStyleSheet(f"""
             QPushButton {{
@@ -2411,14 +2260,8 @@ class FlashbackEditor(QMainWindow):
     # ===================================================================
 
     def _preview_key(self):
-        """Identity of the downscaled preview for the current processor state.
-
-        A cached preview is reusable only if every input that the downscale
-        render depends on is unchanged: the source intermediate (id changes on
-        rotate/reload), the per-image sliders, the active vibe, and the LUT
-        (V1 negatives swap in a variant). Keying on these makes a stale preview
-        structurally impossible — any change yields a new key and a cache miss,
-        so no manual invalidation is needed when settings or vibe change."""
+        """Cache key for the downscaled preview: intermediate, sliders, vibe
+        and LUT. Any change is a new key, so nothing needs invalidating."""
         a = self.processor.adjustments
         return (
             id(self.processor.intermediate_acescg),
@@ -2427,7 +2270,7 @@ class FlashbackEditor(QMainWindow):
             getattr(a, 'rotation', 0),
             self.current_vibe_id(),
             id(self.processor.lut),
-            # Every effect parameter (Advanced Settings edits keep the vibe id).
+            # Advanced panel edits keep the vibe id, so include every field.
             repr(self.current_vibe),
         )
 
@@ -2437,8 +2280,7 @@ class FlashbackEditor(QMainWindow):
             self.label_counter.setText("0 / 0")
             return
 
-        # Cancel any in-flight scrub render and clear the commit flag — the
-        # processor state is about to change out from under the worker.
+        # The processor state is about to change.
         if hasattr(self, '_render_worker'):
             self._render_worker.invalidate()
         self._render_needs_commit = False
@@ -2449,8 +2291,6 @@ class FlashbackEditor(QMainWindow):
         if hasattr(self, 'thumbnail_strip'):
             self.thumbnail_strip.set_current_index(self.current_index)
 
-        # Swap in the V1-tuned LUT when this frame is a negative and the active
-        # vibe has a V1 variant (e.g. disposable) — before any render below.
         self._apply_effective_lut(file_path)
 
         if file_path in self.image_settings:
@@ -2470,16 +2310,10 @@ class FlashbackEditor(QMainWindow):
 
         if file_path in self.image_cache:
             self.processor.adopt_cached_intermediate(file_path, self.image_cache[file_path])
-            # Restore Flashback status so DNG button reflects the correct state
             self.processor.is_flashback_file = self._file_is_flashback.get(file_path, False)
             self._update_dng_button_state()
-            # Revisiting an image must be instant and must not block the UI
-            # thread on a GPU readback (that readback serialises behind any
-            # in-flight full-res render on the shared device — the freeze that
-            # made switching show the previous image for seconds). Reuse the
-            # cached downscaled preview when it still matches the current state;
-            # only render synchronously on a genuine miss (first visit / changed
-            # settings or vibe).
+            # Use the cached preview if it matches. Rendering here waits behind
+            # any full render on the GPU, which froze the UI for seconds.
             key = self._preview_key()
             full = self.full_render_cache.get(file_path)
             if full is not None and full[0] == key:
@@ -2511,7 +2345,6 @@ class FlashbackEditor(QMainWindow):
             if img_array is not None:
                 self._file_is_flashback[file_path] = self.processor.is_flashback_file
                 self._update_dng_button_state()
-                # Re-apply any rotation persisted from a previous session.
                 stored_rot = self.image_rotations.get(file_path, 0)
                 if stored_rot:
                     self.processor.adjustments.rotation = stored_rot
@@ -2530,19 +2363,15 @@ class FlashbackEditor(QMainWindow):
         if img_array is None:
             return
         if hasattr(self, 'zen_overlay') and self.zen_overlay.isVisible():
-            # Build the pixmap once and hand it directly to the zen overlay.
-            # Skipping image_label._update_display() avoids a second SmoothTransformation
-            # scale on the hidden main window — that was doubling the per-frame cost.
+            # Straight to the zen overlay; also scaling for the hidden main
+            # window doubled the cost.
             img_8bit = (np.clip(img_array, 0, 1) * 255).astype(np.uint8)
             h, w, c = img_8bit.shape
             q_image = QImage(img_8bit.data, w, h, c * w, QImage.Format_RGB888)
             pixmap = QPixmap.fromImage(q_image)
             if is_scrub:
-                # Scale the scrub frame up to the full render's pixel dimensions so
-                # the zen overlay layout is stable throughout the nav→render lifecycle.
-                # Using processor.intermediate_acescg (not _original_pixmap) as the
-                # target means rotated images and navigated images always match what
-                # the background render will produce — no snap when it arrives.
+                # Scale to the full render's size so nothing jumps when it
+                # arrives. Sized from the intermediate so rotation is right.
                 if (self.processor is not None and
                         self.processor.intermediate_acescg is not None):
                     full_h, full_w = self.processor.intermediate_acescg.shape[:2]
@@ -2554,7 +2383,7 @@ class FlashbackEditor(QMainWindow):
                         pixmap = pixmap.scaled(ref.width(), ref.height(),
                                                Qt.KeepAspectRatio, Qt.SmoothTransformation)
             else:
-                self.image_label._original_pixmap = pixmap  # full-res — update reference
+                self.image_label._original_pixmap = pixmap
             self.zen_overlay.update_preview(pixmap)
         else:
             if is_scrub:
@@ -2574,7 +2403,7 @@ class FlashbackEditor(QMainWindow):
         self.slider_tint.setValue(int(round(a.tint * 5)))
 
         self.label_exposure.setText(f"{a.exposure_ev:.1f} EV")
-        temp_absolute = 5600 + int(a.wb_temp)
+        temp_absolute = int(BASE_KELVIN + a.wb_temp)
         self.label_wb.setText(f"{temp_absolute} K")
         self.label_tint.setText(f"{int(round(a.tint * 5)):+d}")
 
@@ -2582,7 +2411,6 @@ class FlashbackEditor(QMainWindow):
         self.slider_wb.blockSignals(False)
         self.slider_tint.blockSignals(False)
 
-        # Keep the manual tint offset coherent with the newly loaded settings
         if self.chk_wb_link.isChecked():
             self._tint_manual_offset = a.tint - self._coupled_tint(a.wb_temp)
 
@@ -2591,17 +2419,12 @@ class FlashbackEditor(QMainWindow):
     # ===================================================================
 
     def _on_render_done(self, img_array, was_downscaled):
-        """Receive a completed render from the background RenderWorker."""
         self.display_image(img_array, is_scrub=was_downscaled)
-        # Keep the downscaled-preview cache warm with the latest look so a later
-        # revisit is instant. Safe even mid-scrub: the worker drops post-switch
-        # renders (epoch), so this only ever fires for the current image, and
-        # the key captures the live settings used to produce this frame.
+        # Update the preview cache. The worker drops renders for other images.
         if was_downscaled and self.image_files:
             file_path = str(self.image_files[self.current_index])
             self.preview_cache[file_path] = (self._preview_key(), img_array)
-        # Only when no newer request is queued, so a render made with older
-        # settings is never stored under the current settings' key.
+        # Not if a newer request is queued: this render has older settings.
         if not was_downscaled and self.image_files and self._render_worker._pending is None:
             file_path = str(self.image_files[self.current_index])
             self.full_render_cache[file_path] = (
@@ -2614,9 +2437,7 @@ class FlashbackEditor(QMainWindow):
             self._render_needs_commit = False
             self.update_current_thumbnail(img_array)
             self.update_mode_label()
-            # save_current_settings is called synchronously at slider release —
-            # see on_*_released / reset_*_slider — so persistence survives an
-            # image switch that invalidates this render.
+            # Settings are saved on slider release, not here.
 
     # ===================================================================
     # SLIDER HANDLERS
@@ -2637,16 +2458,12 @@ class FlashbackEditor(QMainWindow):
         self.save_current_settings()
 
     def _coupled_tint(self, wb_offset):
-        """Coupled tint value for a given WB offset from neutral (5600K).
-        Linear ±6: 0 → 0,  -2000 → +6,  +2000 → -6.
-        Returns tint in actual units (same as processor.adjustments.tint).
-        """
+        """Tint coupled to a WB offset: linear, -2000 → +6, +2000 → -6."""
         return wb_offset / 2000.0 * -6.0
 
     def _apply_wb_tint_link(self, wb_value):
-        """When the link is active: compute coupled tint + manual offset, update
-        the tint slider/label without triggering on_tint_slider_moved, and update
-        the processor setting.  Returns the new tint value."""
+        """Set tint to the coupled value + manual offset without firing the
+        slider handler. Returns the tint."""
         coupled = self._coupled_tint(wb_value)
         new_tint = max(-10.0, min(10.0, coupled + self._tint_manual_offset))
         self.processor.adjustments.tint = new_tint
@@ -2657,7 +2474,7 @@ class FlashbackEditor(QMainWindow):
         return new_tint
 
     def on_wb_slider_moved(self, value):
-        temp_absolute = 5600 + value
+        temp_absolute = int(BASE_KELVIN) + value
         self.label_wb.setText(f"{temp_absolute} K")
 
         if self.chk_wb_link.isChecked():
@@ -2704,7 +2521,7 @@ class FlashbackEditor(QMainWindow):
         self.slider_tint.blockSignals(True)
 
         self.label_exposure.setText("0.0 EV")
-        self.label_wb.setText("5600 K")
+        self.label_wb.setText(f"{BASE_KELVIN:.0f} K")
         self.label_tint.setText("+0")
         self.slider_exposure.setValue(0)
         self.slider_wb.setValue(0)
@@ -2723,7 +2540,6 @@ class FlashbackEditor(QMainWindow):
         self.update_mode_label()
 
     def update_mode_label(self):
-        """Default status line when the processor is idle."""
         if self.image_files:
             total = len(self.image_files)
             processed = sum(
@@ -2737,7 +2553,7 @@ class FlashbackEditor(QMainWindow):
         self.status_dot.setStyleSheet(f"color: {C['processed']};")
 
     def _is_processed(self, file_path: str) -> bool:
-        """True if an export file exists in output_dir for this source image."""
+        """True if output_dir has an export of this image."""
         try:
             base = export_basename(file_path)
             candidates = ["_clean.dng", "_edit.jpg"]
@@ -2845,19 +2661,14 @@ class FlashbackEditor(QMainWindow):
     def select_output_dir(self):
         directory = QFileDialog.getExistingDirectory(self, "Select Output Directory", self.output_dir)
         if directory:
-            # Session-only override. The default lives in QSettings under
-            # "default_export_dir" and is changed from the advanced panel.
+            # For this session only; the default is set in the advanced panel.
             self.output_dir = directory
             self.label_output.setText(directory)
             self.label_output.setToolTip(directory)
 
     def _update_dng_button_state(self):
-        """Enable or disable the DNG export pill based on the current file's type.
-
-        DNG export uses Flashback-specific color science and is only meaningful
-        for files shot on a Flashback camera. For all other raws the button is
-        visible but greyed out, and the mode is silently redirected to JPEG.
-        """
+        """DNG export only works for Flashback files; otherwise grey it out
+        and switch to JPEG."""
         if not hasattr(self, 'btn_export_dng'):
             return
         file_path = str(self.image_files[self.current_index]) if self.image_files else None
@@ -2873,7 +2684,7 @@ class FlashbackEditor(QMainWindow):
 
     def set_export_mode(self, mode):
         """Select JPEG / DNG export; sync pills."""
-        if mode in (True, 'tiff'):  # legacy: redirect old TIFF mode to JPEG
+        if mode in (True, 'tiff'):
             mode = 'jpeg'
         elif mode is False:
             mode = 'jpeg'
@@ -2899,7 +2710,6 @@ class FlashbackEditor(QMainWindow):
         else:
             indices_to_process = list(range(len(self.image_files)))
 
-        # Low disk space: inline warning in the status bar, no modal.
         mb_per_image = {'jpeg': 5, 'dng': 17}.get(self.export_mode, 5)
         required_mb = len(indices_to_process) * mb_per_image
         try:
@@ -2955,7 +2765,7 @@ class FlashbackEditor(QMainWindow):
                 if self.export_mode == 'dng':
                     output_path = os.path.join(self.output_dir, f"{base_name}_clean.dng")
                 else:
-                    # Per-file LUT (V1 negatives get the V1-tuned variant).
+                    # V1 negatives may use a different LUT.
                     self._apply_effective_lut(file_path)
                     vibe_id = self.processor.adjustments.active_vibe_id
                     suffix = VIBE_EXPORT_SUFFIX.get(vibe_id, 'edit')
@@ -3083,8 +2893,7 @@ class FlashbackEditor(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
-        # Needs a real native window; defer one event loop pass so the
-        # NSWindow is fully constructed before we drive AppKit against it.
+        # Wait one event loop pass for the native window to exist.
         if not getattr(self, "_native_chrome_applied", False):
             self._native_chrome_applied = True
 
@@ -3098,10 +2907,7 @@ class FlashbackEditor(QMainWindow):
             QTimer.singleShot(0, _do_apply)
 
     def closeEvent(self, event):
-        # Join every background QThread before teardown — any still running when
-        # its Python owner is destroyed aborts the process ("QThread: Destroyed
-        # while thread is still running"). Slow V1 thumbnail passes make this
-        # easy to hit on close.
+        # A QThread destroyed while running aborts the process.
         self._stop_vibe_refresh_worker()
         self._stop_thumbnail_workers()
         self._render_worker.stop()
@@ -3116,7 +2922,7 @@ class FlashbackEditor(QMainWindow):
             self._update_drag_overlay_geometry()
 
     def _update_drag_overlay_geometry(self):
-        """Position the two drag overlays: upper = replace, lower = add (thumbnail strip)."""
+        """Drag overlays: top replaces, bottom (thumbnail strip) adds."""
         cw = self.centralWidget()
         if cw is None:
             return
@@ -3125,18 +2931,16 @@ class FlashbackEditor(QMainWindow):
         m = 8  # margin
 
         if self.image_files and hasattr(self, 'drag_overlay_add'):
-            # Split at the thumbnail strip top edge; add-overlay fills the full strip.
             strip = self.thumbnail_strip.parentWidget() or self.thumbnail_strip
             strip_top = strip.mapTo(cw, QPoint(0, 0)).y()
             strip_h = strip.height()
             self.drag_overlay.setGeometry(m, m, cw_w - 2 * m, max(40, strip_top - 2 * m))
             self.drag_overlay_add.setGeometry(0, strip_top, cw_w, strip_h)
         else:
-            # No images loaded — full-area replace overlay only
+            # Nothing loaded: replace only
             self.drag_overlay.setGeometry(m, m, cw_w - 2 * m, cw_h - 2 * m)
 
     def _set_drag_hover(self, over_strip):
-        """Highlight the active drag zone and dim the inactive one."""
         if not self.image_files:
             return
         if over_strip:
@@ -3147,14 +2951,11 @@ class FlashbackEditor(QMainWindow):
             self.drag_overlay_add.setStyleSheet(self._drag_style_dim)
 
     def _negatives_from_zip(self, zip_path):
-        """Extract a Flashback V1 roll zip to paired negative files under the
-        output dir and return the raw paths (sorted). Empty list on failure."""
+        """Extract a V1 roll zip into the output dir. Returns the raw paths."""
         from core.v1_negative import extract_negatives_from_zip, roll_capture_date
         from datetime import datetime
         try:
-            # Mirror V2's date-foldered import layout: <output>/<date>/_v1_imports/<roll>.
-            # The date comes from the negatives' own timestamps inside the zip
-            # (old rolls can be exported anytime), falling back to import time.
+            # <output>/<date>/_v1_imports/<roll>, dated from the zip entries.
             roll_dt = roll_capture_date(zip_path) or datetime.now()
             dest = (Path(self.output_dir) / date_folder_name(roll_dt)
                     / '_v1_imports' / Path(zip_path).stem
@@ -3168,10 +2969,8 @@ class FlashbackEditor(QMainWindow):
             return []
 
     def _images_from_folder(self, folder):
-        """Collect loadable images from an already-imported folder: supported
-        raws plus V1 negatives (extensionless raw + .json sidecar). Loaded in
-        place — no copy, so re-dragging a folder never overwrites it.
-        Non-recursive; sorted by name."""
+        """Supported raws and V1 negatives in a folder, sorted, not recursive.
+        Loaded in place."""
         found = []
         try:
             entries = sorted(Path(folder).iterdir(), key=lambda x: x.name.lower())
@@ -3179,7 +2978,7 @@ class FlashbackEditor(QMainWindow):
             return found
         for entry in entries:
             if not entry.is_file() or entry.name.lower().endswith('.json'):
-                continue  # .json is a V1 sidecar, picked up with its raw
+                continue  # V1 sidecar
             if entry.name.lower().endswith(self.supported_extensions()) \
                     or is_v1_negative(str(entry)):
                 found.append(entry)
@@ -3188,10 +2987,7 @@ class FlashbackEditor(QMainWindow):
         return found
 
     def _resolve_input_paths(self, paths):
-        """Expand dropped/opened inputs into loadable image paths:
-          - .zip rolls   -> extracted V1 negatives (idempotent; existing reused)
-          - directories  -> the supported raws / V1 negatives they contain
-          - everything else passes through unchanged."""
+        """Expand .zip rolls and folders into image paths."""
         resolved = []
         for p in paths:
             sp = str(p)
@@ -3249,7 +3045,7 @@ class FlashbackEditor(QMainWindow):
             event.ignore()
             return
 
-        # Determine drop zone: below thumbnail strip top → add; above → replace
+        # Over the thumbnail strip adds, above it replaces
         cw = self.centralWidget()
         strip_top = self.thumbnail_strip.mapTo(cw, QPoint(0, 0)).y()
         pos_in_cw = cw.mapFrom(self, event.position().toPoint())

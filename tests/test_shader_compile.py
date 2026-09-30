@@ -1,16 +1,8 @@
-"""Smoke test: every WGSL compute pipeline must compile on the active backend.
+"""Every compute pipeline builds on the current backend.
 
-This guards against shader-translation regressions that only surface at pipeline
-creation — most notably the Naga SPIR-V backend panic
-("internal error: ... Expression is not cached!") that crashed the whole app on
-the Vulkan backend (Windows default, and Linux/RADV on the Steam Deck) while the
-D3D12 backend stayed fine. Such a panic is a Rust abort, not a Python exception,
-so it takes down the entire test process — which is exactly the loud failure we
-want in CI.
-
-Runs wherever a GPU adapter exists. On CI that means a software Vulkan device
-(Mesa lavapipe); Naga generates SPIR-V regardless of the underlying driver, so
-lavapipe reproduces the same codegen path a real Vulkan GPU would take.
+Naga has panicked on Vulkan ("Expression is not cached!") with shaders that
+worked on D3D12 and Metal. A panic aborts the whole process, so a failure here
+is loud. CI runs this on lavapipe, which goes through the same SPIR-V codegen.
 """
 import pytest
 
@@ -38,12 +30,6 @@ _EXPECTED_PIPELINES = [
 @pytest.mark.parametrize("pipe_attr,entry", _EXPECTED_PIPELINES,
                          ids=[f"{a}:{e}" for a, e in _EXPECTED_PIPELINES])
 def test_pipeline_compiled(pipe_attr, entry):
-    """Each declared compute pipeline exists on the initialised singleton.
-
-    _init() already ran _build_pipelines() (the create_compute_pipeline calls
-    that invoke Naga); if any shader failed to translate, the process would have
-    aborted before we got here. This asserts the table and the shaders stayed in
-    sync — every entry point produced a live pipeline object.
-    """
+    """Every pipeline in the table was created."""
     pipeline = getattr(gpu, pipe_attr, None)
     assert pipeline is not None, f"pipeline {pipe_attr} ({entry}) was not built"
