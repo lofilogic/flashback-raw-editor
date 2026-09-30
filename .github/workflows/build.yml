@@ -229,17 +229,6 @@ jobs:
         id: ver
         run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
 
-      # Unversioned copies, so the README can link to
-      # releases/latest/download/<name> and never goes stale.
-      - name: Add fixed-name copies
-        env:
-          VER: ${{ steps.ver.outputs.version }}
-        run: |
-          mkdir stable
-          cp artifacts/*/LoFiLogic-macOS-${VER}.dmg stable/LoFiLogic-macOS.dmg
-          cp artifacts/*/LoFiLogic-Windows-Setup-${VER}.exe stable/LoFiLogic-Windows-Setup.exe
-          cp artifacts/*/LoFiLogic-${VER}-x86_64.AppImage stable/LoFiLogic-x86_64.AppImage
-
       - name: Build release notes
         env:
           VER: ${{ steps.ver.outputs.version }}
@@ -277,8 +266,29 @@ jobs:
             artifacts/**/*.dmg
             artifacts/**/*.exe
             artifacts/**/*.AppImage
-            stable/*
           body_path: release-notes.md
           draft: false
           # Tags containing -beta or -rc are automatically marked as pre-release
           prerelease: ${{ contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
+
+      # Point the README's download links at this release and push that to
+      # main. Skipped for pre-releases.
+      - name: Update README download links
+        if: ${{ !contains(github.ref_name, '-beta') && !contains(github.ref_name, '-rc') }}
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+          REF: ${{ github.ref_name }}
+        run: |
+          git fetch -q origin main
+          git checkout -q -B main origin/main
+          sed -i -E \
+            -e "s#releases/(latest/)?download/(v[^/]+/)?#releases/download/${REF}/#g" \
+            -e "s#LoFiLogic-macOS[-.0-9A-Za-z]*\.dmg#LoFiLogic-macOS-${VER}.dmg#g" \
+            -e "s#LoFiLogic-Windows-Setup[-.0-9A-Za-z]*\.exe#LoFiLogic-Windows-Setup-${VER}.exe#g" \
+            -e "s#LoFiLogic-([0-9][-.0-9A-Za-z]*-)?x86_64\.AppImage#LoFiLogic-${VER}-x86_64.AppImage#g" \
+            README.md
+          git diff --quiet README.md && exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q -am "README: download links for ${REF}"
+          git push origin main || { git pull -q --rebase origin main && git push origin main; }

@@ -70,8 +70,8 @@ git push origin v1.7.0
 ```
 
 The tag builds all three platforms and publishes a GitHub Release with that changelog section.
-Each file is also uploaded under a name without the version, which the README's
-`releases/latest/download/…` links point to, so the README doesn't need updating.
-Tags containing `-beta` or `-rc` become pre-releases and don't count as latest.
+Afterwards it points the README's download links at the new files and pushes that to `main`,
+so pull after a release. Tags containing `-beta` or `-rc` become pre-releases and leave the
+README alone.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how the pipeline works.
