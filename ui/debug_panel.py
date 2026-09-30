@@ -360,6 +360,31 @@ class DebugPanel(QWidget):
 
         form_layout.addWidget(lut_prof_group)
 
+        # --- Experimental Group ---
+        exp_group = QGroupBox("Experimental")
+        exp_group.setStyleSheet("QGroupBox { color: #d0d0d0; font-weight: bold; border: 1px solid #555; border-radius: 6px; margin-top: 8px; padding-top: 8px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }")
+        exp_layout = QVBoxLayout(exp_group)
+        exp_layout.setSpacing(6)
+
+        self.chk_experimental_jpeg = QCheckBox("Allow JPEG import")
+        self.chk_experimental_jpeg.setChecked(
+            self.parent_editor.app_settings.value("experimental_jpeg", False, type=bool)
+            if self.parent_editor is not None else False)
+        self.chk_experimental_jpeg.setToolTip(
+            "Lets you open .jpg/.jpeg files. Expect less accurate results than\n"
+            "with RAW: a JPEG is display-referred — the camera has already\n"
+            "applied its own tone curve, colour and clipped highlights — so the\n"
+            "film look is layered on a finished image, not on sensor data.\n"
+            "8-bit depth and compression also limit how far it can be pushed\n"
+            "before banding and artefacts show."
+        )
+        self.chk_experimental_jpeg.toggled.connect(
+            lambda on: self.parent_editor.app_settings.setValue("experimental_jpeg", on)
+            if self.parent_editor is not None else None)
+        exp_layout.addWidget(self.chk_experimental_jpeg)
+
+        form_layout.addWidget(exp_group)
+
         # --- Default Folders Group ---
         folders_group = QGroupBox("Default Folders")
         folders_group.setStyleSheet("QGroupBox { color: #d0d0d0; font-weight: bold; border: 1px solid #555; border-radius: 6px; margin-top: 8px; padding-top: 8px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }")

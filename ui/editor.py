@@ -197,6 +197,9 @@ class _ByteBudgetLRU(OrderedDict):
             del self[key]
 
 
+FULL_RENDER_CACHE_SIZE = 3  # full-effect renders kept for quick A/B switching
+
+
 class FlashbackEditor(QMainWindow):
     """Main application window for LoFi Logic image editing."""
 
@@ -231,6 +234,14 @@ class FlashbackEditor(QMainWindow):
         '.bay',                                  # Casio
         '.ari',                                  # ARRI
     )
+    # EXPERIMENTAL, opt-in from Advanced Settings: camera JPEGs are already
+    # display-referred, so the film look lands on a rendered image.
+    JPEG_EXTENSIONS = ('.jpg', '.jpeg')
+
+    def supported_extensions(self) -> tuple:
+        if self.app_settings.value("experimental_jpeg", False, type=bool):
+            return self.SUPPORTED_EXTENSIONS + self.JPEG_EXTENSIONS
+        return self.SUPPORTED_EXTENSIONS
 
     def __init__(self):
         super().__init__()
@@ -249,6 +260,9 @@ class FlashbackEditor(QMainWindow):
         self.cache_budget = _CacheBudget()
         self.image_cache = _ByteBudgetLRU(self.cache_budget)
         self.preview_cache = _ByteBudgetLRU(self.cache_budget)
+        # Last few full-effect renders (8-bit), so flipping between adjacent
+        # frames shows the finished look at once instead of preview → re-render.
+        self.full_render_cache = OrderedDict()
         self.export_mode = 'jpeg'  # 'jpeg' | 'tiff' | 'dng'
         self.thumbnail_cache = _ByteBudgetLRU(self.cache_budget)
         self._file_is_flashback: dict = {}  # path_str -> bool
@@ -1967,8 +1981,8 @@ class FlashbackEditor(QMainWindow):
         default_dir = QStandardPaths.writableLocation(QStandardPaths.PicturesLocation) or str(Path.home())
         start_dir = self.app_settings.value("last_open_dir", default_dir)
 
-        lower_exts = [f"*{ext}" for ext in self.SUPPORTED_EXTENSIONS]
-        upper_exts = [f"*{ext.upper()}" for ext in self.SUPPORTED_EXTENSIONS]
+        lower_exts = [f"*{ext}" for ext in self.supported_extensions()]
+        upper_exts = [f"*{ext.upper()}" for ext in self.supported_extensions()]
         filter_string = (f"Supported Images ({' '.join(lower_exts + upper_exts + ['*.zip'])});;"
                          f"Flashback V1 Roll (*.zip)")
 
@@ -2035,6 +2049,7 @@ class FlashbackEditor(QMainWindow):
         self.image_files = image_files
         self.image_cache.clear()
         self.preview_cache.clear()
+        self.full_render_cache.clear()
         self.thumbnail_cache.clear()
         self._file_is_flashback.clear()
         self.image_rotations = dict(image_rotations) if image_rotations else {}
@@ -2223,8 +2238,8 @@ class FlashbackEditor(QMainWindow):
                             if chosen is not None:
                                 gpu.upload_lut(chosen.table)
                             restore_lut = self.processor.lut
-                    temp_processor.intermediate_acescg = self.image_cache[file_path].copy()
-                    temp_processor.current_file = file_path
+                    temp_processor.adopt_cached_intermediate(
+                        file_path, self.image_cache[file_path].copy())
                     temp_processor.set_settings(settings)
                     img_display = temp_processor._render_fast(downscale=True)
                     if restore_lut is not None:
@@ -2304,6 +2319,7 @@ class FlashbackEditor(QMainWindow):
         self.image_rotations.pop(file_path, None)
         self.image_cache.pop(file_path, None)
         self.preview_cache.pop(file_path, None)
+        self.full_render_cache.pop(file_path, None)
         self.thumbnail_cache.pop(file_path, None)
         self._file_is_flashback.pop(file_path, None)
         self.thumbnail_strip.remove_at(index)
@@ -2408,6 +2424,8 @@ class FlashbackEditor(QMainWindow):
             getattr(a, 'rotation', 0),
             self.current_vibe_id(),
             id(self.processor.lut),
+            # Every effect parameter (Advanced Settings edits keep the vibe id).
+            repr(self.current_vibe),
         )
 
     def load_current_image(self):
@@ -2448,8 +2466,7 @@ class FlashbackEditor(QMainWindow):
 
 
         if file_path in self.image_cache:
-            self.processor.intermediate_acescg = self.image_cache[file_path]
-            self.processor.current_file = file_path
+            self.processor.adopt_cached_intermediate(file_path, self.image_cache[file_path])
             # Restore Flashback status so DNG button reflects the correct state
             self.processor.is_flashback_file = self._file_is_flashback.get(file_path, False)
             self._update_dng_button_state()
@@ -2461,6 +2478,12 @@ class FlashbackEditor(QMainWindow):
             # only render synchronously on a genuine miss (first visit / changed
             # settings or vibe).
             key = self._preview_key()
+            full = self.full_render_cache.get(file_path)
+            if full is not None and full[0] == key:
+                self.full_render_cache.move_to_end(file_path)
+                self.display_image(full[1].astype(np.float32) / 255.0, is_scrub=False)
+                self.update_mode_label()
+                return
             cached = self.preview_cache.get(file_path)
             if cached is not None and cached[0] == key:
                 img_array = cached[1]
@@ -2574,6 +2597,16 @@ class FlashbackEditor(QMainWindow):
         if was_downscaled and self.image_files:
             file_path = str(self.image_files[self.current_index])
             self.preview_cache[file_path] = (self._preview_key(), img_array)
+        # Only when no newer request is queued, so a render made with older
+        # settings is never stored under the current settings' key.
+        if not was_downscaled and self.image_files and self._render_worker._pending is None:
+            file_path = str(self.image_files[self.current_index])
+            self.full_render_cache[file_path] = (
+                self._preview_key(),
+                (np.clip(img_array, 0, 1) * 255).astype(np.uint8))
+            self.full_render_cache.move_to_end(file_path)
+            while len(self.full_render_cache) > FULL_RENDER_CACHE_SIZE:
+                self.full_render_cache.popitem(last=False)
         if not was_downscaled and self._render_needs_commit:
             self._render_needs_commit = False
             self.update_current_thumbnail(img_array)
@@ -2906,8 +2939,8 @@ class FlashbackEditor(QMainWindow):
 
                 if self.export_mode != 'dng':
                     if file_path in self.image_cache:
-                        self.processor.intermediate_acescg = self.image_cache[file_path].copy()
-                        self.processor.current_file = file_path
+                        self.processor.adopt_cached_intermediate(
+                            file_path, self.image_cache[file_path].copy())
                     else:
                         self.processor.load_image(file_path)
                         self.image_cache[file_path] = self.processor.intermediate_acescg.copy()
@@ -3001,6 +3034,7 @@ class FlashbackEditor(QMainWindow):
         if file_path in self.image_cache:
             del self.image_cache[file_path]
         self.preview_cache.pop(file_path, None)
+        self.full_render_cache.pop(file_path, None)
         self.load_current_image()
 
     # ===================================================================
@@ -3143,7 +3177,7 @@ class FlashbackEditor(QMainWindow):
         for entry in entries:
             if not entry.is_file() or entry.name.lower().endswith('.json'):
                 continue  # .json is a V1 sidecar, picked up with its raw
-            if entry.name.lower().endswith(self.SUPPORTED_EXTENSIONS) \
+            if entry.name.lower().endswith(self.supported_extensions()) \
                     or is_v1_negative(str(entry)):
                 found.append(entry)
         if not found:
@@ -3170,7 +3204,7 @@ class FlashbackEditor(QMainWindow):
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
                 if url.isLocalFile() and (
-                        url.toLocalFile().lower().endswith(self.SUPPORTED_EXTENSIONS + ('.zip',))
+                        url.toLocalFile().lower().endswith(self.supported_extensions() + ('.zip',))
                         or os.path.isdir(url.toLocalFile())):
                     self._update_drag_overlay_geometry()
                     self.drag_overlay.raise_()
@@ -3203,7 +3237,7 @@ class FlashbackEditor(QMainWindow):
         for url in urls:
             if url.isLocalFile():
                 file_path = url.toLocalFile()
-                if file_path.lower().endswith(self.SUPPORTED_EXTENSIONS + ('.zip',)) \
+                if file_path.lower().endswith(self.supported_extensions() + ('.zip',)) \
                         or os.path.isdir(file_path):
                     dropped.append(file_path)
         image_files = self._resolve_input_paths(dropped)

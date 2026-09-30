@@ -37,6 +37,10 @@ from . import resource_path
 
 log = logging.getLogger(__name__)
 from .config import (
+    WORKING_LONG_EDGE,
+    JPEG_TONE_CURVE, JPEG_EXPOSURE_EV, JPEG_CONTRAST, JPEG_SATURATION,
+    JPEG_SHADOW_SATURATION, JPEG_SHADOW_SAT_END_EV,
+    JPEG_SPATIAL_MULT, JPEG_VIGNETTE_MULT,
     SENSOR_BLACK, GRAIN_TILE_SCALE, GRAIN_HIGHLIGHT_BIAS, PUSH_PULL_RANGE_EV,
     GENERIC_RAW_ANCHOR_EV,
     BASE_KELVIN, GENERIC_DAYLIGHT_K, GENERIC_DAYLIGHT_WB_FALLBACK,
@@ -48,7 +52,7 @@ from .config import (
     resolve_lut_ref,
     _timing_print,
 )
-from .kernels import (acescct_encode, apply_grain, encode_then_lut, run_resident,
+from .kernels import (acescct_encode, acescct_decode, apply_grain, encode_then_lut, run_resident,
                       color_transform)
 from .gpu import gpu
 from .v1_negative import is_v1_negative, develop_v1
@@ -231,6 +235,66 @@ def _srgb_eotf(x: np.ndarray) -> np.ndarray:
     x = np.clip(x, 0.0, 1.0)
     a = 0.055
     return np.where(x <= 0.04045, x / 12.92, np.power((x + a) / (1 + a), 2.4))
+
+
+_AP1_LUMA = np.array([0.2722287, 0.6740818, 0.0536895], dtype=np.float32)
+
+
+
+
+def _build_jpeg_curve_lut(points, size=4096):
+    from scipy.interpolate import CubicSpline
+    xs, ys = (np.array(v, dtype=np.float64) / 255.0 for v in zip(*points))
+    domain = np.linspace(0.0, 1.0, size)
+    return np.clip(CubicSpline(xs, ys, bc_type='natural')(domain), 0.0, 1.0).astype(np.float32)
+
+
+_JPEG_CURVE_LUT = _build_jpeg_curve_lut(JPEG_TONE_CURVE)
+_PS_LUMA = np.array([0.30, 0.59, 0.11], dtype=np.float32)  # Photoshop Luminosity blend
+
+
+def _jpeg_tone_curve(acescg: np.ndarray, base_ev: float) -> np.ndarray:
+    """Apply JPEG_TONE_CURVE exactly as it was made: in the TIFF's ACEScct
+    space (incl. the vibe's base exposure offset), per channel, keeping only
+    the luminance change. Values above the TIFF's 0–1 range pass through."""
+    gain = np.float32(2.0 ** base_ev)
+    enc = acescct_encode(np.maximum(acescg * gain, 1e-10)).astype(np.float32)
+    # Nearest-entry lookup (4096 steps ≫ 8-bit JPEG input); np.interp was
+    # ~20x slower. Outside 0–1 the clamped lookup equals the clamped input,
+    # so the delta is 0 and those values pass through unchanged.
+    n = len(_JPEG_CURVE_LUT)
+    clamped = np.clip(enc, 0.0, 1.0)
+    idx = (clamped * (n - 1) + 0.5).astype(np.int32)
+    # Luminosity mode, as made in Photoshop (per-channel looked worse); the
+    # lifted shadows this oversaturates are handled by JPEG_SHADOW_SATURATION.
+    d = (_JPEG_CURVE_LUT[idx] - clamped) @ _PS_LUMA
+    out = enc + d[..., None]
+    return (acescct_decode(out.astype(np.float32)) / gain).astype(np.float32)
+
+
+def _jpeg_pre_grade(acescg: np.ndarray, base_ev: float = 0.0) -> np.ndarray:
+    """Tone curve → exposure → contrast → saturation → shadow saturation on
+    linear ACEScg from a JPEG."""
+    x = _jpeg_tone_curve(acescg, base_ev)
+    x = x * np.float32(2.0 ** JPEG_EXPOSURE_EV)
+    if JPEG_CONTRAST != 1.0:
+        grey = np.float32(0.18)
+        x = grey * np.power(np.maximum(x, 0.0) / grey, np.float32(JPEG_CONTRAST))
+    if JPEG_SATURATION != 1.0:
+        y = (x @ _AP1_LUMA)[..., None]
+        x = y + (x - y) * np.float32(JPEG_SATURATION)
+    if JPEG_SHADOW_SATURATION != 1.0:
+        # The Luminosity-mode curve lifts shadows with their colour ratios
+        # intact, so they read oversaturated. Fade saturation toward JPEG_SHADOW_SATURATION below mid-grey, smoothly
+        # from -5 EV (full) to JPEG_SHADOW_SAT_END_EV (none).
+        y = x @ _AP1_LUMA
+        ev = np.log2(np.maximum(y, 1e-6) / np.float32(0.18))
+        t = np.clip((ev + 5.0) / (JPEG_SHADOW_SAT_END_EV + 5.0), 0.0, 1.0)
+        t = t * t * (3.0 - 2.0 * t)
+        sat = np.float32(JPEG_SHADOW_SATURATION) + (1.0 - np.float32(JPEG_SHADOW_SATURATION)) * t
+        y = y[..., None]
+        x = y + (x - y) * sat[..., None]
+    return x.astype(np.float32)
 
 
 def _build_tone_curve_lut(curve_pairs: list, size: int = 1024) -> np.ndarray:
@@ -517,6 +581,14 @@ class FlashbackProcessor:
 
         self.grain_tiles = []
         self._load_grain_tiles()
+        # Multiplier on every px-denominated effect (halation/softness/sharpen
+        # radii, CA offset, grain tile size), set per image by
+        # _set_spatial_scale. Those effects are calibrated at WORKING_LONG_EDGE.
+        self.spatial_scale = 1.0
+        self._scaled_grain_tiles = {}
+        # Vignette strength multiplier; JPEGs set JPEG_VIGNETTE_MULT.
+        self.vignette_scale = 1.0
+        self.is_jpeg_file = False
 
     # ---- grain ----------------------------------------------------------------
 
@@ -536,15 +608,28 @@ class FlashbackProcessor:
             except Exception:
                 pass
 
+    def _grain_tiles_at_scale(self):
+        s = self.spatial_scale
+        if s == 1.0 or not self.grain_tiles:
+            return self.grain_tiles
+        if s not in self._scaled_grain_tiles:
+            self._scaled_grain_tiles.clear()  # scale varies per image; keep one
+            self._scaled_grain_tiles[s] = [
+                cv2.resize(t, (max(1, round(t.shape[1] * s)), max(1, round(t.shape[0] * s))),
+                           interpolation=cv2.INTER_LINEAR)
+                for t in self.grain_tiles]
+        return self._scaled_grain_tiles[s]
+
     def _generate_grain_layer(self, height, width, sigma):
-        if not self.grain_tiles:
+        tiles = self._grain_tiles_at_scale()
+        if not tiles:
             grain = np.full((height, width, 3), 0.5, dtype=np.float32)
             return np.clip(grain + np.random.normal(0, sigma, (height, width, 3)).astype(np.float32), 0, 1)
         out = np.zeros((height, width, 3), dtype=np.float32)
-        th, tw = self.grain_tiles[0].shape[:2]
+        th, tw = tiles[0].shape[:2]
         for y in range(0, height, th):
             for x in range(0, width, tw):
-                tile = self.grain_tiles[np.random.randint(0, len(self.grain_tiles))].copy()
+                tile = tiles[np.random.randint(0, len(tiles))].copy()
                 if np.random.random() > 0.5:
                     tile = np.flip(tile, axis=1)
                 if np.random.random() > 0.5:
@@ -584,7 +669,7 @@ class FlashbackProcessor:
         """
         stages, cpu_ops = [], []
         if v.enable_vignette and v.vignette_strength_pct > 0:
-            va = (pct(v.vignette_strength_pct),
+            va = (min(1.0, pct(v.vignette_strength_pct) * self.vignette_scale),
                   vignette_color_pct_to_shift(v.vignette_color_pct),
                   vignette_curve_to_power(v.vignette_curve))
             stages.append(lambda fr, a=va: gpu.vignette_frame(fr, *a))
@@ -612,17 +697,18 @@ class FlashbackProcessor:
         """
         stages = []
         if v.enable_chromatic_aberration and v.ca_pixels > 0:
-            ca_scale = ca_pixels_to_scale(v.ca_pixels, max(shape[0], shape[1]))
+            ca_scale = ca_pixels_to_scale(v.ca_pixels * self.spatial_scale,
+                                          max(shape[0], shape[1]))
             stages.append(lambda fr, s=ca_scale: gpu.ca_frame(fr, s))
         if (v.enable_edge_softness and v.edge_softness_strength_pct > 0
                 and v.edge_softness_sigma > 0):
-            es_sigma = v.edge_softness_sigma
+            es_sigma = v.edge_softness_sigma * self.spatial_scale
             es_strength = pct(v.edge_softness_strength_pct)
             es_start = pct(v.edge_softness_start_pct)
             stages.append(lambda fr, sg=es_sigma, st=es_strength, sa=es_start:
                           gpu.edge_softness_frame(fr, sg, st, sa))
         if v.enable_softness and v.softness_sigma > 0:
-            sigma = v.softness_sigma
+            sigma = v.softness_sigma * self.spatial_scale
             stages.append(lambda fr, s=sigma: gpu.softness_frame(fr, s))
         grain_layer = None
         if v.enable_grain and v.grain_strength_pct > 0:
@@ -634,7 +720,7 @@ class FlashbackProcessor:
                           gpu.grain_frame(fr, g, i, highlight_bias=b))
         if v.enable_sharpen and v.sharpen_strength_pct > 0:
             sh_strength = pct(v.sharpen_strength_pct)
-            sh_radius = v.sharpen_radius
+            sh_radius = v.sharpen_radius * self.spatial_scale
             stages.append(lambda fr, s=sh_strength, r=sh_radius: gpu.sharpen_frame(fr, s, r))
         return stages, grain_layer
 
@@ -711,6 +797,24 @@ class FlashbackProcessor:
                       f"range=[{acescg.min():.4f},{acescg.max():.4f}]")
         return acescg
 
+    def _develop_srgb_jpeg(self, path: str) -> np.ndarray:
+        """EXPERIMENTAL: decode an sRGB JPEG to ACEScg.
+
+        Rough on purpose: undo the sRGB transfer curve and change primaries.
+        The camera's own tone curve and highlight clip stay baked in, so the
+        film look lands on an already-rendered image, not scene-linear data.
+        """
+        t0 = time.time()
+        bgr = cv2.imread(path, cv2.IMREAD_COLOR)  # applies EXIF orientation
+        if bgr is None:
+            raise ValueError(f"cv2 could not decode {path}")
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        acescg = color_transform(_srgb_eotf(rgb).astype(np.float32), LINSRGB_TO_ACESCG)
+        acescg = _jpeg_pre_grade(acescg, self.vibe.base_exposure_offset_v2)
+        _timing_print(f"  jpeg decode (experimental sRGB): {(time.time()-t0)*1000:6.2f} ms  "
+                      f"shape={acescg.shape}")
+        return acescg
+
     # ---- public surface -------------------------------------------------------
 
     def get_settings(self) -> dict:
@@ -748,13 +852,32 @@ class FlashbackProcessor:
 
     # ---- pipeline -------------------------------------------------------------
 
+    def adopt_cached_intermediate(self, path, acescg):
+        """Make a cached intermediate current without re-developing it, and
+        restore the per-file effect scaling that load_image would have set
+        (otherwise the last *decoded* file's values would leak into this one)."""
+        self.intermediate_acescg = acescg
+        self.current_file = path
+        self.is_jpeg_file = os.path.splitext(path)[1].lower() in ('.jpg', '.jpeg')
+        self.vignette_scale = JPEG_VIGNETTE_MULT if self.is_jpeg_file else 1.0
+        self._set_spatial_scale(acescg)
+
+    def _set_spatial_scale(self, acescg):
+        """Scale px-denominated effects by the developed long edge relative to
+        the Flashback working size, so they keep the same size relative to the
+        frame. Flashback V2 (half_size) and V1 land on exactly 1.0; full-res
+        JPEGs and larger generic raws scale up."""
+        self.spatial_scale = max(acescg.shape[:2]) / WORKING_LONG_EDGE
+        if self.is_jpeg_file:
+            self.spatial_scale *= JPEG_SPATIAL_MULT
+
     def _bake_halation(self, acescg):
         if not (self.vibe.enable_halation and self.vibe.halation_strength_pct > 0):
             return acescg
         return apply_halation(
             acescg,
             stops_above_mid_grey_to_acescct(self.vibe.halation_threshold_stops),
-            self.vibe.halation_blur_radius,
+            self.vibe.halation_blur_radius * self.spatial_scale,
             pct(self.vibe.halation_strength_pct),
             self.vibe.halation_warmth_pct,
         )
@@ -773,20 +896,30 @@ class FlashbackProcessor:
 
         # V1 negatives are headerless raw + sidecar JSON, not DNGs — detect
         # them first and skip the (harmless but pointless) DNG EXIF probe.
-        is_v1 = is_v1_negative(dng_path)
-        if is_v1:
+        is_jpeg = os.path.splitext(dng_path)[1].lower() in ('.jpg', '.jpeg')
+        is_v1 = not is_jpeg and is_v1_negative(dng_path)
+        self.is_jpeg_file = is_jpeg
+        self.vignette_scale = JPEG_VIGNETTE_MULT if is_jpeg else 1.0
+        if is_v1 or is_jpeg:
             is_flashback, exp_s = False, None
         else:
             is_flashback, exp_s = _read_dng_exif(dng_path)
         self.is_flashback_file = is_flashback
 
         try:
-            if is_v1:
+            if is_jpeg:
+                acescg = self._develop_srgb_jpeg(dng_path)
+                self._set_spatial_scale(acescg)
+                acescg = self._bake_halation(acescg)
+                self._rev_gain = 1.0
+                self._rev_gain_unconditional = 1.0
+            elif is_v1:
                 # Develop the V1 negative to the same ACEScg intermediate the
                 # DNG path emits, then bake halation so it gets the full film
                 # look. AE already metered each frame to mid-grey, so exposure
                 # rides the generic path's neutral reverse-AE gain.
                 acescg = develop_v1(dng_path)
+                self._set_spatial_scale(acescg)
                 acescg = self._bake_halation(acescg)
                 self._rev_gain = 1.0
                 self._rev_gain_unconditional = 1.0
@@ -826,9 +959,11 @@ class FlashbackProcessor:
                                   if (exp_s and self.vibe.enable_reverse_autoexposure) else 1.0)
                 self._rev_gain_unconditional = float(compute_reverse_gain(exp_s, self.vibe.reverse_autoexposure_t_ref)) if exp_s else 1.0
 
+                self._set_spatial_scale(acescg)
                 acescg = self._bake_halation(acescg)
             else:
                 acescg = self._develop_generic_raw(dng_path)
+                self._set_spatial_scale(acescg)
                 acescg = self._bake_halation(acescg)
                 self._rev_gain = 1.0
                 self._rev_gain_unconditional = 1.0
@@ -957,16 +1092,17 @@ class FlashbackProcessor:
                 else:
                     if v.enable_chromatic_aberration and v.ca_pixels > 0:
                         ca_scale = ca_pixels_to_scale(
-                            v.ca_pixels, max(img_display.shape[0], img_display.shape[1]))
+                            v.ca_pixels * self.spatial_scale,
+                            max(img_display.shape[0], img_display.shape[1]))
                         img_display = apply_chromatic_aberration(img_display, ca_scale)
                     if (v.enable_edge_softness and v.edge_softness_strength_pct > 0
                             and v.edge_softness_sigma > 0):
                         img_display = apply_edge_softness(
-                            img_display, v.edge_softness_sigma,
+                            img_display, v.edge_softness_sigma * self.spatial_scale,
                             pct(v.edge_softness_strength_pct), pct(v.edge_softness_start_pct))
                     if v.enable_softness and v.softness_sigma > 0:
                         with _timed("softness"):
-                            img_display = apply_softness(img_display, v.softness_sigma)
+                            img_display = apply_softness(img_display, v.softness_sigma * self.spatial_scale)
                     if v.enable_grain and v.grain_strength_pct > 0:
                         img_display = self._apply_grain(
                             img_display, pct(v.grain_strength_pct),
@@ -975,7 +1111,8 @@ class FlashbackProcessor:
                     if v.enable_sharpen and v.sharpen_strength_pct > 0:
                         with _timed("sharpen"):
                             img_display = apply_sharpen(
-                                img_display, pct(v.sharpen_strength_pct), v.sharpen_radius)
+                                img_display, pct(v.sharpen_strength_pct),
+                                v.sharpen_radius * self.spatial_scale)
 
         post_gain = 2.0 ** (-pre_lut_ev)
         if not np.isclose(post_gain, 1.0):
@@ -1059,8 +1196,8 @@ def export_image(processor, output_path, quality=95, as_tiff=False,
     img8 = np.clip(img * 255.0, 0, 255).astype(np.uint8)
     try:
         from PIL import Image
-        Image.fromarray(img8, mode='RGB').save(output_path, 'JPEG',
-                                               quality=quality, optimize=True)
+        Image.fromarray(img8).save(output_path, 'JPEG',
+                                 quality=quality, optimize=True)
         return True
     except Exception:
         bgr = cv2.cvtColor(img8, cv2.COLOR_RGB2BGR)

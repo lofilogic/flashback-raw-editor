@@ -155,6 +155,28 @@ _VIGNETTE_COLOR_MAX = 0.2
 # effect function actually consumes. The pipeline calls these at the
 # effect-function boundary in core/processor.py.
 
+# Long edge (px) of the Flashback V2 half_size develop. Every px-denominated
+# effect is calibrated at this size; other inputs scale their effects by
+# long_edge / WORKING_LONG_EDGE (see FlashbackProcessor._set_spatial_scale).
+WORKING_LONG_EDGE = 2072
+
+# EXPERIMENTAL JPEG input (opt-in in Advanced Settings). Applied at load to
+# the linear ACEScg decode, in this order: tone curve → exposure → contrast →
+# saturation → shadow saturation. Neutral trims are 0.0 / 1.0 / 1.0 / 1.0.
+#
+# Tone curve: undoes the camera's tone-mapping. Matched in Photoshop on ACEScct
+# TIFFs (LUT-profiling export, halation off, trims neutral): JPEG layer curved
+# to its RAW twin with a Luminosity-blend RGB curve. (input, output), 0–255.
+JPEG_TONE_CURVE = [(0, 0), (39, 45), (136, 121), (158, 143), (181, 193), (200, 222), (255, 255)]
+JPEG_EXPOSURE_EV = 0.0   # stops
+JPEG_CONTRAST = 1.0      # power around 18% grey in linear; <1 flattens
+JPEG_SATURATION = 0.9    # 1 = unchanged, 0 = monochrome
+JPEG_SHADOW_SATURATION = 0.5  # saturation at -5 EV and below; 1 = off
+JPEG_SHADOW_SAT_END_EV = 1.0 # stops vs 18% grey where it has faded to none
+JPEG_SPATIAL_MULT = 1   # extra effect-size factor on top of the long-edge scale
+JPEG_VIGNETTE_MULT = 3.0  # camera JPEGs arrive lens-corrected; RAWs keep theirs
+
+
 def ca_pixels_to_scale(pixels: float, long_edge: int) -> float:
     """Edge-pixel offset → CA radial scale factor, normalised by the LONG edge.
 

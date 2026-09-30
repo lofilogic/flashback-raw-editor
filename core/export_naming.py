@@ -55,4 +55,8 @@ def export_basename(file_path) -> str:
     m = _V2_FRAME_RE.match(p.stem)
     if m:
         return f"FBV2_{int(m.group(1)):05d}"
+    # Cameras write RAW+JPEG pairs with the same stem; tag the JPEG so its
+    # exports never overwrite the RAW's (e.g. IMG_0001_jpg_edit.jpg).
+    if p.suffix.lower() in ('.jpg', '.jpeg'):
+        return f"{p.stem}_jpg"
     return p.stem

@@ -293,8 +293,7 @@ class VibeRefreshWorker(QThread):
                 uploaded = chosen
             settings = self.image_settings.get(file_path, self.default_settings)
             try:
-                processor.intermediate_acescg = cached.copy()
-                processor.current_file = file_path
+                processor.adopt_cached_intermediate(file_path, cached.copy())
                 processor.set_settings(settings)
                 img_display = processor._render_fast(downscale=True)
                 if img_display is not None:
@@ -1026,6 +1025,7 @@ class ZoomableImageWidget(QScrollArea):
 
     ZOOM_LEVELS = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0]
     ZOOM_FACTOR = 1.18  # multiplicative step per scroll tick
+    CLICK_ZOOM_LONG_EDGE = round(1.25 * 2072)  # px on screen; Flashback frame at 125%
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1122,8 +1122,33 @@ class ZoomableImageWidget(QScrollArea):
         height, width, channels = img_8bit.shape
         bytes_per_line = channels * width
         q_image = QImage(img_8bit.data, width, height, bytes_per_line, QImage.Format_RGB888)
+
+        # When zoomed, keep the view stable across a change of pixmap size
+        # (low-res preview -> full render, or images of different resolution):
+        # hold magnification relative to fit-to-window and the view centre as a
+        # fraction of the image, instead of absolute pixmap pixels.
+        keep = None
+        if (not self._fit_to_window and self._original_pixmap is not None
+                and self.widget() is self.image_label
+                and self.image_label.width() > 1 and self.image_label.height() > 1):
+            vp = self.viewport().size()
+            keep = (
+                self._zoom_level / self._get_fit_zoom(),
+                (self.horizontalScrollBar().value() + vp.width() / 2) / self.image_label.width(),
+                (self.verticalScrollBar().value() + vp.height() / 2) / self.image_label.height(),
+            )
+
         self._original_pixmap = QPixmap.fromImage(q_image)
         self._pixmap = self._original_pixmap
+
+        if keep is not None:
+            rel_zoom, cx, cy = keep
+            self._zoom_level = rel_zoom * self._get_fit_zoom()
+            self._update_display()
+            vp = self.viewport().size()
+            self.horizontalScrollBar().setValue(round(cx * self.image_label.width() - vp.width() / 2))
+            self.verticalScrollBar().setValue(round(cy * self.image_label.height() - vp.height() / 2))
+            return
 
         if self.widget() is not self.image_label:
             # takeWidget detaches the current widget without destroying it,
@@ -1271,7 +1296,12 @@ class ZoomableImageWidget(QScrollArea):
                 self._last_mouse_pos = event.pos()
                 self.image_label.setCursor(Qt.ClosedHandCursor)
             else:
-                self._set_zoom_at(1.25, event.pos())
+                # Constant magnification relative to the frame: the long edge
+                # lands where a Flashback frame's does at 125%, whatever the
+                # image's (or the on-screen preview's) resolution.
+                pm = self._original_pixmap
+                self._set_zoom_at(self.CLICK_ZOOM_LONG_EDGE / max(pm.width(), pm.height()),
+                                  event.pos())
 
         super().mousePressEvent(event)
 
