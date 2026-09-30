@@ -8,7 +8,6 @@ on:
 
 jobs:
   build:
-    if: github.event_name == 'push'   # only run on tag pushes, not manual triggers
     strategy:
       fail-fast: false   # if one platform fails, keep building the others
       matrix:
@@ -44,7 +43,10 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libraw-dev xvfb libglib2.0-0 libgl1 libfuse2
+          sudo apt-get install -y libraw-dev xvfb libglib2.0-0 libgl1 libfuse2 \
+            libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
+            libxcb-xinerama0 libxcb-xkb1
 
       - name: Install Python dependencies
         run: pip install -r requirements-build.txt
@@ -140,6 +142,23 @@ jobs:
           # host's" — covers the Steam Deck and all current desktop distros.
           find "$APPDIR/usr/bin" \( -name 'libstdc++.so.6*' -o -name 'libgcc_s.so.1*' \) -delete
 
+          # Bundle the X11 helper libs Qt's xcb platform plugin needs. Minimal
+          # distros lack them (libxkbcommon-x11, libxcb-cursor since Qt 6.5)
+          # and the app then dies with "no Qt platform plugin". Resolve the
+          # list from the plugin itself so it tracks Qt upgrades; they go
+          # next to Qt's own libs, where the plugin's RPATH looks. Core
+          # libxcb.so.1 stays the host's, per the AppImage excludelist.
+          QT_DIR="$APPDIR/usr/bin/_internal/PySide6/Qt"
+          ldd "$QT_DIR/plugins/platforms/libqxcb.so" \
+            | awk '/=> \// { print $3 }' \
+            | grep -E '/lib(xkbcommon[^/]*|xcb-[^/]*)\.so' \
+            | while read -r lib ; do
+                [ -e "$QT_DIR/lib/$(basename "$lib")" ] || cp -L "$lib" "$QT_DIR/lib/"
+              done
+          if ldd "$QT_DIR/plugins/platforms/libqxcb.so" | grep 'not found' ; then
+            echo "libqxcb.so still has unresolved dependencies" ; exit 1
+          fi
+
           # Desktop file and icon
           cp packaging/lofilogic.desktop "$APPDIR/lofilogic.desktop"
           cp assets/icons/icon.png "$APPDIR/lofilogic.png"
@@ -160,6 +179,30 @@ jobs:
           # releases never collide in the user's Downloads folder.
           VERSION="${LOFILOGIC_VERSION#v}"
           ARCH=x86_64 ./appimagetool "$APPDIR" "LoFiLogic-Linux-${VERSION}.AppImage"
+
+      # Launch the AppImage on a bare Ubuntu 22.04 with only a virtual display
+      # and GL — roughly what the AppImage catalog's test machine has — and
+      # fail if it quits instead of staying up. Catches libs we forgot to
+      # bundle, which the build runner hides because it has them installed.
+      - name: Smoke-test AppImage on a clean system (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          APPIMAGE=$(ls LoFiLogic-Linux-*.AppImage)
+          docker run --rm -v "$PWD:/work" -w /work \
+            -e APPIMAGE_EXTRACT_AND_RUN=1 -e QT_DEBUG_PLUGINS=1 \
+            ubuntu:22.04 bash -c '
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                xvfb libgl1-mesa-dri libegl1 libfontconfig1 >/dev/null
+              Xvfb :99 & export DISPLAY=:99 ; sleep 2
+              ./'"$APPIMAGE"' > app.log 2>&1 &
+              APID=$!
+              sleep 20
+              if kill -0 $APID 2>/dev/null ; then
+                echo "App still running after 20 s: OK"
+              else
+                echo "App exited early. Log:" ; tail -40 app.log ; exit 1
+              fi'
 
       - name: Upload artifact (Linux)
         if: runner.os == 'Linux'
