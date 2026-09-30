@@ -155,8 +155,10 @@ jobs:
             | while read -r lib ; do
                 [ -e "$QT_DIR/lib/$(basename "$lib")" ] || cp -L "$lib" "$QT_DIR/lib/"
               done
-          if ldd "$QT_DIR/plugins/platforms/libqxcb.so" | grep 'not found' ; then
-            echo "libqxcb.so still has unresolved dependencies" ; exit 1
+          # Only our bundled class counts; libEGL/libGL come from the host's
+          # graphics driver and must stay unbundled.
+          if ldd "$QT_DIR/plugins/platforms/libqxcb.so" | grep 'not found' | grep -E 'xcb|xkbcommon' ; then
+            echo "libqxcb.so still misses X11 helper libs" ; exit 1
           fi
 
           # Desktop file and icon
