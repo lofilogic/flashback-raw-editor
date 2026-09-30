@@ -131,23 +131,15 @@ jobs:
           # Move PyInstaller output into AppDir
           cp -r "dist/LoFi Logic"/* "$APPDIR/usr/bin/"
 
-          # Drop the bundled C++ runtime so the host's is used. Mesa's Vulkan
-          # driver (RADV) links against the system libstdc++/libgcc; the copies
-          # PyInstaller bundles (built here on ubuntu-22.04) are older than
-          # SteamOS/modern Mesa, and because the loader searches the bundle
-          # dir first they shadow the system ones. RADV then fails to load
-          # ("GLIBCXX_3.4.xx not found", loader_icd_scan failure) and the app
-          # silently falls back to the CPU. Removing them lets the host's newer
-          # runtime drive the GPU. Floor becomes "system libstdc++ >= the build
-          # host's" — covers the Steam Deck and all current desktop distros.
+          # Use the host's libstdc++/libgcc. The bundled ones are older than
+          # what Mesa's RADV needs ("GLIBCXX_3.4.xx not found"), so it fails
+          # to load and the app runs on the CPU (Steam Deck).
           find "$APPDIR/usr/bin" \( -name 'libstdc++.so.6*' -o -name 'libgcc_s.so.1*' \) -delete
 
-          # Bundle the X11 helper libs Qt's xcb platform plugin needs. Minimal
-          # distros lack them (libxkbcommon-x11, libxcb-cursor since Qt 6.5)
-          # and the app then dies with "no Qt platform plugin". Resolve the
-          # list from the plugin itself so it tracks Qt upgrades; they go
-          # next to Qt's own libs, where the plugin's RPATH looks. Core
-          # libxcb.so.1 stays the host's, per the AppImage excludelist.
+          # Bundle the X11 libs Qt's xcb plugin needs (libxkbcommon-x11,
+          # libxcb-cursor); minimal distros lack them. The list comes from the
+          # plugin itself. libxcb.so.1 stays the host's, per the AppImage
+          # excludelist.
           QT_DIR="$APPDIR/usr/bin/_internal/PySide6/Qt"
           ldd "$QT_DIR/plugins/platforms/libqxcb.so" \
             | awk '/=> \// { print $3 }' \
@@ -166,10 +158,7 @@ jobs:
           cp assets/icons/icon.png "$APPDIR/lofilogic.png"
           cp assets/icons/icon.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/lofilogic.png"
 
-          # AppRun launcher. HERE must be the directory of the mounted AppRun,
-          # so use dirname — `${SELF%%/*}` (greedy) wrongly strips everything to
-          # an empty string for an absolute path, making the AppImage exec the
-          # host's /usr/bin instead of its own and fail to launch on every Linux.
+          # AppRun launcher
           printf '#!/bin/bash\nHERE="$(dirname "$(readlink -f "$0")")"\nexec "${HERE}/usr/bin/LoFi Logic" "$@"\n' > "$APPDIR/AppRun"
           chmod +x "$APPDIR/AppRun"
 
@@ -180,16 +169,15 @@ jobs:
           # Build the AppImage with a versioned filename so parallel
           # releases never collide in the user's Downloads folder.
           VERSION="${LOFILOGIC_VERSION#v}"
-          ARCH=x86_64 ./appimagetool "$APPDIR" "LoFiLogic-Linux-${VERSION}.AppImage"
+          ARCH=x86_64 ./appimagetool "$APPDIR" "LoFiLogic-${VERSION}-x86_64.AppImage"
 
-      # Launch the AppImage on a bare Ubuntu 22.04 with only a virtual display
-      # and GL — roughly what the AppImage catalog's test machine has — and
-      # fail if it quits instead of staying up. Catches libs we forgot to
-      # bundle, which the build runner hides because it has them installed.
+      # Start the AppImage on a bare Ubuntu 22.04 with a virtual display, like
+      # the AppImage catalog's test machine, and fail if it exits. Catches
+      # missing libs that the build runner has installed.
       - name: Smoke-test AppImage on a clean system (Linux)
         if: runner.os == 'Linux'
         run: |
-          APPIMAGE=$(ls LoFiLogic-Linux-*.AppImage)
+          APPIMAGE=$(ls LoFiLogic-*-x86_64.AppImage)
           docker run --rm -v "$PWD:/work" -w /work \
             -e APPIMAGE_EXTRACT_AND_RUN=1 -e QT_DEBUG_PLUGINS=1 \
             ubuntu:22.04 bash -c '
@@ -211,7 +199,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: LoFiLogic-Linux
-          path: LoFiLogic-Linux-*.AppImage
+          path: LoFiLogic-*-x86_64.AppImage
           retention-days: 14
 
   # Runs after all 3 platform builds succeed — only on version tags
@@ -241,6 +229,17 @@ jobs:
         id: ver
         run: echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
 
+      # Unversioned copies, so the README can link to
+      # releases/latest/download/<name> and never goes stale.
+      - name: Add fixed-name copies
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          mkdir stable
+          cp artifacts/*/LoFiLogic-macOS-${VER}.dmg stable/LoFiLogic-macOS.dmg
+          cp artifacts/*/LoFiLogic-Windows-Setup-${VER}.exe stable/LoFiLogic-Windows-Setup.exe
+          cp artifacts/*/LoFiLogic-${VER}-x86_64.AppImage stable/LoFiLogic-x86_64.AppImage
+
       - name: Build release notes
         env:
           VER: ${{ steps.ver.outputs.version }}
@@ -253,7 +252,7 @@ jobs:
             echo "|---|---|"
             echo "| macOS (Apple Silicon — M1/M2/M3/M4) | [\`LoFiLogic-macOS-${VER}.dmg\`](${REPO_URL}/releases/download/${REF}/LoFiLogic-macOS-${VER}.dmg) |"
             echo "| Windows | [\`LoFiLogic-Windows-Setup-${VER}.exe\`](${REPO_URL}/releases/download/${REF}/LoFiLogic-Windows-Setup-${VER}.exe) |"
-            echo "| Linux | [\`LoFiLogic-Linux-${VER}.AppImage\`](${REPO_URL}/releases/download/${REF}/LoFiLogic-Linux-${VER}.AppImage) |"
+            echo "| Linux | [\`LoFiLogic-${VER}-x86_64.AppImage\`](${REPO_URL}/releases/download/${REF}/LoFiLogic-${VER}-x86_64.AppImage) |"
             echo ""
             # Extract the section in CHANGELOG.md whose heading matches the
             # version. Heading format: "## <version> — <date>". If no match,
@@ -278,6 +277,7 @@ jobs:
             artifacts/**/*.dmg
             artifacts/**/*.exe
             artifacts/**/*.AppImage
+            stable/*
           body_path: release-notes.md
           draft: false
           # Tags containing -beta or -rc are automatically marked as pre-release

@@ -119,9 +119,9 @@ Grab the latest build for your platform from the [**Releases**](../../releases/l
 
 | Platform | File | Status |
 |----------|------|--------|
-| macOS (Apple Silicon) | [`LoFiLogic-macOS-1.6.6.dmg`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v1.6.6/LoFiLogic-macOS-1.6.6.dmg) | ✓ Tested |
-| Windows (x64) | [`LoFiLogic-Windows-Setup-1.6.6.exe`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v1.6.6/LoFiLogic-Windows-Setup-1.6.6.exe) | ✓ Tested |
-| Linux (x86_64) | [`LoFiLogic-Linux-1.6.6.AppImage`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v1.6.6/LoFiLogic-Linux-1.6.6.AppImage) | ⚠ Community-tested |
+| macOS (Apple Silicon) | [`LoFiLogic-macOS.dmg`](https://github.com/lofilogic/flashback-raw-editor/releases/latest/download/LoFiLogic-macOS.dmg) | ✓ Tested |
+| Windows (x64) | [`LoFiLogic-Windows-Setup.exe`](https://github.com/lofilogic/flashback-raw-editor/releases/latest/download/LoFiLogic-Windows-Setup.exe) | ✓ Tested |
+| Linux (x86_64) | [`LoFiLogic-x86_64.AppImage`](https://github.com/lofilogic/flashback-raw-editor/releases/latest/download/LoFiLogic-x86_64.AppImage) | ⚠ Community-tested |
 
 The apps aren't code-signed yet, so each OS warns on first launch. One-time steps:
 
@@ -147,14 +147,14 @@ The apps aren't code-signed yet, so each OS warns on first launch. One-time step
 <summary><b>Linux</b></summary>
 
 ```bash
-chmod +x LoFiLogic-Linux.AppImage
-./LoFiLogic-Linux.AppImage
+chmod +x LoFiLogic-x86_64.AppImage
+./LoFiLogic-x86_64.AppImage
 ```
 
 FUSE error? Install it (`sudo apt install libfuse2`) or extract and run:
 
 ```bash
-./LoFiLogic-Linux.AppImage --appimage-extract
+./LoFiLogic-x86_64.AppImage --appimage-extract
 ./squashfs-root/AppRun
 ```
 
@@ -203,11 +203,10 @@ FUSE error? Install it (`sudo apt install libfuse2`) or extract and run:
 
 ## For developers
 
-A PySide6 app with a GPU-resident (wgpu / WebGPU) image pipeline, each stage backed by a
-numpy/cv2 reference implementation.
+PySide6 with a wgpu image pipeline and a numpy fallback.
 
-- **[Architecture](docs/ARCHITECTURE.md)** — the colour pipeline, GPU-resident design, V1/V2 support, and why film-like low acuity is the point.
-- **[Development](docs/DEVELOPMENT.md)** — build from source, run, test, and package.
+- [Architecture](docs/ARCHITECTURE.md): how the pipeline works
+- [Development](docs/DEVELOPMENT.md): running from source, tests, releases
 
 ---
 

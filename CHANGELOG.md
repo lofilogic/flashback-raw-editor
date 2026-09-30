@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.7.0 — 2026-09-30
+
+### New
+- **Experimental JPEG import** (Advanced Settings > Experimental). Camera JPEGs are
+  already tone-mapped, so the look is an approximation; RAW files still look better.
+  JPEG exports get a `_jpg` suffix so RAW+JPEG pairs don't overwrite each other.
+- **Effects scale with image size.** Larger files from other cameras now get the same
+  look relative to the frame. Flashback files are unchanged.
+
+### Editor
+- Zoom stays put when the full render replaces the preview, and click-to-zoom gives
+  the same on-screen size for every image.
+- The last three finished renders are kept, so flipping between neighbouring frames
+  is instant.
+- The white balance label now reads 5500 K at zero, which is the actual neutral
+  point. It used to say 5600 K.
+
+### Fixes
+- The mouse wheel scrolled the thumbnail strip the wrong way.
+- The loading overlay could get stuck after a thumbnail failed to load.
+- Changes in Advanced Settings could show an outdated cached preview.
+- The Linux AppImage didn't start on minimal systems missing some X11 libraries.
+  They're bundled now.
+
+### Under the hood
+- Removed three chromatic aberration settings from the Advanced Settings panel that
+  had no effect.
+- Removed unused code and the ColorMatch tool.
+- Release builds use Pillow 12.3.
+- The Linux download is now named `LoFiLogic-<version>-x86_64.AppImage`, following
+  AppImage conventions.
+- Tidied up code comments and developer docs.
+
 ## 1.6.6 — 2026-07-25
 
 A maintenance release: two DNG fixes, and thumbnails that stop re-reading the
