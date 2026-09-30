@@ -2120,7 +2120,10 @@ class FlashbackEditor(QMainWindow):
         try:
             if hasattr(self, 'loader_overlay') and self.loader_overlay.isVisible():
                 self.loader_overlay.progress_label.setText(f"Error at {index}: {error_message}")
-                QTimer.singleShot(1500, lambda: self.loader_overlay.update_progress(index + 1, len(self.image_files)))
+                # Only if still loading: fired after _on_thumbnails_finished,
+                # update_progress would fade the overlay back in for good.
+                QTimer.singleShot(1500, lambda: self.thumbnail_worker is not None
+                                  and self.loader_overlay.update_progress(index + 1, len(self.image_files)))
         except Exception:
             log.debug("loader overlay error display failed", exc_info=True)
 

@@ -796,7 +796,8 @@ class ThumbnailStrip(QScrollArea):
         else:
             angle = event.angleDelta()
             ay = angle.y() + angle.x()
-            dx = 100 if ay < 0 else -100 if ay > 0 else 0
+            # Wheel down (ay < 0) moves forward through the strip, i.e. right.
+            dx = -100 if ay < 0 else 100 if ay > 0 else 0
         hbar = self.horizontalScrollBar()
         hbar.setValue(hbar.value() - dx)
         event.accept()
