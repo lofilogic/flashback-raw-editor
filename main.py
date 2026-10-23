@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt, QEvent, QSettings, QStandardPaths
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QSurfaceFormat, QPalette, QColor
 
+from core import applog
 from ui.editor import FlashbackEditor
 from _version import __version__
 
@@ -87,9 +88,6 @@ def _migrate_app_identity():
 
 
 def main():
-    # Messages carry their own [module] prefixes.
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-
     # Fractional DPI scaling; must be set before QApplication
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
@@ -112,6 +110,7 @@ def main():
     app = _LoFiApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(ORG_NAME)
+    applog.setup(__version__)
     _migrate_app_identity()
 
     # Fusion with our own palette, independent of the OS theme.

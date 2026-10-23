@@ -31,12 +31,12 @@ from PySide6.QtCore import (
     QPropertyAnimation, QEasingCurve, QUrl, QStandardPaths, QSettings,
 )
 from PySide6.QtGui import (
-    QPixmap, QImage, QPainter, QColor, QPen, QCursor, QFont,
+    QDesktopServices, QPixmap, QImage, QPainter, QColor, QPen, QCursor, QFont,
     QFontDatabase, QLinearGradient, QMovie, QPainterPath, QColorSpace,
     QSurfaceFormat, QAction, QKeySequence, QIcon, QPalette,
 )
 
-from core import resource_path
+from core import resource_path, applog
 from core.gpu import gpu
 from core.processor import FlashbackProcessor, export_image
 from core.config import (
@@ -337,6 +337,7 @@ class FlashbackEditor(QMainWindow):
         except Exception:
             log.exception("[gpu] status probe failed")
             return
+        log.info("[gpu] mode=%s adapter=%s", status['mode'], status.get('summary'))
         if status['mode'] == 'gpu':
             return
         if status.get('forced'):
@@ -1378,15 +1379,6 @@ class FlashbackEditor(QMainWindow):
         from _version import __version__
         mb = self.menuBar()
 
-        # ── About / Help ──────────────────────────────────────────────
-        # AboutRole moves it to the app menu on macOS.
-        help_menu = mb.addMenu("Help")
-
-        act_about = QAction("About LoFi Logic", self)
-        act_about.setMenuRole(QAction.MenuRole.AboutRole)
-        act_about.triggered.connect(self.show_about)
-        help_menu.addAction(act_about)
-
         # ── File ──────────────────────────────────────────────────────
         file_menu = mb.addMenu("File")
 
@@ -1487,6 +1479,29 @@ class FlashbackEditor(QMainWindow):
         act_zen.triggered.connect(self.enter_zen_mode)
         view_menu.addAction(act_zen)
 
+        # ── About / Help ──────────────────────────────────────────────
+        # AboutRole moves it to the app menu on macOS.
+        help_menu = mb.addMenu("Help")
+
+        act_about = QAction("About LoFi Logic", self)
+        act_about.setMenuRole(QAction.MenuRole.AboutRole)
+        act_about.triggered.connect(self.show_about)
+        help_menu.addAction(act_about)
+        help_menu.addSeparator()
+
+        act_copy_log = QAction("Copy Log to Clipboard", self)
+        act_copy_log.triggered.connect(lambda: self.copy_log_to_clipboard())
+        help_menu.addAction(act_copy_log)
+
+        act_copy_prev_log = QAction("Copy Previous Session Log", self)
+        act_copy_prev_log.triggered.connect(lambda: self.copy_log_to_clipboard(previous=True))
+        help_menu.addAction(act_copy_prev_log)
+
+        act_log_folder = QAction("Show Log Folder", self)
+        act_log_folder.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(applog.log_dir()))))
+        help_menu.addAction(act_log_folder)
+
     # ───────────────────────────────────────────────────────────────────
     # MENU ACTIONS
     # ───────────────────────────────────────────────────────────────────
@@ -1515,6 +1530,21 @@ class FlashbackEditor(QMainWindow):
             "A RAW editor for the Flashback One35 cameras.<br><br>"
             "© 2026 LoFi Logic"
         )
+
+    def copy_log_to_clipboard(self, previous=False):
+        from _version import __version__
+        try:
+            status = gpu.status()
+            gpu_line = f"{status['mode']} / {status.get('summary')}"
+        except Exception:
+            gpu_line = "unknown"
+        header = (f"LoFi Logic {__version__} | {platform.system()} {platform.release()} "
+                  f"({platform.machine()}) | GPU: {gpu_line}")
+        QApplication.clipboard().setText(applog.text_for_clipboard(header, previous))
+        self.mode_label.setText("Previous log copied to clipboard" if previous
+                                else "Log copied to clipboard")
+        self.mode_label.setStyleSheet(f"color: {C['accent']};")
+        QTimer.singleShot(2000, self.update_mode_label)
 
     def _toggle_advanced_settings(self):
         if self.debug_panel.isVisible():

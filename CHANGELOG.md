@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.7.1 — 2026-10-23
+
+Makes problems easier to report.
+
+### New
+- **Log file.** The app now keeps a log of each session. The last four sessions are
+  kept on disk, and nothing is sent anywhere.
+- **Help > Copy Log to Clipboard** copies this session's log, with the app version,
+  OS and GPU, ready to paste into a message. **Copy Previous Session Log** does the
+  same for the last session, e.g. after a crash. **Show Log Folder** opens the folder.
+
+### Editor
+- The Help menu is now the last menu.
+
 ## 1.7.0 — 2026-09-30
 
 ### New
