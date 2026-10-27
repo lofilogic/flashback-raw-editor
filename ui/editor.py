@@ -2027,8 +2027,8 @@ class FlashbackEditor(QMainWindow):
         log.info("✓ Thumbnail generation complete!")
         self.thumbnail_strip.container.setUpdatesEnabled(True)
         if self.thumbnail_worker:
-            # `finished` is emitted from inside run(); wait for run() to return
-            # before deleteLater, or Qt aborts.
+            # Wait until the thread has fully stopped before deleteLater, or Qt
+            # aborts.
             self.thumbnail_worker.wait()
             self.thumbnail_worker.deleteLater()
             self.thumbnail_worker = None

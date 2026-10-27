@@ -80,22 +80,38 @@ class _RenderArena:
     def active(self) -> bool:
         return self._state().active
 
-    def begin(self):
-        """Open a render scope. Reentrant; the outermost call rewinds."""
+    def begin(self, serialize=None):
+        """Open a render scope. Reentrant; the outermost call rewinds.
+
+        ``serialize`` is a lock held until the outermost end(), so only one
+        thread renders at a time."""
         s = self._state()
+        if s.depth == 0 and serialize is not None:
+            serialize.acquire()
+            s.lock = serialize
         s.depth += 1
         if s.depth == 1:
             s.active = True
             s.tex_idx = {}
             s.uni_idx = {}
 
-    def end(self):
-        """Close a render scope. Call after the result has been read back."""
+    def end(self, free_all=False):
+        """Close a render scope. Call after the result has been read back.
+        ``free_all`` frees every pool instead of only the unused ones."""
         s = self._state()
         s.depth = max(0, s.depth - 1)
         if s.depth == 0:
             s.active = False
-            self._evict_unused(s)
+            try:
+                if free_all:
+                    s.tex_idx = {}
+                    s.uni_idx = {}
+                self._evict_unused(s)
+            finally:
+                lock = getattr(s, 'lock', None)
+                if lock is not None:
+                    s.lock = None
+                    lock.release()
 
     def _evict_unused(self, s):
         """Free pools the last render didn't use.
@@ -193,6 +209,11 @@ class GPUPipeline:
         self.adapter_summary = None
         self.is_software_adapter = False
         self.init_failed = False
+        # Low-memory mode: renders are serialized and keep no pools, so at
+        # most one render's textures exist. Set at init for integrated GPUs
+        # (not Apple's unified memory) or after the first out-of-memory error.
+        self.low_memory = False
+        self._render_lock = threading.Lock()
 
     @property
     def _lut_buf(self):
@@ -246,11 +267,23 @@ class GPUPipeline:
 
     def begin_render(self):
         """Allocate from the arena until end_render (see run_resident)."""
-        self._arena.begin()
+        self._arena.begin(self._render_lock if self.low_memory else None)
 
     def end_render(self):
         """Call after the result has been read back."""
-        self._arena.end()
+        self._arena.end(free_all=self.low_memory)
+
+    def note_oom(self, exc) -> bool:
+        """True if ``exc`` is a GPU out-of-memory error; switches to
+        low-memory mode."""
+        msg = str(exc).lower()
+        if not ((_WGPU_AVAILABLE and isinstance(exc, wgpu.GPUOutOfMemoryError))
+                or 'not enough memory' in msg or 'out of memory' in msg):
+            return False
+        if not self.low_memory:
+            log.warning("[gpu] out of GPU memory, switching to low-memory mode")
+            self.low_memory = True
+        return True
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -295,6 +328,11 @@ class GPUPipeline:
             self._device = adapter.request_device_sync()
             self._build_pipelines()
             self.init_failed = False
+            if _LOW_MEMORY_ENV or (adapter_type == 'integratedgpu'
+                                   and str(info.get('backend_type', '')).lower() != 'metal'):
+                self.low_memory = True
+                log.info("[gpu] low-memory mode (integrated GPU)" if not _LOW_MEMORY_ENV
+                         else "[gpu] low-memory mode (LOFILOGIC_LOW_GPU_MEMORY)")
             if self.is_software_adapter:
                 log.warning(
                     "⚠ GPU pipeline bound to a SOFTWARE adapter (%s, backend=%s) — "
@@ -305,6 +343,12 @@ class GPUPipeline:
                 log.info("✓ GPU pipeline ready: %s (type=%s, backend=%s)",
                          self.adapter_summary, info.get('adapter_type', '?'),
                          info.get('backend_type', '?'))
+            # Shows whether a dedicated GPU was there but not picked.
+            try:
+                summaries = [a.summary for a in wgpu.gpu.enumerate_adapters_sync()]
+                log.info("[gpu] adapters: %s", "; ".join(summaries) or "none")
+            except Exception:
+                log.info("[gpu] could not list adapters", exc_info=True)
             return True
         except Exception as e:
             log.warning("⚠ GPU init failed (%s), using CPU fallbacks", e)
@@ -1280,4 +1324,5 @@ class Frame:
 gpu = GPUPipeline()
 # LOFILOGIC_FORCE_CPU=1 uses the numpy paths even when wgpu is available.
 _FORCE_CPU = os.environ.get('LOFILOGIC_FORCE_CPU', '').lower() in ('1', 'true', 'yes')
+_LOW_MEMORY_ENV = os.environ.get('LOFILOGIC_LOW_GPU_MEMORY', '').lower() in ('1', 'true', 'yes')
 HAS_GPU = _WGPU_AVAILABLE and not _FORCE_CPU

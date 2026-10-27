@@ -207,7 +207,11 @@ def _halation_glow(img_f, gray, threshold, size, tint, kind, k=20.0):
     mask = gaussian_blur(mask, 2.0)
     mask_3d = np.stack([mask, mask, mask], axis=2)
     highlights = img_f * mask_3d * np.asarray(tint, dtype=np.float32)
-    return disc_blur(highlights, size) if kind == 'disc' else exp_blur(highlights, size)
+    # Blurred at half resolution, like the GPU version.
+    h, w = highlights.shape[:2]
+    small = cv2.resize(highlights, (max(4, w // 2), max(4, h // 2)), interpolation=cv2.INTER_AREA)
+    small = disc_blur(small, size * 0.5) if kind == 'disc' else exp_blur(small, size * 0.5)
+    return cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
 
 
 def apply_halation(img, threshold=0.65, blur_radius=HALATION_BLUR_RADIUS, strength=0.5,
@@ -217,12 +221,12 @@ def apply_halation(img, threshold=0.65, blur_radius=HALATION_BLUR_RADIUS, streng
 
     img_f = img.astype(np.float32)
 
-    # The GPU version blurs at half resolution, so it only approximates the
-    # CPU path below (within a code value; the glow is low-frequency).
-    if HAS_GPU:
+    # Both paths blur the glow at half resolution; they agree within a couple
+    # of code values.
+    for attempt in range(2 if HAS_GPU else 0):
         try:
             # Use the arena so repeated loads reuse textures. Read back before
-            # end_render.
+            # end_render, which also frees this thread's pools before a retry.
             gpu.begin_render()
             try:
                 res = gpu.halation_frame(Frame.from_cpu(img_f), threshold, blur_radius, strength, warmth_pct)
@@ -232,12 +236,17 @@ def apply_halation(img, threshold=0.65, blur_radius=HALATION_BLUR_RADIUS, streng
             if out is not None:
                 _timing_print(f"    [Halation] Total (resident): {(time.time()-start_total)*1000:.2f}ms")
                 return out
-        except Exception:
+            break
+        except Exception as e:
+            # Out of GPU memory: retry once in low-memory mode.
+            if attempt == 0 and gpu.note_oom(e):
+                continue
             # Fall back to the CPU; log once.
             global _resident_halation_warned
             if not _resident_halation_warned:
                 _resident_halation_warned = True
                 log.warning("⚠ resident halation failed; using per-op fallback", exc_info=True)
+            break
 
     gray = np.max(img_f, axis=2)
 

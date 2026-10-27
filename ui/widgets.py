@@ -48,7 +48,6 @@ class ThumbnailWorker(QThread):
 
     progress = Signal(int, int)            # current, total
     thumbnail_ready = Signal(int, object, object, bool)  # index, thumb_array, intermediate, is_flashback
-    finished = Signal()
     error = Signal(int, str)               # index, error_message
 
     def __init__(self, image_files, processor_lut, export_sources=None,
@@ -129,7 +128,6 @@ class ThumbnailWorker(QThread):
         _timing_print(f"\n✓ Thumbnails complete! {total} images in {total_time:.1f}s (avg: {total_time/total*1000:.0f}ms per image)\n")
 
         del processor
-        self.finished.emit()
 
 
 # =============================================================================
@@ -212,7 +210,6 @@ class VibeRefreshWorker(QThread):
     cache taken on the main thread."""
 
     thumbnail_ready = Signal(int, object)  # index, thumb_array
-    finished = Signal()
 
     def __init__(self, image_files, cache_snapshot, image_settings,
                  current_index, lut, grain_tiles, default_settings, vibe,
@@ -263,8 +260,6 @@ class VibeRefreshWorker(QThread):
                     self.thumbnail_ready.emit(idx, thumb)
             except Exception as e:
                 log.error("  ✗ Vibe refresh thumbnail %d: %s", idx, e)
-
-        self.finished.emit()
 
     def stop(self):
         self._is_running = False

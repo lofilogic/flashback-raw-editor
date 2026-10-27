@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.7.2 — 2026-10-27
+
+### Fixes
+- On integrated graphics (e.g. Intel UHD), loading several large raws could run out of
+  GPU memory: the first image loaded, the rest failed with "Failed to load image".
+  Integrated GPUs now use less GPU memory, and if the GPU still runs out, the app
+  switches to a low-memory mode or falls back to the CPU for that image instead of
+  failing.
+
+### Under the hood
+- Without a GPU, halation is blurred at half resolution like on the GPU, about 4×
+  faster.
+- The log lists all graphics adapters at startup, to show if a dedicated GPU wasn't
+  picked.
+- The log said "Thumbnail generation complete!" twice per load.
+- `LOFILOGIC_LOW_GPU_MEMORY=1` forces the low-memory mode, for testing.
+
 ## 1.7.1 — 2026-10-23
 
 Makes problems easier to report.

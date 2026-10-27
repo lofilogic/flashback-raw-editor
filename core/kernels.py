@@ -2,33 +2,57 @@
 Image operations that use the GPU when available and numpy/cv2 otherwise.
 """
 from __future__ import annotations
+import logging
+
 import numpy as np
 import cv2
 
 from .gpu import gpu, HAS_GPU, Frame
+
+log = logging.getLogger(__name__)
+_failed_ops = set()
+
+
+def _try_gpu(fn, *args):
+    """fn(*args), or None if it raises, so the caller falls back to the CPU.
+    Logs the first failure of each op."""
+    try:
+        return fn(*args)
+    except Exception as e:
+        gpu.note_oom(e)
+        if fn.__name__ not in _failed_ops:
+            _failed_ops.add(fn.__name__)
+            log.warning("[gpu] %s failed, using the CPU", fn.__name__, exc_info=True)
+        return None
 
 
 def run_resident(img: np.ndarray, stages) -> np.ndarray | None:
     """Run Frame -> Frame stages on the GPU with one upload and one readback.
 
     Returns None if there's no GPU, a stage returns None, or anything raises,
-    so the caller can fall back to the CPU.
+    so the caller can fall back to the CPU. Out of GPU memory, it retries
+    once in low-memory mode.
     """
     if not HAS_GPU:
         return None
-    # Read back inside the render scope, while the arena textures are valid.
-    gpu.begin_render()
-    try:
-        frame = Frame.from_cpu(img)
-        for stage in stages:
-            frame = stage(frame)
-            if frame is None:
-                return None
-        return frame.cpu()
-    except Exception:
-        return None
-    finally:
-        gpu.end_render()
+    for attempt in range(2):
+        # Read back inside the render scope, while the arena textures are valid.
+        gpu.begin_render()
+        try:
+            frame = Frame.from_cpu(img)
+            for stage in stages:
+                frame = stage(frame)
+                if frame is None:
+                    return None
+            return frame.cpu()
+        except Exception as e:
+            # end_render frees this thread's pools before the retry.
+            if attempt == 0 and gpu.note_oom(e):
+                continue
+            return None
+        finally:
+            gpu.end_render()
+    return None
 
 
 # Below this numpy is as fast once the transfers are counted (break-even
@@ -39,7 +63,7 @@ _GPU_MATMUL_MIN_PIXELS = 8_000_000
 def color_transform(img: np.ndarray, M: np.ndarray) -> np.ndarray:
     """img @ M.T per pixel. GPU only for large images."""
     if HAS_GPU and img.size // 3 >= _GPU_MATMUL_MIN_PIXELS:
-        result = gpu.color_transform(img, M)
+        result = _try_gpu(gpu.color_transform, img, M)
         if result is not None:
             return result
     return (img.reshape(-1, 3) @ M.T).reshape(img.shape).astype(np.float32)
@@ -57,7 +81,7 @@ def encode_then_lut(img: np.ndarray) -> np.ndarray | None:
 def acescct_decode(img: np.ndarray) -> np.ndarray:
     """ACEScct log → linear ACEScg (AP1, D60)."""
     if HAS_GPU:
-        result = gpu.acescct_decode(img)
+        result = _try_gpu(gpu.acescct_decode, img)
         if result is not None:
             return result
     flat = img.ravel().astype(np.float32)
@@ -71,7 +95,7 @@ def acescct_decode(img: np.ndarray) -> np.ndarray:
 def acescct_encode(img: np.ndarray) -> np.ndarray:
     """Linear ACEScg (AP1, D60) → ACEScct log."""
     if HAS_GPU:
-        result = gpu.acescct_encode(img)
+        result = _try_gpu(gpu.acescct_encode, img)
         if result is not None:
             return result
     flat = np.maximum(img.ravel(), 1e-10).astype(np.float32)
@@ -90,7 +114,7 @@ def apply_lut_gpu(img: np.ndarray) -> np.ndarray | None:
     """Apply the uploaded LUT, or None without a GPU."""
     if not HAS_GPU:
         return None
-    return gpu.apply_lut(img)
+    return _try_gpu(gpu.apply_lut, img)
 
 def apply_lut_cpu(img: np.ndarray, lut_table: np.ndarray) -> np.ndarray:
     """Trilinear LUT."""
@@ -131,7 +155,7 @@ def apply_grain(image: np.ndarray, grain_layer: np.ndarray,
                 highlight_bias: float = 0.0) -> np.ndarray:
     """Grain blend with luma-based highlight bias."""
     if HAS_GPU:
-        result = gpu.grain_blend(image, grain_layer, intensity, min_grain, highlight_bias)
+        result = _try_gpu(gpu.grain_blend, image, grain_layer, intensity, min_grain, highlight_bias)
         if result is not None:
             return result
     grain_delta = (2.0 * grain_layer - 1.0) * intensity
@@ -146,7 +170,7 @@ def apply_grain(image: np.ndarray, grain_layer: np.ndarray,
 def unsharp_mask(image: np.ndarray, blurred: np.ndarray, strength: float) -> np.ndarray:
     """Unsharp mask: image + (image - blurred) * strength."""
     if HAS_GPU:
-        result = gpu.unsharp_mask(image, blurred, strength)
+        result = _try_gpu(gpu.unsharp_mask, image, blurred, strength)
         if result is not None:
             return result
     return (image + (image - blurred) * strength).astype(np.float32)
@@ -160,7 +184,7 @@ def gaussian_blur(img: np.ndarray, sigma: float) -> np.ndarray:
     if sigma <= 0:
         return img.copy()
     if HAS_GPU:
-        result = gpu.gaussian_blur(img, sigma)
+        result = _try_gpu(gpu.gaussian_blur, img, sigma)
         if result is not None:
             return result
     return cv2.GaussianBlur(img, (0, 0), sigmaX=sigma, sigmaY=sigma)

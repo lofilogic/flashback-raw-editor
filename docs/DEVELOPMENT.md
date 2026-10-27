@@ -23,6 +23,7 @@ Without a working GPU the app falls back to a slow CPU path and shows a "GPU not
   name.
 - `LOFILOGIC_DEBUG_TIMING=1 python main.py` prints per-stage render timings.
 - `LOFILOGIC_FORCE_CPU=1` uses the CPU path even with a GPU.
+- `LOFILOGIC_LOW_GPU_MEMORY=1` forces low-memory mode, as on integrated GPUs.
 
 ## UI styling
 

@@ -124,9 +124,8 @@ def test_blur_frame_matches_buffer_blur(img):
 
 @requires_gpu
 def test_halation_frame_approximates_per_op():
-    """GPU halation blurs at half resolution, so it only approximates the CPU
-    version. The disc's hard rim is where they differ most: ~0.04 in linear
-    ACEScg on this synthetic image, under a code value on real ones."""
+    """Both versions blur the glow at half resolution; resampling and blur
+    kernels differ slightly (~2e-3 in linear ACEScg on this image)."""
     from core import effects
     rng = np.random.default_rng(5)
     img = rng.random((40, 60, 3), dtype=np.float32) * 0.5
@@ -142,7 +141,7 @@ def test_halation_frame_approximates_per_op():
     finally:
         gpu.halation_frame = saved
 
-    assert max_abs_err(resident, ref) <= 0.06
+    assert max_abs_err(resident, ref) <= 5e-3
 
 
 # --- post-LUT resident tail stages vs their per-op oracles ------------------
@@ -478,6 +477,141 @@ def test_dirty_arena_parity():
     assert after_dirty is not None
     # Same input and math, so it must match exactly.
     assert max_abs_err(after_dirty, clean) <= 1e-6
+
+
+# --- low-memory mode and out-of-memory fallback ------------------------------
+
+class _FakeOOM(Exception):
+    def __init__(self):
+        super().__init__("In wgpuDeviceCreateTexture Not enough memory left.")
+
+
+@pytest.fixture
+def low_memory_reset():
+    saved = gpu.low_memory
+    yield
+    gpu.low_memory = saved
+
+
+def test_arena_serialize_lock_holds_until_outermost_end():
+    import threading
+    from core.gpu import _RenderArena
+    arena, lock = _RenderArena(), threading.Lock()
+    arena.begin(lock)
+    arena.begin(lock)                  # nested: doesn't re-acquire
+    arena.end()
+    assert lock.locked()
+    other_entered = threading.Event()
+
+    def other():
+        arena.begin(lock)
+        other_entered.set()
+        arena.end()
+
+    t = threading.Thread(target=other)
+    t.start()
+    assert not other_entered.wait(0.2)  # blocked while this thread renders
+    arena.end()
+    assert other_entered.wait(2.0)
+    t.join()
+    assert not lock.locked()
+
+
+@requires_gpu
+def test_low_memory_frees_pools(low_memory_reset):
+    gpu.low_memory = True
+    gpu.begin_render()
+    try:
+        gpu._create_tex((32, 48, 3))
+    finally:
+        gpu.end_render()
+    s = gpu._arena._state()
+    assert not s.tex_pools and not s.uni_pools
+    assert not gpu._render_lock.locked()
+
+
+@requires_gpu
+def test_low_memory_parity(low_memory_reset):
+    """Low-memory mode only changes allocation, not results."""
+    from core.kernels import run_resident
+    gpu.upload_lut(_smooth_lut())
+    rng = np.random.default_rng(7)
+    img = (rng.random((64, 96, 3), dtype=np.float32) * 0.5).astype(np.float32)
+    img[20:32, 30:50, :] += 3.0
+    chain = [lambda f: gpu.bloom_frame(f, 0.3, 0.55), gpu.encode_frame, gpu.lut_frame,
+             lambda f: gpu.softness_frame(f, 2.0)]
+    gpu.low_memory = False
+    pooled = run_resident(img, chain)
+    gpu.low_memory = True
+    freed = run_resident(img, chain)
+    again = run_resident(img, chain)
+    assert max_abs_err(freed, pooled) <= 1e-6
+    assert max_abs_err(again, pooled) <= 1e-6
+
+
+@requires_gpu
+def test_resident_retries_once_after_oom(low_memory_reset):
+    from core.kernels import run_resident
+    gpu.low_memory = False
+    img = np.full((16, 24, 3), 0.2, dtype=np.float32)
+    calls = []
+
+    def flaky(f):
+        calls.append(1)
+        if len(calls) == 1:
+            raise _FakeOOM()
+        return gpu.encode_frame(f)
+
+    out = run_resident(img, [flaky])
+    assert out is not None and len(calls) == 2
+    assert gpu.low_memory
+    assert not gpu._render_lock.locked()
+
+
+@requires_gpu
+def test_resident_gives_up_after_second_oom(low_memory_reset):
+    from core.kernels import run_resident
+
+    def always(f):
+        raise _FakeOOM()
+
+    assert run_resident(np.zeros((8, 8, 3), np.float32), [always]) is None
+    assert not gpu._render_lock.locked()
+
+
+@requires_gpu
+def test_per_op_falls_back_to_cpu_on_oom(img, low_memory_reset, monkeypatch):
+    from core import kernels
+    ref = kernels.acescct_encode(img)
+
+    def oom(*a):
+        raise _FakeOOM()
+    oom.__name__ = 'acescct_encode'
+    monkeypatch.setattr(gpu, 'acescct_encode', oom)
+    out = kernels.acescct_encode(img)
+    assert max_abs_err(out, ref) <= 1e-5
+    assert gpu.low_memory
+
+
+@requires_gpu
+def test_halation_retries_after_oom(low_memory_reset, monkeypatch):
+    from core import effects
+    rng = np.random.default_rng(5)
+    img = rng.random((40, 60, 3), dtype=np.float32) * 0.5
+    img[10:20, 15:30, :] += 2.5
+    ref = effects.apply_halation(img, 0.65, 4.0, 0.5)
+
+    real, calls = gpu.halation_frame, []
+
+    def flaky(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise _FakeOOM()
+        return real(*a, **k)
+    monkeypatch.setattr(gpu, 'halation_frame', flaky)
+    out = effects.apply_halation(img, 0.65, 4.0, 0.5)
+    assert len(calls) == 2
+    assert max_abs_err(out, ref) <= 1e-6
 
 
 # --- the parity gate itself --------------------------------------------------

@@ -133,6 +133,9 @@ See [`core/gpu.py`](../core/gpu.py) and [`core/kernels.py`](../core/kernels.py).
 - **`_RenderArena`** reuses textures and uniform buffers between renders; allocating them every
   frame was the biggest interactive cost. It's per thread because the preview and thumbnail
   workers render at the same time.
+- **Low-memory mode** keeps no pools and runs one render at a time, so at most one render's
+  textures exist. It's on for integrated GPUs except Apple's, and switches on after the first
+  out-of-memory error. The failed render retries once, then falls back to the CPU.
 - **Every GPU stage has a numpy/cv2 version**, used as the fallback without a GPU and as the
   reference in the tests.
 - Without a usable GPU (none, or a software adapter like WARP or lavapipe) the app shows a
