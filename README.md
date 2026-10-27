@@ -119,9 +119,9 @@ Grab the latest build for your platform from the [**Releases**](../../releases/l
 
 | Platform | File | Status |
 |----------|------|--------|
-| macOS (Apple Silicon) | [`LoFiLogic-macOS-1.7.1.dmg`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v1.7.1/LoFiLogic-macOS-1.7.1.dmg) | ✓ Tested |
-| Windows (x64) | [`LoFiLogic-Windows-Setup-1.7.1.exe`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v1.7.1/LoFiLogic-Windows-Setup-1.7.1.exe) | ✓ Tested |
-| Linux (x86_64) | [`LoFiLogic-1.7.1-x86_64.AppImage`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v1.7.1/LoFiLogic-1.7.1-x86_64.AppImage) | ⚠ Community-tested |
+| macOS (Apple Silicon) | [`LoFiLogic-macOS-1.7.2.dmg`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v1.7.2/LoFiLogic-macOS-1.7.2.dmg) | ✓ Tested |
+| Windows (x64) | [`LoFiLogic-Windows-Setup-1.7.2.exe`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v1.7.2/LoFiLogic-Windows-Setup-1.7.2.exe) | ✓ Tested |
+| Linux (x86_64) | [`LoFiLogic-1.7.2-x86_64.AppImage`](https://github.com/lofilogic/flashback-raw-editor/releases/download/v1.7.2/LoFiLogic-1.7.2-x86_64.AppImage) | ⚠ Community-tested |
 
 The apps aren't code-signed yet, so each OS warns on first launch. One-time steps:
 
@@ -147,14 +147,14 @@ The apps aren't code-signed yet, so each OS warns on first launch. One-time step
 <summary><b>Linux</b></summary>
 
 ```bash
-chmod +x LoFiLogic-1.7.1-x86_64.AppImage
-./LoFiLogic-1.7.1-x86_64.AppImage
+chmod +x LoFiLogic-1.7.2-x86_64.AppImage
+./LoFiLogic-1.7.2-x86_64.AppImage
 ```
 
 FUSE error? Install it (`sudo apt install libfuse2`) or extract and run:
 
 ```bash
-./LoFiLogic-1.7.1-x86_64.AppImage --appimage-extract
+./LoFiLogic-1.7.2-x86_64.AppImage --appimage-extract
 ./squashfs-root/AppRun
 ```
 
